@@ -36,7 +36,7 @@ The plugin is a DSH bundle. Install it into a profile with the official CLI:
 dsh plugin --profile <name> add github:modouai/dsh-pr-review-plugin
 ```
 
-Point the install at a tag or commit (`…#<tag-or-sha>`) to pin what actually runs. To install a local checkout instead, pass its path: `dsh plugin --profile <name> add ./dsh-pr-review-plugin` (run `pnpm install` inside the checkout first — a linked checkout keeps its own `node_modules`).
+Point the install at a tag or commit (`…#<tag-or-sha>`) to pin what actually runs. The package is also published to npm, so `dsh plugin --profile <name> add @modouai/dsh-pr-review` works by name. To install a local checkout instead, pass its path: `dsh plugin --profile <name> add ./dsh-pr-review-plugin` (run `pnpm install` inside the checkout first — a linked checkout keeps its own `node_modules`).
 
 Verify the layer before starting, then restart Harness:
 

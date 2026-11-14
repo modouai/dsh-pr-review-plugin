@@ -1,7 +1,6 @@
 {
   "name": "@modouai/dsh-pr-review",
   "version": "0.2.0",
-  "private": true,
   "type": "module",
   "main": "index.js",
   "description": "Review GitHub and Gitea/Forgejo pull requests from the DeepSeek Harness Web UI: automatic rounds, per-file analysis, conclusion history, and chat-integrated review tools.",
@@ -49,7 +48,8 @@
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "README.zh-CN.md"
   ],
   "dsh": {
     "bundle": {

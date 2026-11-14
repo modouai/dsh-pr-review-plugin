@@ -36,7 +36,7 @@
 dsh plugin --profile <name> add github:modouai/dsh-pr-review-plugin
 ```
 
-需要锁定实际运行的代码时，在地址后加 tag 或 commit（`…#<tag-or-sha>`）。安装本地 checkout 则传路径：`dsh plugin --profile <name> add ./dsh-pr-review-plugin`（先在 checkout 里执行 `pnpm install`，链接安装保留各自独立的 `node_modules`）。
+需要锁定实际运行的代码时，在地址后加 tag 或 commit（`…#<tag-or-sha>`）。包已发布到 npm，也可以按包名安装：`dsh plugin --profile <name> add @modouai/dsh-pr-review`。安装本地 checkout 则传路径：`dsh plugin --profile <name> add ./dsh-pr-review-plugin`（先在 checkout 里执行 `pnpm install`，链接安装保留各自独立的 `node_modules`）。
 
 启动前先验证层，再重启 Harness：
 
