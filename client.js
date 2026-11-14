@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: '@local/dsh-pr-review',
+  id: '@modouai/dsh-pr-review',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -4509,7 +4509,7 @@ window.__ModuleLoader__.load({
     }
 
     /** Right-sidebar tab type identity (the key its body registers under) and the entry id. */
-    const SIDEBAR_TYPE_ID = '@local/dsh-pr-review/panel';
+    const SIDEBAR_TYPE_ID = '@modouai/dsh-pr-review/panel';
     const SIDEBAR_ENTRY_ID = 'pr-review-panel';
 
     /** Right-sidebar resource address for one review panel: cwd (+ optional PR number). */

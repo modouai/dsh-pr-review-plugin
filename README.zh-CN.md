@@ -41,7 +41,7 @@ dsh plugin --profile <name> add github:modouai/dsh-pr-review-plugin
 启动前先验证层，再重启 Harness：
 
 ```sh
-dsh --profile <name> --dump-config   # 应出现 "# == @local/dsh-pr-review" 层
+dsh --profile <name> --dump-config   # 应出现 "# == @modouai/dsh-pr-review" 层
 dsh --profile <name>
 ```
 

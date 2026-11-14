@@ -1,6 +1,6 @@
 - insert:
     - id: pr-review
-      name: '@local/dsh-pr-review'
+      name: '@modouai/dsh-pr-review'
       config:
         # 必填或留空：留空时按会话工作区的 git origin 自动识别；固定仓库时在此填写
         # platform：github，或 gitea / forgejo（同一 API，二者等价）

@@ -1,6 +1,6 @@
 {
-  "name": "@local/dsh-pr-review",
-  "version": "0.1.0",
+  "name": "@modouai/dsh-pr-review",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "index.js",

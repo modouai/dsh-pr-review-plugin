@@ -41,7 +41,7 @@ Point the install at a tag or commit (`…#<tag-or-sha>`) to pin what actually r
 Verify the layer before starting, then restart Harness:
 
 ```sh
-dsh --profile <name> --dump-config   # shows a "# == @local/dsh-pr-review" layer
+dsh --profile <name> --dump-config   # shows a "# == @modouai/dsh-pr-review" layer
 dsh --profile <name>
 ```
 
