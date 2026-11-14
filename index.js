@@ -60,18 +60,19 @@ const PREFIX = '/pr-review-api';
 
 const DEFAULTS = {
   platform: 'forgejo',
-  // Empty by default: a workspace session resolves its own git origin, and installs that want a
-  // fixed repository set these in the profile's cordis.patch.yml.
+  // Empty by default: a workspace session resolves its own git origin. These values are the
+  // fallback used before a workspace is recognized, or when the workspace is not a git repo.
   baseUrl: '',
   repo: '',
   token: '',
+  organizationId: '',
+  projectId: '',
   pollSeconds: 60,
   autoReview: true,
   provider: '',
   model: '',
   reasoningEffort: 'off',
   maxDiffCharsPerFile: 14000,
-  maxFilesPerReview: 60,
   commentLanguage: 'zh',
   autoReconclude: false,
 };
@@ -89,17 +90,18 @@ const MAX_REVIEWS = 50;
  * Field defaults live in DEFAULTS and are referenced here, so the values have one source.
  */
 export const Config = Schema.object({
-  platform: Schema.union(['github', 'gitea', 'forgejo']).default(DEFAULTS.platform),
+  platform: Schema.union(['github', 'gitea', 'forgejo', 'gitlab', 'gitee', 'gitcode', 'atomgit', 'codeup']).default(DEFAULTS.platform),
   baseUrl: Schema.string().default(DEFAULTS.baseUrl),
   repo: Schema.string().default(DEFAULTS.repo),
   token: Schema.string().default(DEFAULTS.token),
+  organizationId: Schema.string().default(DEFAULTS.organizationId),
+  projectId: Schema.string().default(DEFAULTS.projectId),
   pollSeconds: Schema.number().min(15).default(DEFAULTS.pollSeconds),
   autoReview: Schema.boolean().default(DEFAULTS.autoReview),
   provider: Schema.string().default(DEFAULTS.provider),
   model: Schema.string().default(DEFAULTS.model),
   reasoningEffort: Schema.union(['off', 'low', 'high', 'max']).default(DEFAULTS.reasoningEffort),
   maxDiffCharsPerFile: Schema.number().min(1000).default(DEFAULTS.maxDiffCharsPerFile),
-  maxFilesPerReview: Schema.number().min(1).default(DEFAULTS.maxFilesPerReview),
   commentLanguage: Schema.union(['zh', 'en']).default(DEFAULTS.commentLanguage),
   autoReconclude: Schema.boolean().default(DEFAULTS.autoReconclude),
 });
@@ -564,6 +566,30 @@ export function apply(ctx, config) {
     return startConclude(record).ok === true;
   }
 
+  /** Map an origin host to the platform whose API it speaks. */
+  function platformForHost(host) {
+    const value = String(host ?? '').toLowerCase();
+    if (value === 'github.com') return 'github';
+    if (value === 'gitlab.com') return 'gitlab';
+    if (value === 'gitee.com') return 'gitee';
+    if (value === 'gitcode.com' || value === 'gitcode.net') return 'gitcode';
+    if (value === 'atomgit.com') return 'atomgit';
+    if (value === 'codeup.aliyun.com') return 'codeup';
+    return 'forgejo';
+  }
+
+  /** Default API base for one origin; self-hosted GitLab/Gitea reuse the origin host. */
+  function baseUrlForPlatform(platform, host) {
+    switch (platform) {
+      case 'github': return 'https://api.github.com';
+      case 'gitee': return `https://${host}/api/v5`;
+      case 'gitcode': return 'https://api.gitcode.com/api/v5';
+      case 'atomgit': return 'https://api.atomgit.com/api/v5';
+      case 'codeup': return 'https://openapi-rdc.aliyuncs.com';
+      default: return `https://${host}`;
+    }
+  }
+
   /** Parse a git remote URL into a reviewable repository description. */
   function parseRemote(remote) {
     const value = String(remote ?? '').trim();
@@ -582,12 +608,13 @@ export function apply(ctx, config) {
     }
     if (host === '' || pathname === '') return null;
     const repo = pathname.replace(/^\.git$/, '').replace(/\.git$/, '').replace(/^\/+/, '');
-    if (!/^[^/]+\/[^/]+$/.test(repo)) return null;
-    const platform = /(^|\.)github\.com$/i.test(host) ? 'github' : 'forgejo';
+    // GitLab subgroups and Codeup group paths have more than two segments.
+    if (!/^[^/]+\/.+$/.test(repo)) return null;
+    const platform = platformForHost(host);
     return {
       platform,
       repo,
-      baseUrl: platform === 'github' ? 'https://api.github.com' : `https://${host}`,
+      baseUrl: baseUrlForPlatform(platform, host),
     };
   }
 
@@ -922,15 +949,33 @@ export function apply(ctx, config) {
 
   // ---------- provider client ----------
 
+  /** One actionable message per platform when no token can be found. */
+  function missingTokenMessage(platform) {
+    switch (platform) {
+      case 'github':
+        return '缺少 GitHub token：请在插件配置填写 token，或设置 GITHUB_TOKEN / GH_TOKEN，或先 `gh auth login`。';
+      case 'gitlab':
+        return '缺少 GitLab token：请在插件配置填写 token，或设置 GITLAB_TOKEN。';
+      case 'gitee':
+        return '缺少 Gitee token：请在插件配置填写 token，或设置 GITEE_TOKEN。';
+      case 'gitcode':
+        return '缺少 GitCode token：请在插件配置填写 token，或设置 GITCODE_TOKEN / GITEE_TOKEN。';
+      case 'atomgit':
+        return '缺少 AtomGit token：请在插件配置填写 token，或设置 ATOMGIT_TOKEN / GITEE_TOKEN。';
+      case 'codeup':
+        return '缺少 Codeup token：请在插件配置填写 token，或设置 CODEUP_TOKEN / YUNXIAO_TOKEN。';
+      default:
+        return '缺少 Gitea / Forgejo token：请在插件配置填写 token，或设置 GITEA_TOKEN / FORGEJO_TOKEN，或先 `tea login`。';
+    }
+  }
+
   async function ensureClient() {
     if (state.client !== null) return state.client;
     const token = await resolveToken(settings, provider);
     if (token === null || token === undefined) {
       state.tokenMissing = true;
       throw new HarnessError(
-        provider.platform === 'github'
-          ? '缺少 GitHub token：请在插件配置填写 token，或设置 GITHUB_TOKEN / GH_TOKEN，或先 `gh auth login`。'
-          : '缺少 Gitea / Forgejo token：请在插件配置填写 token，或设置 GITEA_TOKEN / FORGEJO_TOKEN，或先 `tea login`。',
+        missingTokenMessage(provider.platform),
         'MISSING_CREDENTIAL',
       );
     }

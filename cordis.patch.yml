@@ -2,18 +2,22 @@
     - id: pr-review
       name: '@modouai/dsh-pr-review'
       config:
-        # 必填或留空：留空时按会话工作区的 git origin 自动识别；固定仓库时在此填写
-        # platform：github，或 gitea / forgejo（同一 API，二者等价）
+        # 仓库选择：会话工作区有 git origin 时以工作区为准；以下三项是识别出工作区之前的回退值，
+        # 或在非 git 工作区里使用的回退值。需要固定仓库时仍需工作区 origin 指向该仓库。
+        # platform：github / gitea / forgejo / gitlab / gitee / gitcode / atomgit / codeup
+        # （gitea 与 forgejo 同一 API，二者等价）
         platform: 'forgejo'
         baseUrl: ''
         repo: ''
         token: ''
+        # 仅 codeup 使用：organizationId 留空时取 origin 首段；projectId 留空时自动解析
+        organizationId: ''
+        projectId: ''
         pollSeconds: 60
         autoReview: true
         provider: ''
         model: ''
         reasoningEffort: 'off'
         maxDiffCharsPerFile: 14000
-        maxFilesPerReview: 60
         commentLanguage: 'zh'
         autoReconclude: false

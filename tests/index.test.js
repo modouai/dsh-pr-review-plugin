@@ -1781,7 +1781,14 @@ test('Config schema fills defaults and rejects invalid values', async () => {
   assert.equal(filled.reasoningEffort, 'off');
   assert.equal(Config({ platform: 'gitea' }).platform, 'gitea');
   assert.equal(Config({ platform: 'forgejo' }).platform, 'forgejo');
-  assert.throws(() => Config({ platform: 'gitlab' }), /platform/);
+  assert.equal(Config({ platform: 'gitlab' }).platform, 'gitlab');
+  assert.equal(Config({ platform: 'gitee' }).platform, 'gitee');
+  assert.equal(Config({ platform: 'gitcode' }).platform, 'gitcode');
+  assert.equal(Config({ platform: 'atomgit' }).platform, 'atomgit');
+  assert.equal(Config({ platform: 'codeup' }).platform, 'codeup');
+  assert.equal(Config({ platform: 'codeup' }).organizationId, '');
+  assert.equal(Config({ platform: 'codeup' }).projectId, '');
+  assert.throws(() => Config({ platform: 'bitbucket' }), /platform/);
   assert.throws(() => Config({ pollSeconds: 5 }), /pollSeconds/);
   assert.throws(() => Config({ reasoningEffort: 'ultra' }), /reasoningEffort/);
 });

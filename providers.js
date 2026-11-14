@@ -1,13 +1,14 @@
 /**
- * Platform adapters for the PR review plugin.
+ * Platform dispatch for the PR review plugin.
  *
- * Two API families are supported behind one shape:
- * - GitHub (API v3, gh CLI login as token fallback)
- * - Gitea-compatible hosts (Gitea / Forgejo / Codeberg): REST under /api/v1,
- *   tea CLI login as token fallback. Forgejo is a hard fork of Gitea and keeps
- *   the same API, so one adapter covers both names.
+ * One normalized provider description feeds one of the adapters:
+ * - GitHub (REST v3)
+ * - Gitea-compatible hosts: Gitea / Forgejo / Codeberg (`/api/v1`)
+ * - GitLab (REST v4)
+ * - Gitee-family: Gitee / GitCode / AtomGit (`/api/v5`, GitHub-shaped)
+ * - Alibaba Cloud Codeup (云效 OpenAPI)
  *
- * Callers only see the normalized pull records produced here.
+ * Callers only see the normalized pull records produced by the adapters.
  */
 
 import { execFile } from 'node:child_process';
@@ -16,10 +17,29 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
+import { MAX_PULL_FILES } from './provider-common.js';
+import { createGithubGiteaClient } from './provider-github-gitea.js';
+import { createGitLabClient } from './provider-gitlab.js';
+import { createGiteeClient } from './provider-gitee.js';
+import { createCodeupClient } from './provider-codeup.js';
+
 const execFileAsync = promisify(execFile);
 
-/** Accepted `platform` values; `gitea` and `forgejo` share one API family. */
-const PLATFORMS = new Set(['github', 'gitea', 'forgejo']);
+export { MAX_PULL_FILES };
+
+/** Accepted `platform` values; `gitea` is an alias of `forgejo`. */
+const PLATFORMS = new Set(['github', 'gitea', 'forgejo', 'gitlab', 'gitee', 'gitcode', 'atomgit', 'codeup']);
+
+/** Default API base per platform (empty means "resolve from the workspace origin"). */
+const PLATFORM_DEFAULTS = {
+  github: { baseUrl: 'https://api.github.com', label: 'GitHub' },
+  forgejo: { baseUrl: '', label: 'Gitea/Forgejo' },
+  gitlab: { baseUrl: 'https://gitlab.com', label: 'GitLab' },
+  gitee: { baseUrl: 'https://gitee.com/api/v5', label: 'Gitee' },
+  gitcode: { baseUrl: 'https://api.gitcode.com/api/v5', label: 'GitCode' },
+  atomgit: { baseUrl: 'https://api.atomgit.com/api/v5', label: 'AtomGit' },
+  codeup: { baseUrl: 'https://openapi-rdc.aliyuncs.com', label: 'Codeup' },
+};
 
 /** Normalize user config into one effective provider description. */
 export function resolveProviderConfig(config) {
@@ -27,18 +47,37 @@ export function resolveProviderConfig(config) {
   // `gitea` is an alias: keep the historical `forgejo` slug so per-platform
   // caches written before the alias existed stay readable.
   const platform = configured === 'gitea' ? 'forgejo' : configured;
+  const defaults = PLATFORM_DEFAULTS[platform];
   const rawBase = typeof config.baseUrl === 'string' && config.baseUrl.trim() !== ''
     ? config.baseUrl.trim().replace(/\/+$/, '')
-    : platform === 'github'
-      ? 'https://api.github.com'
-      : '';
+    : defaults.baseUrl;
   const repo = typeof config.repo === 'string' ? config.repo.trim() : '';
-  return {
+  const provider = {
     platform,
     baseUrl: rawBase,
     repo,
-    label: platform === 'github' ? `GitHub ${repo}` : `Gitea/Forgejo ${repo}`,
+    label: `${defaults.label} ${repo}`.trim(),
   };
+  if (platform === 'codeup') {
+    // Codeup needs the organization (first origin segment) and the repository path;
+    // both can be overridden in config. A three-segment remote (`org/group/repo`)
+    // always carries its origin organization in the first segment.
+    let organizationId = typeof config.organizationId === 'string' ? config.organizationId.trim() : '';
+    const segments = repo.split('/');
+    let repoPath = repo;
+    if (segments.length >= 3) {
+      const originOrganization = segments[0];
+      repoPath = segments.slice(1).join('/');
+      if (organizationId === '') organizationId = originOrganization;
+    } else if (segments.length === 2 && organizationId === '') {
+      organizationId = segments[0];
+      repoPath = segments[1];
+    }
+    provider.organizationId = organizationId;
+    provider.repoPath = repoPath;
+    provider.projectId = typeof config.projectId === 'string' ? config.projectId.trim() : '';
+  }
+  return provider;
 }
 
 /** Parse the token for a host out of the tea CLI config file. */
@@ -101,16 +140,25 @@ async function ghCliToken(apiHost, owner) {
   return null;
 }
 
+/** Environment variables tried per platform, in order. */
+const ENV_TOKENS = {
+  github: ['GITHUB_TOKEN', 'GH_TOKEN'],
+  forgejo: ['GITEA_TOKEN', 'FORGEJO_TOKEN', 'PR_REVIEW_TOKEN'],
+  gitlab: ['GITLAB_TOKEN', 'PR_REVIEW_TOKEN'],
+  gitee: ['GITEE_TOKEN', 'PR_REVIEW_TOKEN'],
+  gitcode: ['GITCODE_TOKEN', 'GITEE_TOKEN', 'PR_REVIEW_TOKEN'],
+  atomgit: ['ATOMGIT_TOKEN', 'GITEE_TOKEN', 'PR_REVIEW_TOKEN'],
+  codeup: ['CODEUP_TOKEN', 'YUNXIAO_TOKEN', 'PR_REVIEW_TOKEN'],
+};
+
 /** Resolve a token: explicit config, then platform env vars, then the CLI login of that platform. */
 export async function resolveToken(config, provider) {
   if (typeof config.token === 'string' && config.token.trim() !== '') return config.token.trim();
-  const envNames = provider.platform === 'github'
-    ? ['GITHUB_TOKEN', 'GH_TOKEN']
-    : ['GITEA_TOKEN', 'FORGEJO_TOKEN', 'PR_REVIEW_TOKEN'];
-  for (const name of envNames) {
+  for (const name of ENV_TOKENS[provider.platform] ?? []) {
     const value = process.env[name];
     if (typeof value === 'string' && value.trim() !== '') return value.trim();
   }
+  if (provider.platform !== 'github' && provider.platform !== 'forgejo') return null;
   const host = new URL(provider.baseUrl).host;
   try {
     if (provider.platform === 'github') {
@@ -134,204 +182,21 @@ export async function resolveToken(config, provider) {
   }
 }
 
-const MAX_PAGES = 4;
-
-/** Changed files fetched per pull request (100 per page); callers flag a full page. */
-export const MAX_PULL_FILES = MAX_PAGES * 100;
-
-/** Encode one repository file path for the contents endpoint (slashes stay). */
-function encodePath(path) {
-  return String(path).split('/').map((segment) => encodeURIComponent(segment)).join('/');
-}
-
 /** Create one authenticated client for the configured provider. */
 export function createClient(config, provider, token) {
-  const repo = provider.repo;
-  const base = provider.baseUrl;
-
-  function apiUrl(pathname) {
-    return provider.platform === 'github'
-      ? `${base}/repos/${repo}${pathname}`
-      : `${base}/api/v1/repos/${repo}${pathname}`;
+  switch (provider.platform) {
+    case 'github':
+    case 'forgejo':
+      return createGithubGiteaClient(config, provider, token);
+    case 'gitlab':
+      return createGitLabClient(config, provider, token);
+    case 'gitee':
+    case 'gitcode':
+    case 'atomgit':
+      return createGiteeClient(config, provider, token);
+    case 'codeup':
+      return createCodeupClient(config, provider, token);
+    default:
+      throw new Error(`不支持的平台：${provider.platform}`);
   }
-
-  function headers(extra) {
-    const result = {
-      authorization: `Bearer ${token}`,
-      accept: 'application/json',
-      'user-agent': 'dsh-pr-review-plugin',
-      ...extra,
-    };
-    // Forgejo accepts the same scheme but documents `token <value>`.
-    if (provider.platform === 'forgejo') result.authorization = `token ${token}`;
-    return result;
-  }
-
-  async function getJson(pathname, signal) {
-    const response = await fetch(apiUrl(pathname), { headers: headers(), signal });
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(`${provider.platform} ${pathname} 失败：HTTP ${response.status} ${text.slice(0, 300)}`);
-    }
-    return response.json();
-  }
-
-  async function getText(pathname, extraHeaders, signal) {
-    const response = await fetch(apiUrl(pathname), { headers: headers(extraHeaders), signal });
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(`${provider.platform} ${pathname} 失败：HTTP ${response.status} ${text.slice(0, 300)}`);
-    }
-    return response.text();
-  }
-
-  async function listOpenPulls(signal) {
-    // One extra entry: the host slices to its list cap and uses the overflow as a
-    // "there are older PRs" signal, without a second request.
-    const raw = await getJson('/pulls?state=open&sort=updated&per_page=21', signal);
-    return raw.map((pull) => ({
-      number: pull.number,
-      title: pull.title ?? '',
-      author: pull.user?.login ?? '',
-      updatedAt: pull.updated_at ?? '',
-      createdAt: pull.created_at ?? '',
-      headRef: pull.head?.ref ?? '',
-      headSha: pull.head?.sha ?? '',
-      baseRef: pull.base?.ref ?? '',
-      additions: pull.additions ?? 0,
-      deletions: pull.deletions ?? 0,
-      changedFiles: pull.changed_files ?? 0,
-      url: pull.html_url ?? '',
-      platform: provider.platform,
-    }));
-  }
-
-  async function pullDetail(number, signal) {
-    const pull = await getJson(`/pulls/${number}`, signal);
-    return {
-      number: pull.number,
-      title: pull.title ?? '',
-      body: pull.body ?? '',
-      author: pull.user?.login ?? '',
-      state: pull.state ?? 'open',
-      merged: pull.merged === true,
-      additions: pull.additions ?? 0,
-      deletions: pull.deletions ?? 0,
-      changedFiles: pull.changed_files ?? 0,
-      headRef: pull.head?.ref ?? '',
-      headSha: pull.head?.sha ?? '',
-      baseRef: pull.base?.ref ?? '',
-      baseSha: pull.base?.sha ?? '',
-      url: pull.html_url ?? '',
-      platform: provider.platform,
-      repo: provider.repo,
-    };
-  }
-
-  async function pullFiles(number, signal) {
-    const files = [];
-    for (let page = 1; page <= MAX_PAGES; page += 1) {
-      const raw = await getJson(`/pulls/${number}/files?per_page=100&page=${page}`, signal);
-      if (!Array.isArray(raw) || raw.length === 0) break;
-      for (const file of raw) {
-        files.push({
-          path: file.filename ?? '',
-          previousPath: file.previous_filename ?? '',
-          status: file.status ?? 'changed',
-          additions: file.additions ?? 0,
-          deletions: file.deletions ?? 0,
-          changes: file.changes ?? 0,
-        });
-      }
-      if (raw.length < 100) break;
-    }
-    return files;
-  }
-
-  async function pullDiff(number, signal) {
-    if (provider.platform === 'github') {
-      return getText(`/pulls/${number}`, { accept: 'application/vnd.github.v3.diff' }, signal);
-    }
-    return getText(`/pulls/${number}.diff`, {}, signal);
-  }
-
-  /** JSON body request for write endpoints (comments). */
-  async function requestJson(method, pathname, payload, signal) {
-    const response = await fetch(apiUrl(pathname), {
-      method,
-      headers: headers({ 'content-type': 'application/json' }),
-      body: JSON.stringify(payload),
-      signal,
-    });
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(`${provider.platform} ${pathname} 失败：HTTP ${response.status} ${text.slice(0, 300)}`);
-    }
-    return response.json();
-  }
-
-  /** Human-facing fallback link for a comment when the API omits html_url. */
-  function commentUrl(number, commentId) {
-    const host = provider.platform === 'github'
-      ? `https://github.com/${repo}`
-      : `${base}/${repo}`;
-    const pathname = provider.platform === 'github' ? `/pull/${number}` : `/pulls/${number}`;
-    return `${host}${pathname}#issuecomment-${commentId}`;
-  }
-
-  /** Create one issue comment on the pull request and return its id and link. */
-  async function createComment(number, body, signal) {
-    const comment = await requestJson('POST', `/issues/${number}/comments`, { body }, signal);
-    const id = typeof comment?.id === 'number' ? comment.id : 0;
-    const url = typeof comment?.html_url === 'string' && comment.html_url !== ''
-      ? comment.html_url
-      : commentUrl(number, id);
-    return { id, url };
-  }
-
-  /**
-   * Full text of one file at a given ref (the PR head by default). Uses the
-   * contents API on both platforms, which returns base64; large files are
-   * truncated so the browser half never receives an unbounded payload.
-   */
-  async function pullFileContent(path, ref, signal) {
-    const query = ref === undefined || ref === '' ? '' : `?ref=${encodeURIComponent(ref)}`;
-    const payload = await getJson(`/contents/${encodePath(path)}${query}`, signal);
-    if (Array.isArray(payload)) throw new Error(`${path} 是目录，不是文件`);
-    if (typeof payload?.content !== 'string' || payload.encoding !== 'base64') {
-      throw new Error(`${path} 没有可读取的文本内容（二进制或超过接口上限）`);
-    }
-    const buffer = Buffer.from(payload.content, 'base64');
-    const text = buffer.toString('utf8');
-    const limit = 400_000;
-    const truncated = text.length > limit;
-    return {
-      path,
-      content: truncated ? text.slice(0, limit) : text,
-      truncated,
-      size: typeof payload.size === 'number' ? payload.size : buffer.length,
-    };
-  }
-
-  /** Issue-style comments on the pull request, oldest first (our review comment lives here). */
-  async function listIssueComments(number, signal) {
-    const raw = await getJson(`/issues/${number}/comments?per_page=100`, signal);
-    return (Array.isArray(raw) ? raw : []).map((comment) => ({
-      id: typeof comment?.id === 'number' ? comment.id : 0,
-      author: typeof comment?.user?.login === 'string' ? comment.user.login : '',
-      createdAt: typeof comment?.created_at === 'string' ? comment.created_at : '',
-      body: typeof comment?.body === 'string' ? comment.body : '',
-    }));
-  }
-
-  async function pullCommits(number, signal) {
-    const raw = await getJson(`/pulls/${number}/commits?per_page=100`, signal);
-    return raw.map((commit) => ({
-      sha: commit.sha ?? '',
-      message: String(commit.commit?.message ?? '').split('\n')[0],
-      author: commit.commit?.author?.name ?? '',
-    }));
-  }
-
-  return { listOpenPulls, pullDetail, pullFiles, pullDiff, pullCommits, createComment, pullFileContent, listIssueComments };
 }

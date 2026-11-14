@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>dsh-pr-review README mock</title>
+<style>
+  :root{
+    --bg:#fff; --bg-soft:#f7f7f8; --bg-sunken:#f2f2f4;
+    --border:#e5e5e8; --border-strong:#d6d6db;
+    --text:#1d1d1f; --muted:#6e6e73; --faint:#9a9aa0;
+    --blue:#0b6bcb; --blue-soft:#eaf3ff;
+    --green:#1a7f37; --green-soft:#e8f5ec;
+    --amber:#9a6700; --amber-soft:#fff4d6;
+    --red:#cf222e; --red-soft:#ffebe9;
+    --add:#e6ffec; --add-strong:#ccffd8; --del:#ffebe9;
+    --mono:"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--text);
+    font:12.5px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .app{display:flex;width:1800px;height:1000px;overflow:hidden;background:var(--bg)}
+  .muted{color:var(--muted)}
+  .faint{color:var(--faint)}
+  .mono{font-family:var(--mono)}
+  .tag{display:inline-flex;align-items:center;height:17px;padding:0 6px;border-radius:5px;font-size:10.5px;font-weight:600;flex:0 0 auto}
+  .tag.warn{background:var(--amber-soft);color:var(--amber)}
+  .tag.ok{background:var(--green-soft);color:var(--green)}
+  .tag.err{background:var(--red-soft);color:var(--red)}
+  .tag.info{background:var(--blue-soft);color:var(--blue)}
+  .dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto}
+  .dot.g{background:#2da44e}.dot.b{background:#2f6feb}.dot.a{background:#bf8700}.dot.k{background:#8c959f}
+
+  /* ── left chat column ─────────────────────────────────────── */
+  .chat{width:368px;flex:0 0 368px;border-right:1px solid var(--border);background:#fbfbfc;display:flex;flex-direction:column}
+  .chat-head{padding:14px 14px 10px;border-bottom:1px solid var(--border)}
+  .chrome{display:flex;align-items:center;gap:8px;margin-bottom:12px}
+  .lights{display:flex;gap:5px}
+  .lights i{width:9px;height:9px;border-radius:50%;display:block;background:#ff5f57}
+  .lights i:nth-child(2){background:#febc2e}.lights i:nth-child(3){background:#28c840}
+  .chrome-title{font-size:11px;color:var(--faint);margin-left:2px}
+  .chat-titlerow{display:flex;align-items:center;gap:8px}
+  .chat-title{font-size:14px;font-weight:650;letter-spacing:.01em}
+  .entry{margin-left:auto;display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 9px;
+    border:1px solid var(--border-strong);border-radius:8px;background:#fff;font-size:11.5px;font-weight:600;color:var(--text)}
+  .entry .n{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;
+    border-radius:999px;background:#1f2328;color:#fff;font-size:9.5px;font-weight:700}
+  .chat-body{flex:1;padding:16px 16px 8px;display:flex;flex-direction:column;gap:14px;overflow:hidden}
+  .msg{display:flex;flex-direction:column;gap:5px}
+  .msg .who{font-size:10.5px;color:var(--faint)}
+  .bubble{max-width:300px;padding:9px 11px;border-radius:12px;line-height:1.5}
+  .msg.user{align-items:flex-end}
+  .msg.user .bubble{background:#f0f1f3;border:1px solid #ececef;border-bottom-right-radius:4px}
+  .msg.ai .bubble{background:#fff;border:1px solid var(--border);border-bottom-left-radius:4px;max-width:320px}
+  .bubble b{font-weight:650}
+  .kv{display:flex;flex-direction:column;gap:2px;margin-top:6px;font-size:11.5px;color:var(--muted)}
+  .composer{margin:0 14px 14px;border:1px solid var(--border);border-radius:12px;background:#fff;padding:10px 11px 8px;box-shadow:0 1px 2px rgba(0,0,0,.03)}
+  .composer .ph{color:var(--faint);font-size:12px;margin-bottom:10px}
+  .composer .row{display:flex;align-items:center;gap:8px}
+  .chip{display:inline-flex;align-items:center;gap:5px;height:20px;padding:0 7px;border:1px solid var(--border);border-radius:6px;font-size:10.5px;color:var(--muted);background:#fafafb}
+  .composer .send{margin-left:auto;width:26px;height:26px;border-radius:50%;background:#1f2328;color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px}
+
+  /* ── review panel ─────────────────────────────────────────── */
+  .panel{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg)}
+  .panel-top{height:44px;flex:0 0 44px;display:flex;align-items:center;gap:12px;padding:0 14px;border-bottom:1px solid var(--border)}
+  .pr-title{font-size:12.5px;font-weight:650;white-space:nowrap;display:flex;align-items:center;gap:5px}
+  .pr-title .num{color:var(--muted);font-weight:600}
+  .chev{color:var(--faint);font-size:10px}
+  .rounds{display:flex;align-items:center;gap:6px;min-width:0;overflow:hidden}
+  .round{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 8px;border:1px solid transparent;border-radius:6px;
+    background:var(--bg-soft);color:var(--muted);font-size:10.5px;white-space:nowrap}
+  .round.active{background:#eef4ff;border-color:#c9dcff;color:#2456a8;font-weight:650}
+  .round .mini{font-size:9px;padding:0 4px;height:13px;border-radius:4px;background:#fff;border:1px solid var(--border);color:var(--muted)}
+  .top-actions{margin-left:auto;display:flex;align-items:center;gap:10px;white-space:nowrap}
+  .top-actions .refresh{font-size:11px;color:var(--muted)}
+  .btn{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border-radius:7px;border:1px solid var(--border-strong);
+    background:#fff;color:var(--text);font-size:11.5px;font-weight:600;white-space:nowrap}
+  .btn.dark{background:#1f2328;border-color:#1f2328;color:#fff}
+  .btn.ghost{border-color:transparent;background:transparent;color:var(--muted);font-weight:500}
+
+  .panel-body{flex:1;min-height:0;display:flex}
+  .files{width:404px;flex:0 0 404px;border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0}
+  .tabs{height:38px;flex:0 0 38px;display:flex;align-items:flex-end;gap:16px;padding:0 14px;border-bottom:1px solid var(--border)}
+  .tab{height:38px;display:flex;align-items:center;font-size:12px;color:var(--muted)}
+  .tab.active{color:var(--text);font-weight:650;box-shadow:inset 0 -2px 0 #1f2328}
+  .files-head{display:flex;align-items:center;justify-content:space-between;padding:11px 14px 7px;font-size:11px;color:var(--muted)}
+  .files-head b{color:var(--text);font-size:11.5px;font-weight:650}
+  .file-list{list-style:none;margin:0;padding:0 6px 10px;overflow:hidden}
+  .file-list li{display:flex;align-items:center;gap:8px;height:28px;padding:0 9px;border-radius:6px;font-size:11.5px}
+  .file-list li.sel{background:#eef4ff}
+  .file-list .idx{width:18px;color:var(--faint);font-size:10.5px;text-align:right;flex:0 0 18px}
+  .file-list .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#24292f}
+  .file-list .nm .dir{color:var(--muted)}
+  .stat{font-family:var(--mono);font-size:10px;white-space:nowrap;flex:0 0 auto}
+  .stat .p{color:#1a7f37}.stat .m{color:#cf222e}
+
+  .content{flex:1;min-width:0;overflow:hidden;display:flex;flex-direction:column}
+  .scroll{flex:1;overflow:hidden;padding:18px 24px}
+  .h1{font-size:15px;font-weight:700;margin:0 0 10px;display:flex;align-items:center;gap:8px}
+  .sec{margin-bottom:20px}
+  .sec h2{font-size:12px;font-weight:650;margin:0 0 8px;color:var(--text)}
+  .sec p{margin:0;color:#3c3c43;line-height:1.6}
+  .list{margin:0;padding-left:0;list-style:none}
+  .list li{display:flex;gap:8px;padding:5px 0;line-height:1.5;color:#3c3c43}
+  .list .n{color:var(--faint);width:14px;flex:0 0 14px;text-align:right;font-size:11px;padding-top:1px}
+  .code{font-family:var(--mono);font-size:11px;background:var(--bg-soft);border:1px solid var(--border);border-radius:5px;padding:1px 5px;color:#24292f;white-space:nowrap}
+  .finding-row{display:flex;align-items:baseline;gap:8px;padding:6px 0;border-bottom:1px solid #f0f0f2}
+  .finding-row:last-child{border-bottom:0}
+  .finding-row .fname{font-family:var(--mono);font-size:11px;color:#24292f;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .finding-row .ftext{font-size:11px;color:var(--muted);white-space:nowrap}
+  .order{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:11.5px;color:#3c3c43}
+  .order .ord{width:16px;height:16px;border-radius:50%;background:var(--bg-soft);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:9.5px;color:var(--muted)}
+  .conclusion{border:1px solid var(--border);border-radius:9px;padding:12px 13px;background:#fcfcfd}
+  .conclusion .head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  .conclusion .head b{font-size:12px}
+  .conclusion .v{font-size:10.5px;color:var(--faint);font-family:var(--mono)}
+
+  .findings{width:340px;flex:0 0 340px;border-left:1px solid var(--border);display:flex;flex-direction:column;background:#fcfcfd}
+  .findings-head{height:38px;flex:0 0 38px;display:flex;align-items:center;padding:0 14px;border-bottom:1px solid var(--border);font-size:11.5px;font-weight:650}
+  .findings-body{flex:1;overflow:hidden;padding:12px 14px;display:flex;flex-direction:column;gap:12px}
+  .card{border:1px solid var(--border);border-radius:8px;background:#fff;padding:10px 11px}
+  .card .top{display:flex;align-items:center;gap:7px;margin-bottom:5px}
+  .card .fname{font-family:var(--mono);font-size:10.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .card p{margin:0;font-size:11.5px;line-height:1.55;color:#3c3c43}
+  .card .line{margin-top:5px;font-size:10.5px;color:var(--faint)}
+  .card .hint{margin-top:6px;font-size:10.5px;color:var(--blue)}
+
+  /* ── diff view ────────────────────────────────────────────── */
+  .diff-head{height:38px;flex:0 0 38px;display:flex;align-items:center;gap:10px;padding:0 14px;border-bottom:1px solid var(--border)}
+  .diff-head .fname{font-family:var(--mono);font-size:11.5px;font-weight:600}
+  .diff-head .actions{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:10.5px;color:var(--muted);white-space:nowrap}
+  .diff-head .actions .sep{color:var(--border-strong)}
+  .diff{flex:1;overflow:hidden;background:#fff;font-family:var(--mono);font-size:11px;line-height:1.65}
+  .dl{display:flex;min-height:18px;white-space:pre}
+  .dl .ln{width:44px;flex:0 0 44px;text-align:right;padding-right:10px;color:#a0a0a7;background:#fafafb;border-right:1px solid #f0f0f2;user-select:none}
+  .dl .code{padding-left:12px;flex:1;min-width:0;overflow:hidden}
+  .dl.add{background:var(--add)}
+  .dl.add .ln{background:var(--add-strong)}
+  .dl.del{background:var(--del)}
+  .dl.hunk{background:#f2f6ff;color:#2456a8}
+  .dl.hunk .ln{background:#f2f6ff;border-right-color:#e2e9f8}
+  .dl.head{background:#fafafb;color:#6e6e73}
+  .dl.head .ln{background:#fafafb}
+  .kw{color:#cf222e}.str{color:#0a3069}.fn{color:#8250df}.cm{color:#6e7781;font-style:italic}.num{color:#0550ae}
+
+  .popover{position:absolute;right:16px;top:54px;width:372px;border:1px solid var(--border-strong);border-radius:10px;
+    background:#fff;box-shadow:0 12px 32px rgba(0,0,0,.16);padding:13px 14px 14px;z-index:5}
+  .popover .phead{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+  .popover .phead b{font-size:11.5px}
+  .popover .phead .x{margin-left:auto;color:var(--faint);font-size:14px}
+  .popover p{margin:0 0 8px;font-size:11.5px;line-height:1.6;color:#3c3c43}
+  .popover p:last-child{margin-bottom:0}
+  .popover .hit{background:#fff3c4;border-radius:2px}
+  .popover .foot{display:flex;justify-content:flex-end;margin-top:10px}
+  .popover .foot .btn{height:24px;font-size:10.5px}
+
+  .actionbar{height:48px;flex:0 0 48px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px;padding:0 14px;background:#fff}
+  .actionbar .hint{font-size:10.5px;color:var(--muted)}
+  .actionbar .spacer{flex:1}
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+<script>
+  const params = new URLSearchParams(location.search);
+  const lang = params.get('lang') === 'en' ? 'en' : 'zh';
+  const view = params.get('view') === 'diff' ? 'diff' : 'overview';
+
+  const S = {
+    zh: {
+      session: 'Orders API',
+      entry: '审查 PR',
+      whoUser: '你',
+      whoAi: '墨斗',
+      userMsg: '给 PR #128 做一轮审查。',
+      aiMsg: '第 2 轮审查完成：7 个文件已分析，结论为「通过」。有 2 条修改建议，可在右侧面板查看。',
+      composer: '发消息或创建任务，/ 调用指令，@ 文件或对话',
+      workspace: '工作区内修改',
+      model: 'DeepSeek-V4.1-Flash',
+      refresh: '刷新列表',
+      startRound: '开始第 3 轮审查',
+      round1: '第 1 轮 · 已审查 09:12',
+      round2: '第 2 轮 · 已审查 10:48',
+      latest: '最新',
+      unpublished: '未发布',
+      overview: '总览',
+      detail: '审查详情',
+      changedFiles: '变更文件',
+      fileCount: '7 个文件',
+      assess: '总体评价',
+      pass: '通过',
+      suggestion: '建议',
+      assessP: '本次 PR 新增发票 CSV 导出：接口、导出队列与格式化职责清晰，错误路径有测试覆盖。没有阻塞项，两条修改建议建议在合并前处理。',
+      risks: '总体初筛风险',
+      risk1: '未转义以 = + - @ 开头的单元格，导出文件在 Excel / WPS 中可能被当作公式执行。',
+      risk2: '单次导出没有行数上限，大结果集会长时间占用导出 worker。',
+      findings: '逐文件审查发现',
+      f1: 'CSV 公式注入转义缺失',
+      f2: '导出任务缺少行数上限',
+      f3: '范围参数与错误码完整',
+      order: '审查顺序',
+      conclusion: '最终结论',
+      conclusionP: '本次改动可以合并。建议先补 CSV 公式转义与导出行数上限，再发布审查评论。',
+      detailTitle: '审查详情',
+      c1: '单元格以 = + - @ 开头时需前置单引号，避免表格软件把它当作公式执行。',
+      c1line: 'src/export/csv.ts · 第 37 行',
+      c2: '导出前校验 rows.length，超过 MAX_EXPORT_ROWS 时返回 413；上限与 API 侧共用 config/limits.ts。',
+      c2line: 'src/workers/export-queue.ts · 第 46 行',
+      c3: '起止时间解析、时区处理与错误码都完整，空结果也会返回表头。',
+      c3line: 'src/api/invoices.ts · 第 12 行',
+      reanalyze: '重新分析',
+      stillFiles: '结论 v2 · 覆盖 7/7 个文件',
+      conclude: '生成最终结论',
+      publish: '发布',
+      comments: '查看评论',
+      openHost: '在代码平台打开',
+      walk: '逐段分析',
+      changed: '修改',
+      fullFile: '完整文件',
+      wrap: '自动换行',
+      popTitle: '逐段分析 #1',
+      popP1: '每列都经过 escapeCell 再拼接，引号与分隔符的处理集中在一处；新增的 customer.name 也走同一路径，没有绕开转义。',
+      popP2: '返回值以 BOM 开头、行尾用 CRLF，兼容 Excel 与 WPS 对 UTF-8 的识别；下载链路不需要再补 BOM。',
+      expand: '展开完整函数/类',
+      hunkTitle: '逐段分析',
+      files: [
+        ['src/api/invoices.ts', '+24', '-3'],
+        ['src/export/csv.ts', '+58', '-0'],
+        ['src/workers/export-queue.ts', '+46', '-2'],
+        ['src/export/format.ts', '+31', '-0'],
+        ['src/config/limits.ts', '+7', '-1'],
+        ['tests/export/csv.test.ts', '+92', '-0'],
+        ['docs/export.md', '+38', '-1'],
+      ],
+      orderFiles: ['src/api/invoices.ts', 'src/export/csv.ts', 'src/workers/export-queue.ts', 'tests/export/csv.test.ts'],
+    },
+    en: {
+      session: 'Orders API',
+      entry: 'Review PRs',
+      whoUser: 'You',
+      whoAi: 'Modou',
+      userMsg: 'Run a review on PR #128.',
+      aiMsg: 'Round 2 finished: 7 files analyzed, verdict “Pass”. Two suggestions are waiting in the review panel.',
+      composer: 'Send a message or create a task, / for commands, @ for files',
+      workspace: 'Changes in workspace',
+      model: 'DeepSeek-V4.1-Flash',
+      refresh: 'Refresh list',
+      startRound: 'Start round 3',
+      round1: 'Round 1 · reviewed 09:12',
+      round2: 'Round 2 · reviewed 10:48',
+      latest: 'latest',
+      unpublished: 'unpublished',
+      overview: 'Overview',
+      detail: 'Review detail',
+      changedFiles: 'Changed files',
+      fileCount: '7 files',
+      assess: 'Overall assessment',
+      pass: 'Pass',
+      suggestion: 'Suggestion',
+      assessP: 'This PR adds CSV export for invoices. The endpoint, export queue, and formatter each have a clear job, and the error paths are covered by tests. No blockers; two suggestions are worth handling before merge.',
+      risks: 'Initial screen risks',
+      risk1: 'Cells starting with = + - @ are not escaped, so spreadsheet apps may treat exported values as formulas.',
+      risk2: 'A single export has no row cap, so a large result set can hold the export worker for a long time.',
+      findings: 'Per-file findings',
+      f1: 'CSV formula injection is not escaped',
+      f2: 'Export job has no row cap',
+      f3: 'Range parsing and error codes are complete',
+      order: 'Reading order',
+      conclusion: 'Final conclusion',
+      conclusionP: 'The change can be merged. Escape CSV formulas and cap export rows before publishing the review comment.',
+      detailTitle: 'Review detail',
+      c1: 'Prefix cells starting with = + - @ with a single quote so spreadsheet apps do not run them as formulas.',
+      c1line: 'src/export/csv.ts · line 37',
+      c2: 'Check rows.length before exporting and return 413 above MAX_EXPORT_ROWS. The API and worker share config/limits.ts.',
+      c2line: 'src/workers/export-queue.ts · line 46',
+      c3: 'Date parsing, time zones, and error codes are complete; an empty result still returns the header row.',
+      c3line: 'src/api/invoices.ts · line 12',
+      reanalyze: 'Analyze again',
+      stillFiles: 'Conclusion v2 · 7/7 files analyzed',
+      conclude: 'Conclude review',
+      publish: 'Publish',
+      comments: 'View comment',
+      openHost: 'Open on host',
+      walk: 'Per-segment analysis',
+      changed: 'changed',
+      fullFile: 'Full file',
+      wrap: 'Wrap lines',
+      popTitle: 'Per-segment analysis #1',
+      popP1: 'Every column goes through escapeCell before joining, so quoting and separators are handled in one place; the new customer.name field uses the same path instead of bypassing escaping.',
+      popP2: 'The return value starts with a BOM and uses CRLF line endings, so Excel and WPS read UTF-8 correctly; the download path does not need to add a BOM.',
+      expand: 'Show whole function/class',
+      hunkTitle: 'Per-segment analysis',
+      files: [
+        ['src/api/invoices.ts', '+24', '-3'],
+        ['src/export/csv.ts', '+58', '-0'],
+        ['src/workers/export-queue.ts', '+46', '-2'],
+        ['src/export/format.ts', '+31', '-0'],
+        ['src/config/limits.ts', '+7', '-1'],
+        ['tests/export/csv.test.ts', '+92', '-0'],
+        ['docs/export.md', '+38', '-1'],
+      ],
+      orderFiles: ['src/api/invoices.ts', 'src/export/csv.ts', 'src/workers/export-queue.ts', 'tests/export/csv.test.ts'],
+    },
+  }[lang];
+
+  const el = (html) => html;
+  const fileList = (selected) => S.files.map(([name, add, del], i) => {
+    const slash = name.lastIndexOf('/');
+    const dir = name.slice(0, slash + 1);
+    const base = name.slice(slash + 1);
+    return `<li class="${selected === i ? 'sel' : ''}">
+      <span class="idx">${i + 1}</span>
+      <span class="nm"><span class="dir">${dir}</span>${base}</span>
+      <span class="stat"><span class="p">${add}</span> <span class="m">${del}</span></span>
+    </li>`;
+  }).join('');
+
+  const overview = `
+    <div class="scroll">
+      <div class="h1">${S.assess} <span class="tag ok">${S.pass}</span></div>
+      <p style="margin:0 0 18px;color:#3c3c43;line-height:1.65;max-width:720px">${S.assessP}</p>
+
+      <div class="sec">
+        <h2>${S.risks}</h2>
+        <ul class="list">
+          <li><span class="n">1</span><span><span class="tag warn">${S.suggestion}</span> ${S.risk1} <span class="code">src/export/csv.ts:37</span></span></li>
+          <li><span class="n">2</span><span><span class="tag warn">${S.suggestion}</span> ${S.risk2} <span class="code">src/workers/export-queue.ts:46</span></span></li>
+        </ul>
+      </div>
+
+      <div class="sec">
+        <h2>${S.findings}</h2>
+        <div class="finding-row"><span class="tag warn">${S.suggestion}</span><span class="fname">src/export/csv.ts</span><span class="ftext">${S.f1}</span></div>
+        <div class="finding-row"><span class="tag warn">${S.suggestion}</span><span class="fname">src/workers/export-queue.ts</span><span class="ftext">${S.f2}</span></div>
+        <div class="finding-row"><span class="tag ok">${S.pass}</span><span class="fname">src/api/invoices.ts</span><span class="ftext">${S.f3}</span></div>
+      </div>
+
+      <div class="sec">
+        <h2>${S.order}</h2>
+        ${S.orderFiles.map((f, i) => `<div class="order"><span class="ord">${i + 1}</span><span class="mono" style="font-size:11px">${f}</span></div>`).join('')}
+      </div>
+
+      <div class="conclusion">
+        <div class="head"><b>${S.conclusion}</b><span class="tag ok">${S.pass}</span><span class="v">v2 · 7/7</span></div>
+        <p style="margin:0;color:#3c3c43;line-height:1.6">${S.conclusionP}</p>
+      </div>
+    </div>`;
+
+  const diffLines = [
+    ['head',  '', 'diff --git a/src/export/csv.ts b/src/export/csv.ts'],
+    ['head',  '', 'index 4f2a1c9..b8d0e12 100644'],
+    ['head',  '', '--- a/src/export/csv.ts'],
+    ['head',  '', '+++ b/src/export/csv.ts'],
+    ['hunk',  '', '@@ -30,5 +30,15 @@ function escapeCell(value) {'],
+    ['ctx',  30, '}'],
+    ['ctx',  31, ''],
+    ['ctx',  32, '<span class="cm">/** Serialize invoice rows to RFC 4180 CSV. */</span>'],
+    ['ctx',  33, '<span class="kw">export function</span> <span class="fn">toCsv</span>(rows: Invoice[]): <span class="kw">string</span> {'],
+    ['ctx',  34, '  <span class="kw">const</span> head = [<span class="str">\'number\'</span>, <span class="str">\'customer\'</span>, <span class="str">\'issued_at\'</span>, <span class="str">\'amount\'</span>];'],
+    ['add',  35, '  <span class="kw">const</span> lines = rows.<span class="fn">map</span>((row) =&gt; ['],
+    ['add',  36, '    row.number,'],
+    ['add',  37, '    <span class="fn">escapeCell</span>(row.customer.name),'],
+    ['add',  38, '    row.issuedAt,'],
+    ['add',  39, '    (row.amountCents / <span class="num">100</span>).<span class="fn">toFixed</span>(<span class="num">2</span>),'],
+    ['add',  40, '  ].<span class="fn">map</span>(escapeCell).<span class="fn">join</span>(<span class="str">\',\'</span>));'],
+    ['add',  41, ''],
+    ['add',  42, '  <span class="cm">// BOM keeps Excel / WPS from misreading UTF-8 as GBK.</span>'],
+    ['add',  43, '  <span class="kw">return</span> <span class="str">\'\\ufeff\'</span> + [head.<span class="fn">join</span>(<span class="str">\',\'</span>), ...lines].<span class="fn">join</span>(<span class="str">\'\\r\\n\'</span>);'],
+    ['add',  44, '}'],
+  ];
+  const diff = `
+    <div class="diff-head">
+      <span class="fname">src/export/csv.ts</span>
+      <span class="actions">
+        <span>${S.walk}</span><span class="sep">·</span>
+        <span>${S.changed} <b style="color:#1a7f37">+58</b> <b style="color:#cf222e">−0</b></span><span class="sep">·</span>
+        <span>${S.fullFile}</span><span class="sep">·</span>
+        <span>${S.wrap}</span>
+      </span>
+    </div>
+    <div class="diff">
+      ${diffLines.map(([kind, ln, code]) => `<div class="dl ${kind}"><span class="ln">${ln}</span><span class="code">${code || '&nbsp;'}</span></div>`).join('')}
+    </div>`;
+
+  const findings = (withPopover) => `
+    <section class="findings" style="position:relative">
+      <div class="findings-head">${S.detailTitle}</div>
+      <div class="findings-body">
+        <div class="card">
+          <div class="top"><span class="tag warn">${S.suggestion}</span><span class="fname">src/export/csv.ts</span></div>
+          <p>${S.c1}</p>
+          <div class="line">${S.c1line}</div>
+          <div class="hint">${S.reanalyze}</div>
+        </div>
+        <div class="card">
+          <div class="top"><span class="tag warn">${S.suggestion}</span><span class="fname">src/workers/export-queue.ts</span></div>
+          <p>${S.c2}</p>
+          <div class="line">${S.c2line}</div>
+          <div class="hint">${S.reanalyze}</div>
+        </div>
+        <div class="card">
+          <div class="top"><span class="tag ok">${S.pass}</span><span class="fname">src/api/invoices.ts</span></div>
+          <p>${S.c3}</p>
+          <div class="line">${S.c3line}</div>
+        </div>
+      </div>
+      ${withPopover ? `<div class="popover">
+        <div class="phead"><span class="tag info">${S.suggestion}</span><b>${S.popTitle}</b><span class="x">×</span></div>
+        <p>${S.popP1}</p>
+        <p>${S.popP2}</p>
+        <div class="foot"><span class="btn">${S.expand}</span></div>
+      </div>` : ''}
+    </section>`;
+
+  document.getElementById('app').innerHTML = `
+    <aside class="chat">
+      <div class="chat-head">
+        <div class="chrome">
+          <div class="lights"><i></i><i></i><i></i></div>
+          <span class="chrome-title">DeepSeek Harness</span>
+        </div>
+        <div class="chat-titlerow">
+          <span class="chat-title">${S.session}</span>
+          <span class="entry">${S.entry}<span class="n">2</span></span>
+        </div>
+      </div>
+      <div class="chat-body">
+        <div class="msg user"><span class="who">${S.whoUser}</span><div class="bubble">${S.userMsg}</div></div>
+        <div class="msg ai"><span class="who">${S.whoAi}</span><div class="bubble">${S.aiMsg}<div class="kv"><span>PR #128 · 7 files · ${S.pass}</span><span>${S.round2}</span></div></div></div>
+      </div>
+      <div class="composer">
+        <div class="ph">${S.composer}</div>
+        <div class="row">
+          <span class="chip">${S.workspace}</span>
+          <span class="chip">${S.model}</span>
+          <span class="send">↑</span>
+        </div>
+      </div>
+    </aside>
+    <main class="panel">
+      <div class="panel-top">
+        <div class="pr-title"><span class="num">#128</span> feat(invoices): add CSV export <span class="chev">▾</span></div>
+        <div class="rounds">
+          <span class="round"><span class="dot g"></span>${S.round1}</span>
+          <span class="round active"><span class="dot g"></span>${S.round2}<span class="mini">${S.latest}</span></span>
+        </div>
+        <div class="top-actions">
+          <span class="refresh">${S.refresh}</span>
+          <span class="btn dark">${S.startRound}</span>
+        </div>
+      </div>
+      <div class="panel-body">
+        <section class="files">
+          <div class="tabs"><span class="tab active">${S.overview}</span><span class="tab">${S.detail}</span></div>
+          <div class="files-head"><b>${S.changedFiles}</b><span>${S.fileCount}</span></div>
+          <ul class="file-list">${fileList(view === 'diff' ? 1 : -1)}</ul>
+        </section>
+        <section class="content">
+          ${view === 'diff' ? diff : overview}
+        </section>
+        ${findings(view === 'diff')}
+      </div>
+      <div class="actionbar">
+        <span class="hint">${S.stillFiles}</span>
+        <span class="spacer"></span>
+        <span class="btn dark">${S.conclude}</span>
+        <span class="btn">${S.publish}</span>
+        <span class="btn ghost">${S.comments}</span>
+        <span class="btn ghost">${S.openHost}</span>
+      </div>
+    </main>`;
+</script>
+</body>
+</html>
