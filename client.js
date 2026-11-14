@@ -77,6 +77,8 @@ window.__ModuleLoader__.load({
         emptyFile: '选择左侧文件查看变更与审查详情。',
         noFiles: '还没有变更文件。',
         tokenMissing: '缺少代码平台 token：请在插件配置里填写，或先登录 CLI（tea / gh）。',
+        truncatedList: '仅列出最近更新的 20 个 PR；更早的 PR 未显示。',
+        filesTruncated: '该 PR 的变更文件过多，仅纳入了前 400 个；未纳入的文件不在本页。',
         detailTitle: '审查详情',
         wrapOn: '自动换行',
         fullFile: '完整文件',
@@ -277,6 +279,8 @@ window.__ModuleLoader__.load({
         emptyFile: 'Pick a file on the left to see its diff and review.',
         noFiles: 'No changed files loaded yet.',
         tokenMissing: 'Code host token missing. Fill the plugin config token or log in the CLI.',
+        truncatedList: 'Only the 20 most recently updated pull requests are listed; older ones are hidden.',
+        filesTruncated: 'This pull request has more files than the page cap; only the first 400 are included.',
         detailTitle: 'Review detail',
         wrapOn: 'Wrap lines',
         fullFile: 'Full file',
@@ -2894,6 +2898,561 @@ window.__ModuleLoader__.load({
       );
     }
 
+    /**
+     * Resolve the repository that belongs to the current workspace (not a shared global list).
+     * A tab restored at startup can load before the host half registers its routes (restart
+     * race), so retry with backoff instead of ending in a permanent error shell.
+     */
+    function useRepoContext(cwd, attemptToken) {
+      const [repoContext, setRepoContext] = React.useState(null);
+      const [contextError, setContextError] = React.useState('');
+        const [contextBusy, setContextBusy] = React.useState(false);
+      // Resolve the repository that belongs to the current workspace (not a shared global list).
+      // A tab restored at startup can load before the host half registers its routes (restart
+      // race), so retry with backoff instead of ending in a permanent error shell.
+      React.useEffect(() => {
+        let cancelled = false;
+        let timer = null;
+        let attempt = 0;
+        if (typeof cwd !== 'string' || cwd === '') {
+          setRepoContext(null);
+          setContextError('no-cwd');
+          setContextBusy(false);
+          return undefined;
+        }
+        setRepoContext(null);
+        setContextError('');
+        setContextBusy(true);
+        const load = () => {
+          attempt += 1;
+          void api(`/pr-review-api/context?cwd=${encodeURIComponent(cwd)}`)
+            .then((data) => {
+              if (cancelled) return;
+              if (data.supported === true && data.repo !== undefined && data.repo !== null) {
+                setRepoContext(data.repo);
+                setContextError('');
+                setContextBusy(false);
+                return;
+              }
+              setRepoContext(null);
+              setContextError(typeof data.reason === 'string' ? data.reason : 'unsupported');
+              setContextBusy(false);
+            })
+            .catch(() => {
+              if (cancelled) return;
+              if (attempt >= 5) {
+                setRepoContext(null);
+                setContextError('hostNotReady');
+                setContextBusy(false);
+                return;
+              }
+              setContextBusy(true);
+              timer = setTimeout(load, Math.min(8000, 500 * 2 ** (attempt - 1)));
+            });
+        };
+        load();
+        return () => {
+          cancelled = true;
+          if (timer !== null) clearTimeout(timer);
+        };
+      }, [cwd, attemptToken]);
+      return { repoContext, contextError, contextBusy };
+    }
+
+
+    /**
+     * File-detail state: diff text, full-file content, hunk expansion and the walkthrough
+     * popover. The selected path stays with the caller; everything else lives here.
+     */
+    function useFileDetail({ withRepo, generationRef, review, prNumber, filePath }) {
+      const [fileDiff, setFileDiff] = React.useState(null);
+      const [fileDiffError, setFileDiffError] = React.useState('');
+      const [fileContent, setFileContent] = React.useState(null);
+      const [fileContentError, setFileContentError] = React.useState('');
+      const [fileContentBusy, setFileContentBusy] = React.useState(false);
+      const [showFullFile, setShowFullFile] = React.useState(false);
+      const [expandedHunks, setExpandedHunks] = React.useState(new Set());
+      const [walkFloat, setWalkFloat] = React.useState(null);
+      const [activeHunk, setActiveHunk] = React.useState(0);
+    const loadFileDiff = React.useCallback(async (number, path) => {
+      if (typeof number !== 'number' || path === '') return;
+      const generation = generationRef.current;
+      setFileDiff(null);
+      setFileDiffError('');
+      try {
+        const data = await api(withRepo(`/pr-review-api/file?number=${number}&path=${encodeURIComponent(path)}`));
+        if (generation !== generationRef.current) return;
+        setFileDiff(data.file ?? null);
+      } catch (error) {
+        if (generation === generationRef.current) setFileDiffError(error instanceof Error ? error.message : String(error));
+      }
+    }, []);
+
+    const loadFileContent = React.useCallback(async (number, path) => {
+      if (typeof number !== 'number' || path === '') return null;
+      const key = `${number}:${path}`;
+      const cached = fileContentCache.get(key);
+      if (cached !== undefined) {
+        setFileContent(cached);
+        setFileContentError('');
+        return cached;
+      }
+      const generation = generationRef.current;
+      setFileContentBusy(true);
+      setFileContentError('');
+      try {
+        const data = await api(withRepo(`/pr-review-api/file-content?number=${number}&path=${encodeURIComponent(path)}`));
+        if (generation !== generationRef.current) return null;
+        const file = data.file ?? null;
+        if (file !== null) fileContentCache.set(key, file);
+        setFileContent(file);
+        return file;
+      } catch (error) {
+        setFileContentError(error instanceof Error ? error.message : String(error));
+        setFileContent(null);
+        return null;
+      } finally {
+        setFileContentBusy(false);
+      }
+    }, []);
+
+    const toggleFullFile = React.useCallback(async () => {
+      if (showFullFile) {
+        setShowFullFile(false);
+        return;
+      }
+      const number = review?.number ?? prNumber;
+      const file = fileContent ?? (await loadFileContent(number, filePath));
+      if (file !== null) setShowFullFile(true);
+    }, [showFullFile, fileContent, review, prNumber, filePath, loadFileContent]);
+
+    const expandHunkContext = React.useCallback(async () => {
+      const hunk = activeHunk;
+      if (hunk < 1) return;
+      const number = review?.number ?? prNumber;
+      if (fileContent === null) {
+        const file = await loadFileContent(number, filePath);
+        if (file === null) return;
+      }
+      setExpandedHunks((previous) => {
+        const next = new Set(previous);
+        next.add(hunk);
+        return next;
+      });
+      setWalkFloat(null);
+      setActiveHunk(0);
+    }, [activeHunk, review, prNumber, fileContent, filePath, loadFileContent]);
+
+    const collapseHunkContext = React.useCallback((hunk) => {
+      setExpandedHunks((previous) => {
+        const next = new Set(previous);
+        next.delete(hunk);
+        return next;
+      });
+    }, []);
+    const closeWalkFloat = React.useCallback(() => {
+      setWalkFloat(null);
+      setActiveHunk(0);
+    }, []);
+
+    const openWalkFloat = React.useCallback((kind, payload, title, event) => {
+      const logic = kind === 'logic' && typeof payload === 'string' ? payload : '';
+      const steps = kind === 'steps' && Array.isArray(payload) ? payload : [];
+      if ((kind === 'logic' && logic === '') || (kind === 'steps' && steps.length === 0)) return;
+      const margin = 12;
+      const width = Math.min(420, Math.max(260, window.innerWidth - 24));
+      const height = Math.min(Math.round(window.innerHeight * 0.6), 520);
+      const x = typeof event?.clientX === 'number' ? event.clientX : window.innerWidth / 2;
+      const y = typeof event?.clientY === 'number' ? event.clientY : window.innerHeight / 2;
+      setWalkFloat({
+        kind,
+        steps,
+        logic,
+        title,
+        width,
+        left: Math.min(Math.max(margin, x - 60), Math.max(margin, window.innerWidth - width - margin)),
+        top: Math.min(Math.max(margin, y - 16), Math.max(margin, window.innerHeight - height - margin)),
+      });
+    }, []);
+    React.useEffect(() => {
+      if (walkFloat === null) return undefined;
+      const onKeyDown = (event) => {
+        if (event.key === 'Escape') closeWalkFloat();
+      };
+      window.addEventListener('keydown', onKeyDown);
+      return () => window.removeEventListener('keydown', onKeyDown);
+    }, [walkFloat, closeWalkFloat]);
+
+      return {
+        fileDiff, setFileDiff,
+        fileDiffError, setFileDiffError,
+        fileContent, setFileContent,
+        fileContentError, setFileContentError,
+        fileContentBusy, setFileContentBusy,
+        showFullFile, setShowFullFile,
+        expandedHunks, setExpandedHunks,
+        walkFloat, setWalkFloat,
+        activeHunk, setActiveHunk,
+        loadFileDiff, loadFileContent, toggleFullFile, expandHunkContext, collapseHunkContext,
+        closeWalkFloat, openWalkFloat,
+      };
+    }
+
+    /**
+     * Publish preview state: one markdown preview at a time, debounced selection refreshes,
+     * and the append-only publish call. The component only renders what this returns.
+     */
+    function usePreviewPublish({ withRepo, stateRef, loadReview }) {
+        const [publishBusy, setPublishBusy] = React.useState(false);
+        const [publishError, setPublishError] = React.useState('');
+        const [preview, setPreview] = React.useState(null);
+        const [previewBusy, setPreviewBusy] = React.useState(false);
+        const [previewError, setPreviewError] = React.useState('');
+        const [previewRefreshBusy, setPreviewRefreshBusy] = React.useState(false);
+        const previewTimerRef = React.useRef(null);
+        const previewSeqRef = React.useRef(0);
+        const previewRef = React.useRef(null);
+        previewRef.current = preview;
+    const applyPreviewResponse = React.useCallback((data, record, previous) => {
+      const rounds = roundsOf(record);
+      const latest = rounds.length === 0 ? null : rounds[rounds.length - 1];
+      const versions = versionsOf(record, latest, true);
+      const latestVersion = versions.length === 0 ? null : versions[versions.length - 1];
+      const currentList = stateRef.current.list;
+      const hostItems = Array.isArray(data?.items) ? data.items : null;
+      const items = previewItemsOf(
+        hostItems,
+        latestVersion === null ? null : latestVersion.conclusion,
+      );
+      const selectionSupported = previewSelectionSupported(items);
+      const previousSelected = previous !== null && previous !== undefined
+        && Array.isArray(previous.selectedIds)
+        ? new Set(previous.selectedIds)
+        : null;
+      const selectedIds = selectionSupported
+        ? items
+          .filter((item) => previousSelected === null || previousSelected.has(item.id))
+          .map((item) => item.id)
+        : [];
+      return {
+        markdown: typeof data?.markdown === 'string' ? data.markdown : (previous?.markdown ?? ''),
+        language: typeof data?.language === 'string'
+          ? data.language
+          : (previous?.language
+            ?? (typeof currentList?.commentLanguage === 'string' ? currentList.commentLanguage : 'zh')),
+        round: latest === null ? 1 : latest.round,
+        version: latestVersion === null ? 1 : latestVersion.version,
+        conflict: previous?.conflict ?? '',
+        items: selectionSupported ? items : [],
+        selectionSupported,
+        selectedIds,
+      };
+    }, []);
+
+    /** Publish flow: fetch the host-rendered markdown first, then show the preview dialog. */
+    const requestPreview = React.useCallback(async () => {
+      const number = stateRef.current.prNumber;
+      if (typeof number !== 'number') return;
+      setPreviewBusy(true);
+      setPublishError('');
+      setPreviewError('');
+      try {
+        const data = await postJson(
+          withRepo('/pr-review-api/comment/preview'),
+          buildPreviewBody(number),
+        );
+        setPreview(applyPreviewResponse(data, stateRef.current.review, null));
+      } catch (error) {
+        setPublishError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setPreviewBusy(false);
+      }
+    }, [applyPreviewResponse]);
+
+    /** Re-render the preview markdown for the given selection (host filters by includeIds). */
+    const refreshPreview = React.useCallback(async (includeIds) => {
+      const number = stateRef.current.prNumber;
+      const current = previewRef.current;
+      if (typeof number !== 'number' || current === null || current.selectionSupported !== true) return;
+      const seq = previewSeqRef.current + 1;
+      previewSeqRef.current = seq;
+      setPreviewRefreshBusy(true);
+      setPreviewError('');
+      try {
+        const data = await postJson(
+          withRepo('/pr-review-api/comment/preview'),
+          buildPreviewBody(number, includeIds),
+        );
+        if (seq !== previewSeqRef.current) return;
+        setPreview((previous) => {
+          if (previous === null) return previous;
+          const next = applyPreviewResponse(data, stateRef.current.review, previous);
+          const previousIds = new Set((previous.items ?? []).map((item) => item.id));
+          // A host may answer a filtered request with only the selected items: never shrink
+          // the checkbox list, otherwise deselected entries become impossible to re-select.
+          if (next.items.length < previous.items.length) {
+            return {
+              ...previous,
+              markdown: next.markdown,
+              language: next.language,
+              round: next.round,
+              version: next.version,
+            };
+          }
+          const nextIds = new Set(next.items.map((item) => item.id));
+          const selectedIds = (previous.selectedIds ?? []).filter((id) => nextIds.has(id));
+          for (const item of next.items) {
+            if (!previousIds.has(item.id)) selectedIds.push(item.id);
+          }
+          return { ...next, selectedIds, conflict: previous.conflict };
+        });
+      } catch (error) {
+        if (seq === previewSeqRef.current) {
+          setPreviewError(error instanceof Error ? error.message : String(error));
+        }
+      } finally {
+        if (seq === previewSeqRef.current) setPreviewRefreshBusy(false);
+      }
+    }, [applyPreviewResponse]);
+
+    /** Debounce selection changes so rapid checkbox clicks issue one preview request. */
+    const schedulePreviewRefresh = React.useCallback((includeIds) => {
+      if (previewTimerRef.current !== null) clearTimeout(previewTimerRef.current);
+      previewTimerRef.current = setTimeout(() => {
+        previewTimerRef.current = null;
+        void refreshPreview(includeIds);
+      }, 200);
+    }, [refreshPreview]);
+
+    const closePreview = React.useCallback(() => {
+      if (previewTimerRef.current !== null) {
+        clearTimeout(previewTimerRef.current);
+        previewTimerRef.current = null;
+      }
+      setPreview(null);
+      setPreviewError('');
+      setPreviewRefreshBusy(false);
+    }, []);
+
+    const togglePreviewItem = React.useCallback((id) => {
+      const current = previewRef.current;
+      if (current === null || current.selectionSupported !== true) return;
+      const selected = Array.isArray(current.selectedIds) ? current.selectedIds : [];
+      const nextSelected = selected.includes(id)
+        ? selected.filter((item) => item !== id)
+        : [...selected, id];
+      setPreview({ ...current, selectedIds: nextSelected });
+      schedulePreviewRefresh(nextSelected);
+    }, [schedulePreviewRefresh]);
+
+    const selectAllPreviewItems = React.useCallback(() => {
+      const current = previewRef.current;
+      if (current === null || current.selectionSupported !== true) return;
+      const ids = (Array.isArray(current.items) ? current.items : []).map((item) => item.id);
+      setPreview({ ...current, selectedIds: ids });
+      schedulePreviewRefresh(ids);
+    }, [schedulePreviewRefresh]);
+
+    const selectNonePreviewItems = React.useCallback(() => {
+      const current = previewRef.current;
+      if (current === null || current.selectionSupported !== true) return;
+      setPreview({ ...current, selectedIds: [] });
+      schedulePreviewRefresh([]);
+    }, [schedulePreviewRefresh]);
+
+    const submitPublish = React.useCallback(async (force) => {
+      const number = stateRef.current.prNumber;
+      if (typeof number !== 'number') return;
+      const includeIds = selectionIncludeIds(previewRef.current);
+      setPublishBusy(true);
+      setPreviewError('');
+      try {
+        await postJson(
+          withRepo('/pr-review-api/comment'),
+          buildPublishBody(number, force, includeIds),
+        );
+        closePreview();
+        await loadReview(number);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const code = error instanceof Error && typeof error.code === 'string' ? error.code : '';
+        if (code === 'already-published' || code === 'publishing') {
+          setPreview((previous) => (previous === null ? previous : { ...previous, conflict: code }));
+        } else {
+          setPreviewError(message);
+          setPublishError(message);
+        }
+      } finally {
+        setPublishBusy(false);
+      }
+    }, [loadReview, closePreview]);
+
+      return {
+        preview, setPreview, previewBusy, setPreviewBusy, previewError, setPreviewError,
+        previewRefreshBusy, setPreviewRefreshBusy, publishBusy, setPublishBusy, publishError, setPublishError,
+        requestPreview, refreshPreview, closePreview, togglePreviewItem,
+        selectAllPreviewItems, selectNonePreviewItems, submitPublish,
+      };
+    }
+
+    /**
+     * Round and conclusion-version selection. `roundPick` null follows the latest round;
+     * per-round version picks are keyed by round number (absent = latest version).
+     */
+    function useRoundSelection(review, mode, setMode) {
+      const [roundPick, setRoundPick] = React.useState(null);
+      const [versionPick, setVersionPick] = React.useState({});
+    // Round selection (null = follow the latest round) and per-round conclusion version picks.
+    const reviewRounds = React.useMemo(() => roundsOf(review), [review]);
+    const latestRoundNumber = reviewRounds.length === 0
+      ? null
+      : reviewRounds[reviewRounds.length - 1].round;
+    const selectedRoundNumber = roundPick === null || !reviewRounds.some((entry) => entry.round === roundPick)
+      ? latestRoundNumber
+      : roundPick;
+    const selectedIsCurrent = selectedRoundNumber === null || selectedRoundNumber === latestRoundNumber;
+    const historicalView = mode === 'overview' && review !== null && selectedIsCurrent === false;
+    const selectRound = React.useCallback((round) => {
+      const next = applyRoundSelection(round, latestRoundNumber);
+      setRoundPick(next.roundPick);
+      setMode(next.mode);
+    }, [latestRoundNumber]);
+    const pickConclusionVersion = React.useCallback((round, version, latestVersion) => {
+      setVersionPick((previous) => {
+        const next = { ...previous };
+        if (version === latestVersion) delete next[round];
+        else next[round] = version;
+        return next;
+      });
+    }, []);
+
+      return {
+        reviewRounds, latestRoundNumber, selectedRoundNumber, selectedIsCurrent, historicalView,
+        roundPick, setRoundPick, versionPick, setVersionPick, selectRound, pickConclusionVersion,
+      };
+    }
+
+    /**
+     * Re-check implementer replies on the published comment (every 2 minutes while the panel shows it).
+     */
+    function useFeedbackCheck({ withRepo, stateRef, review, selectedIsCurrent, loadReview }) {
+      const [feedbackBusy, setFeedbackBusy] = React.useState(false);
+      const [feedbackError, setFeedbackError] = React.useState('');
+    const checkFeedback = React.useCallback(async () => {
+      const number = stateRef.current.prNumber;
+      if (typeof number !== 'number') return;
+      setFeedbackBusy(true);
+      setFeedbackError('');
+      try {
+        await postJson(withRepo('/pr-review-api/feedback'), { number });
+        await loadReview(number);
+      } catch (error) {
+        setFeedbackError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setFeedbackBusy(false);
+      }
+    }, [loadReview]);
+    // Periodically re-check developer feedback on the published comment (cheap unless new replies exist).
+    React.useEffect(() => {
+      if (review === null || review.status !== 'done') return undefined;
+      if (selectedIsCurrent === false) return undefined;
+      if ((review.published ?? []).length === 0) return undefined;
+      const timer = setInterval(() => {
+        if (!feedbackBusy) void checkFeedback();
+      }, 120_000);
+      return () => clearInterval(timer);
+    }, [review, feedbackBusy, checkFeedback, selectedIsCurrent]);
+
+      return {
+        feedbackBusy, feedbackError, checkFeedback,
+      };
+    }
+
+    /**
+     * Background conclusion generation: start, cancel, and the short wait window for writes.
+     */
+    function useConcludeAction({ withRepo, stateRef, loadReview }) {
+      const [concludeBusy, setConcludeBusy] = React.useState(false);
+      const [concludeWait, setConcludeWait] = React.useState(false);
+      const [concludeCancelBusy, setConcludeCancelBusy] = React.useState(false);
+    const runConclude = React.useCallback(async () => {
+      const number = stateRef.current.prNumber;
+      if (typeof number !== 'number') return;
+      setConcludeBusy(true);
+      setConcludeWait(true);
+      try {
+        const result = await postJson(withRepo('/pr-review-api/conclude'), { number });
+        // Old hosts conclude synchronously; async hosts answer { started: true } and report
+        // progress through `review.concluding`, picked up by the poll below.
+        if (result?.started !== true) setConcludeWait(false);
+        await loadReview(number);
+      } catch (error) {
+        setConcludeWait(false);
+        setReviewError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setConcludeBusy(false);
+      }
+    }, [loadReview]);
+    const cancelConclude = React.useCallback(async () => {
+      const number = stateRef.current.prNumber;
+      if (typeof number !== 'number') return;
+      setConcludeCancelBusy(true);
+      try {
+        await postJson(withRepo('/pr-review-api/conclude/cancel'), { number });
+        await loadReview(number);
+      } catch (error) {
+        setReviewError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setConcludeCancelBusy(false);
+      }
+    }, [loadReview]);
+
+      return {
+        concludeBusy, setConcludeBusy, concludeWait, setConcludeWait, concludeCancelBusy,
+        runConclude, cancelConclude,
+      };
+    }
+
+    /**
+     * Legacy overlay conversation and the in-review chat call; both drive the same host /chat route.
+     */
+    function useReviewChat({ withRepo, stateRef, mode, filePath, historicalView, loadReview, t }) {
+      const [overlayDraft, setOverlayDraft] = React.useState('');
+      const [overlayBusy, setOverlayBusy] = React.useState(false);
+      const [suggestionNotice, setSuggestionNotice] = React.useState('');
+    const sendChatMessage = React.useCallback(async (message) => {
+      if (historicalView === true) throw new Error(t('historyDiscussionDisabled'));
+      const number = stateRef.current.prNumber;
+      if (typeof number !== 'number') throw new Error(t('emptyReview'));
+      const textValue = String(message ?? '').trim();
+      if (textValue === '') return;
+      const path = mode === 'file' ? filePath : '';
+      const result = await postJson(withRepo('/pr-review-api/chat'), { number, path, message: textValue });
+      const applied = Array.isArray(result.applied) ? result.applied : [];
+      const inFileScope = path !== '';
+      setSuggestionNotice(
+        applied.length === 0 ? '' : `${t(inFileScope ? 'suggestionUpdated' : 'overviewUpdated')} ×${applied.length}`,
+      );
+      await loadReview(number);
+    }, [filePath, mode, loadReview, t, historicalView]);
+    const sendOverlayMessage = React.useCallback(async () => {
+      if (historicalView === true) return;
+      const message = overlayDraft.trim();
+      if (message === '' || overlayBusy) return;
+      setOverlayBusy(true);
+      setOverlayDraft('');
+      try {
+        await sendChatMessage(message);
+      } finally {
+        setOverlayBusy(false);
+      }
+    }, [overlayDraft, overlayBusy, sendChatMessage, historicalView]);
+
+      return {
+        overlayDraft, setOverlayDraft, overlayBusy, suggestionNotice, setSuggestionNotice,
+        sendChatMessage, sendOverlayMessage,
+      };
+    }
     /** Dock host: re-renders whenever the overview publishes a new footer. */
     function ReviewDock() {
       const [, bump] = React.useReducer((value) => value + 1, 0);
@@ -2932,10 +3491,8 @@ window.__ModuleLoader__.load({
         ? snapshot.byId[props.sessionId]?.cwd ?? ''
         : ''));
       const cwd = typeof props.forcedCwd === 'string' && props.forcedCwd !== '' ? props.forcedCwd : sessionCwd;
-      const [repoContext, setRepoContext] = React.useState(null);
-      const [contextError, setContextError] = React.useState('');
       const [contextAttempt, setContextAttempt] = React.useState(0);
-      const [contextBusy, setContextBusy] = React.useState(false);
+      const { repoContext, contextError, contextBusy } = useRepoContext(cwd, contextAttempt);
       const repoRef = React.useRef(null);
       repoRef.current = repoContext;
       const generationRef = React.useRef(0);
@@ -2954,15 +3511,12 @@ window.__ModuleLoader__.load({
       const [reviewError, setReviewError] = React.useState('');
       const [reviewBusy, setReviewBusy] = React.useState(false);
       const [filePath, setFilePath] = React.useState('');
-      const [fileDiff, setFileDiff] = React.useState(null);
-      const [fileDiffError, setFileDiffError] = React.useState('');
-      const [fileContent, setFileContent] = React.useState(null);
-      const [fileContentError, setFileContentError] = React.useState('');
-      const [fileContentBusy, setFileContentBusy] = React.useState(false);
-      const [showFullFile, setShowFullFile] = React.useState(false);
-      const [expandedHunks, setExpandedHunks] = React.useState(new Set());
-      const [overlayDraft, setOverlayDraft] = React.useState('');
-      const [overlayBusy, setOverlayBusy] = React.useState(false);
+      const {
+        fileDiff, setFileDiff, fileDiffError, setFileDiffError,
+        fileContent, setFileContent, fileContentError, setFileContentError, fileContentBusy, setFileContentBusy,
+        showFullFile, setShowFullFile, expandedHunks, setExpandedHunks, walkFloat, setWalkFloat, activeHunk, setActiveHunk,
+        loadFileDiff, loadFileContent, toggleFullFile, expandHunkContext, collapseHunkContext, closeWalkFloat, openWalkFloat,
+      } = useFileDetail({ withRepo, generationRef, review, prNumber, filePath });
       const embedded = props.layer === 'overlay';
       // v2: the right-sidebar tab keeps the main conversation as the only chat surface, so it
       // neither takes over the composer nor renders the (legacy) review discussion box.
@@ -2975,56 +3529,17 @@ window.__ModuleLoader__.load({
       const [detailWidth, setDetailWidth] = React.useState(panelSizing.detail);
       const rootRef = React.useRef(null);
       const [explainBusy, setExplainBusy] = React.useState(false);
-      const [concludeBusy, setConcludeBusy] = React.useState(false);
-      const [publishBusy, setPublishBusy] = React.useState(false);
-      const [walkFloat, setWalkFloat] = React.useState(null);
-      const [suggestionNotice, setSuggestionNotice] = React.useState('');
-      const [activeHunk, setActiveHunk] = React.useState(0);
-      const [publishError, setPublishError] = React.useState('');
-      const [feedbackBusy, setFeedbackBusy] = React.useState(false);
-      const [feedbackError, setFeedbackError] = React.useState('');
       const [wrap, setWrap] = React.useState(false);
       const [mode, setMode] = React.useState('overview');
-      const [roundPick, setRoundPick] = React.useState(null);
-      const [versionPick, setVersionPick] = React.useState({});
-      const [concludeWait, setConcludeWait] = React.useState(false);
-      const [concludeCancelBusy, setConcludeCancelBusy] = React.useState(false);
-      const [preview, setPreview] = React.useState(null);
-      const [previewBusy, setPreviewBusy] = React.useState(false);
-      const [previewError, setPreviewError] = React.useState('');
-      const [previewRefreshBusy, setPreviewRefreshBusy] = React.useState(false);
       const [scrollLine, setScrollLine] = React.useState(0);
       const diffScrollRef = React.useRef(null);
-      const previewTimerRef = React.useRef(null);
-      const previewSeqRef = React.useRef(0);
-      const previewRef = React.useRef(null);
-      previewRef.current = preview;
 
-      // Round selection (null = follow the latest round) and per-round conclusion version picks.
-      const reviewRounds = React.useMemo(() => roundsOf(review), [review]);
-      const latestRoundNumber = reviewRounds.length === 0
-        ? null
-        : reviewRounds[reviewRounds.length - 1].round;
-      const selectedRoundNumber = roundPick === null || !reviewRounds.some((entry) => entry.round === roundPick)
-        ? latestRoundNumber
-        : roundPick;
-      const selectedIsCurrent = selectedRoundNumber === null || selectedRoundNumber === latestRoundNumber;
-      const historicalView = mode === 'overview' && review !== null && selectedIsCurrent === false;
+      const {
+        reviewRounds, latestRoundNumber, selectedRoundNumber, selectedIsCurrent, historicalView,
+        roundPick, setRoundPick, versionPick, setVersionPick, selectRound, pickConclusionVersion,
+      } = useRoundSelection(review, mode, setMode);
       const concluding = review?.concluding ?? null;
       const concludingActive = concluding !== null && concluding !== undefined;
-      const selectRound = React.useCallback((round) => {
-        const next = applyRoundSelection(round, latestRoundNumber);
-        setRoundPick(next.roundPick);
-        setMode(next.mode);
-      }, [latestRoundNumber]);
-      const pickConclusionVersion = React.useCallback((round, version, latestVersion) => {
-        setVersionPick((previous) => {
-          const next = { ...previous };
-          if (version === latestVersion) delete next[round];
-          else next[round] = version;
-          return next;
-        });
-      }, []);
 
       const initialRef = React.useRef({ number: props.initialNumber, file: props.initialFile });
       const rememberRef = React.useRef(props.onRemember);
@@ -3085,83 +3600,24 @@ window.__ModuleLoader__.load({
           return null;
         }
       }, []);
+      const { feedbackBusy, feedbackError, checkFeedback } = useFeedbackCheck({
+        withRepo, stateRef, review, selectedIsCurrent, loadReview,
+      });
+      const {
+        concludeBusy, setConcludeBusy, concludeWait, setConcludeWait, concludeCancelBusy,
+        runConclude, cancelConclude,
+      } = useConcludeAction({ withRepo, stateRef, loadReview });
+      const {
+        overlayDraft, setOverlayDraft, overlayBusy, suggestionNotice, setSuggestionNotice,
+        sendChatMessage, sendOverlayMessage,
+      } = useReviewChat({ withRepo, stateRef, mode, filePath, historicalView, loadReview, t });
+      const {
+        preview, setPreview, previewBusy, setPreviewBusy, previewError, setPreviewError,
+        previewRefreshBusy, setPreviewRefreshBusy, publishBusy, setPublishBusy, publishError, setPublishError,
+        requestPreview, refreshPreview, closePreview, togglePreviewItem,
+        selectAllPreviewItems, selectNonePreviewItems, submitPublish,
+      } = usePreviewPublish({ withRepo, stateRef, loadReview });
 
-      const loadFileDiff = React.useCallback(async (number, path) => {
-        if (typeof number !== 'number' || path === '') return;
-        const generation = generationRef.current;
-        setFileDiff(null);
-        setFileDiffError('');
-        try {
-          const data = await api(withRepo(`/pr-review-api/file?number=${number}&path=${encodeURIComponent(path)}`));
-          if (generation !== generationRef.current) return;
-          setFileDiff(data.file ?? null);
-        } catch (error) {
-          if (generation === generationRef.current) setFileDiffError(error instanceof Error ? error.message : String(error));
-        }
-      }, []);
-
-      const loadFileContent = React.useCallback(async (number, path) => {
-        if (typeof number !== 'number' || path === '') return null;
-        const key = `${number}:${path}`;
-        const cached = fileContentCache.get(key);
-        if (cached !== undefined) {
-          setFileContent(cached);
-          setFileContentError('');
-          return cached;
-        }
-        const generation = generationRef.current;
-        setFileContentBusy(true);
-        setFileContentError('');
-        try {
-          const data = await api(withRepo(`/pr-review-api/file-content?number=${number}&path=${encodeURIComponent(path)}`));
-          if (generation !== generationRef.current) return null;
-          const file = data.file ?? null;
-          if (file !== null) fileContentCache.set(key, file);
-          setFileContent(file);
-          return file;
-        } catch (error) {
-          setFileContentError(error instanceof Error ? error.message : String(error));
-          setFileContent(null);
-          return null;
-        } finally {
-          setFileContentBusy(false);
-        }
-      }, []);
-
-      const toggleFullFile = React.useCallback(async () => {
-        if (showFullFile) {
-          setShowFullFile(false);
-          return;
-        }
-        const number = review?.number ?? prNumber;
-        const file = fileContent ?? (await loadFileContent(number, filePath));
-        if (file !== null) setShowFullFile(true);
-      }, [showFullFile, fileContent, review, prNumber, filePath, loadFileContent]);
-
-      const expandHunkContext = React.useCallback(async () => {
-        const hunk = activeHunk;
-        if (hunk < 1) return;
-        const number = review?.number ?? prNumber;
-        if (fileContent === null) {
-          const file = await loadFileContent(number, filePath);
-          if (file === null) return;
-        }
-        setExpandedHunks((previous) => {
-          const next = new Set(previous);
-          next.add(hunk);
-          return next;
-        });
-        setWalkFloat(null);
-        setActiveHunk(0);
-      }, [activeHunk, review, prNumber, fileContent, filePath, loadFileContent]);
-
-      const collapseHunkContext = React.useCallback((hunk) => {
-        setExpandedHunks((previous) => {
-          const next = new Set(previous);
-          next.delete(hunk);
-          return next;
-        });
-      }, []);
 
       const requestExplain = React.useCallback(async (number, path, force) => {
         if (typeof number !== 'number' || path === '') return;
@@ -3245,345 +3701,19 @@ window.__ModuleLoader__.load({
         }
       }, [loadList]);
 
-      const sendChatMessage = React.useCallback(async (message) => {
-        if (historicalView === true) throw new Error(t('historyDiscussionDisabled'));
-        const number = stateRef.current.prNumber;
-        if (typeof number !== 'number') throw new Error(t('emptyReview'));
-        const textValue = String(message ?? '').trim();
-        if (textValue === '') return;
-        const path = mode === 'file' ? filePath : '';
-        const result = await postJson(withRepo('/pr-review-api/chat'), { number, path, message: textValue });
-        const applied = Array.isArray(result.applied) ? result.applied : [];
-        const inFileScope = path !== '';
-        setSuggestionNotice(
-          applied.length === 0 ? '' : `${t(inFileScope ? 'suggestionUpdated' : 'overviewUpdated')} ×${applied.length}`,
-        );
-        await loadReview(number);
-      }, [filePath, mode, loadReview, t, historicalView]);
-
-      const sendOverlayMessage = React.useCallback(async () => {
-        if (historicalView === true) return;
-        const message = overlayDraft.trim();
-        if (message === '' || overlayBusy) return;
-        setOverlayBusy(true);
-        setOverlayDraft('');
-        try {
-          await sendChatMessage(message);
-        } finally {
-          setOverlayBusy(false);
-        }
-      }, [overlayDraft, overlayBusy, sendChatMessage, historicalView]);
 
 
-      const runConclude = React.useCallback(async () => {
-        const number = stateRef.current.prNumber;
-        if (typeof number !== 'number') return;
-        setConcludeBusy(true);
-        setConcludeWait(true);
-        try {
-          const result = await postJson(withRepo('/pr-review-api/conclude'), { number });
-          // Old hosts conclude synchronously; async hosts answer { started: true } and report
-          // progress through `review.concluding`, picked up by the poll below.
-          if (result?.started !== true) setConcludeWait(false);
-          await loadReview(number);
-        } catch (error) {
-          setConcludeWait(false);
-          setReviewError(error instanceof Error ? error.message : String(error));
-        } finally {
-          setConcludeBusy(false);
-        }
-      }, [loadReview]);
 
-      const cancelConclude = React.useCallback(async () => {
-        const number = stateRef.current.prNumber;
-        if (typeof number !== 'number') return;
-        setConcludeCancelBusy(true);
-        try {
-          await postJson(withRepo('/pr-review-api/conclude/cancel'), { number });
-          await loadReview(number);
-        } catch (error) {
-          setReviewError(error instanceof Error ? error.message : String(error));
-        } finally {
-          setConcludeCancelBusy(false);
-        }
-      }, [loadReview]);
+
 
       /**
        * Turn one host preview payload into dialog state. Host `items` win; hosts that do not
        * return them yet fall back to the current conclusion's items so selection keeps working.
        */
-      const applyPreviewResponse = React.useCallback((data, record, previous) => {
-        const rounds = roundsOf(record);
-        const latest = rounds.length === 0 ? null : rounds[rounds.length - 1];
-        const versions = versionsOf(record, latest, true);
-        const latestVersion = versions.length === 0 ? null : versions[versions.length - 1];
-        const currentList = stateRef.current.list;
-        const hostItems = Array.isArray(data?.items) ? data.items : null;
-        const items = previewItemsOf(
-          hostItems,
-          latestVersion === null ? null : latestVersion.conclusion,
-        );
-        const selectionSupported = previewSelectionSupported(items);
-        const previousSelected = previous !== null && previous !== undefined
-          && Array.isArray(previous.selectedIds)
-          ? new Set(previous.selectedIds)
-          : null;
-        const selectedIds = selectionSupported
-          ? items
-            .filter((item) => previousSelected === null || previousSelected.has(item.id))
-            .map((item) => item.id)
-          : [];
-        return {
-          markdown: typeof data?.markdown === 'string' ? data.markdown : (previous?.markdown ?? ''),
-          language: typeof data?.language === 'string'
-            ? data.language
-            : (previous?.language
-              ?? (typeof currentList?.commentLanguage === 'string' ? currentList.commentLanguage : 'zh')),
-          round: latest === null ? 1 : latest.round,
-          version: latestVersion === null ? 1 : latestVersion.version,
-          conflict: previous?.conflict ?? '',
-          items: selectionSupported ? items : [],
-          selectionSupported,
-          selectedIds,
-        };
-      }, []);
 
-      /** Publish flow: fetch the host-rendered markdown first, then show the preview dialog. */
-      const requestPreview = React.useCallback(async () => {
-        const number = stateRef.current.prNumber;
-        if (typeof number !== 'number') return;
-        setPreviewBusy(true);
-        setPublishError('');
-        setPreviewError('');
-        try {
-          const data = await postJson(
-            withRepo('/pr-review-api/comment/preview'),
-            buildPreviewBody(number),
-          );
-          setPreview(applyPreviewResponse(data, stateRef.current.review, null));
-        } catch (error) {
-          setPublishError(error instanceof Error ? error.message : String(error));
-        } finally {
-          setPreviewBusy(false);
-        }
-      }, [applyPreviewResponse]);
 
-      /** Re-render the preview markdown for the given selection (host filters by includeIds). */
-      const refreshPreview = React.useCallback(async (includeIds) => {
-        const number = stateRef.current.prNumber;
-        const current = previewRef.current;
-        if (typeof number !== 'number' || current === null || current.selectionSupported !== true) return;
-        const seq = previewSeqRef.current + 1;
-        previewSeqRef.current = seq;
-        setPreviewRefreshBusy(true);
-        setPreviewError('');
-        try {
-          const data = await postJson(
-            withRepo('/pr-review-api/comment/preview'),
-            buildPreviewBody(number, includeIds),
-          );
-          if (seq !== previewSeqRef.current) return;
-          setPreview((previous) => {
-            if (previous === null) return previous;
-            const next = applyPreviewResponse(data, stateRef.current.review, previous);
-            const previousIds = new Set((previous.items ?? []).map((item) => item.id));
-            // A host may answer a filtered request with only the selected items: never shrink
-            // the checkbox list, otherwise deselected entries become impossible to re-select.
-            if (next.items.length < previous.items.length) {
-              return {
-                ...previous,
-                markdown: next.markdown,
-                language: next.language,
-                round: next.round,
-                version: next.version,
-              };
-            }
-            const nextIds = new Set(next.items.map((item) => item.id));
-            const selectedIds = (previous.selectedIds ?? []).filter((id) => nextIds.has(id));
-            for (const item of next.items) {
-              if (!previousIds.has(item.id)) selectedIds.push(item.id);
-            }
-            return { ...next, selectedIds, conflict: previous.conflict };
-          });
-        } catch (error) {
-          if (seq === previewSeqRef.current) {
-            setPreviewError(error instanceof Error ? error.message : String(error));
-          }
-        } finally {
-          if (seq === previewSeqRef.current) setPreviewRefreshBusy(false);
-        }
-      }, [applyPreviewResponse]);
 
-      /** Debounce selection changes so rapid checkbox clicks issue one preview request. */
-      const schedulePreviewRefresh = React.useCallback((includeIds) => {
-        if (previewTimerRef.current !== null) clearTimeout(previewTimerRef.current);
-        previewTimerRef.current = setTimeout(() => {
-          previewTimerRef.current = null;
-          void refreshPreview(includeIds);
-        }, 200);
-      }, [refreshPreview]);
 
-      const closePreview = React.useCallback(() => {
-        if (previewTimerRef.current !== null) {
-          clearTimeout(previewTimerRef.current);
-          previewTimerRef.current = null;
-        }
-        setPreview(null);
-        setPreviewError('');
-        setPreviewRefreshBusy(false);
-      }, []);
-
-      const togglePreviewItem = React.useCallback((id) => {
-        const current = previewRef.current;
-        if (current === null || current.selectionSupported !== true) return;
-        const selected = Array.isArray(current.selectedIds) ? current.selectedIds : [];
-        const nextSelected = selected.includes(id)
-          ? selected.filter((item) => item !== id)
-          : [...selected, id];
-        setPreview({ ...current, selectedIds: nextSelected });
-        schedulePreviewRefresh(nextSelected);
-      }, [schedulePreviewRefresh]);
-
-      const selectAllPreviewItems = React.useCallback(() => {
-        const current = previewRef.current;
-        if (current === null || current.selectionSupported !== true) return;
-        const ids = (Array.isArray(current.items) ? current.items : []).map((item) => item.id);
-        setPreview({ ...current, selectedIds: ids });
-        schedulePreviewRefresh(ids);
-      }, [schedulePreviewRefresh]);
-
-      const selectNonePreviewItems = React.useCallback(() => {
-        const current = previewRef.current;
-        if (current === null || current.selectionSupported !== true) return;
-        setPreview({ ...current, selectedIds: [] });
-        schedulePreviewRefresh([]);
-      }, [schedulePreviewRefresh]);
-
-      const submitPublish = React.useCallback(async (force) => {
-        const number = stateRef.current.prNumber;
-        if (typeof number !== 'number') return;
-        const includeIds = selectionIncludeIds(previewRef.current);
-        setPublishBusy(true);
-        setPreviewError('');
-        try {
-          await postJson(
-            withRepo('/pr-review-api/comment'),
-            buildPublishBody(number, force, includeIds),
-          );
-          closePreview();
-          await loadReview(number);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          const code = error instanceof Error && typeof error.code === 'string' ? error.code : '';
-          if (code === 'already-published' || code === 'publishing') {
-            setPreview((previous) => (previous === null ? previous : { ...previous, conflict: code }));
-          } else {
-            setPreviewError(message);
-            setPublishError(message);
-          }
-        } finally {
-          setPublishBusy(false);
-        }
-      }, [loadReview, closePreview]);
-
-      const checkFeedback = React.useCallback(async () => {
-        const number = stateRef.current.prNumber;
-        if (typeof number !== 'number') return;
-        setFeedbackBusy(true);
-        setFeedbackError('');
-        try {
-          await postJson(withRepo('/pr-review-api/feedback'), { number });
-          await loadReview(number);
-        } catch (error) {
-          setFeedbackError(error instanceof Error ? error.message : String(error));
-        } finally {
-          setFeedbackBusy(false);
-        }
-      }, [loadReview]);
-
-      const closeWalkFloat = React.useCallback(() => {
-        setWalkFloat(null);
-        setActiveHunk(0);
-      }, []);
-
-      const openWalkFloat = React.useCallback((kind, payload, title, event) => {
-        const logic = kind === 'logic' && typeof payload === 'string' ? payload : '';
-        const steps = kind === 'steps' && Array.isArray(payload) ? payload : [];
-        if ((kind === 'logic' && logic === '') || (kind === 'steps' && steps.length === 0)) return;
-        const margin = 12;
-        const width = Math.min(420, Math.max(260, window.innerWidth - 24));
-        const height = Math.min(Math.round(window.innerHeight * 0.6), 520);
-        const x = typeof event?.clientX === 'number' ? event.clientX : window.innerWidth / 2;
-        const y = typeof event?.clientY === 'number' ? event.clientY : window.innerHeight / 2;
-        setWalkFloat({
-          kind,
-          steps,
-          logic,
-          title,
-          width,
-          left: Math.min(Math.max(margin, x - 60), Math.max(margin, window.innerWidth - width - margin)),
-          top: Math.min(Math.max(margin, y - 16), Math.max(margin, window.innerHeight - height - margin)),
-        });
-      }, []);
-
-      React.useEffect(() => {
-        if (walkFloat === null) return undefined;
-        const onKeyDown = (event) => {
-          if (event.key === 'Escape') closeWalkFloat();
-        };
-        window.addEventListener('keydown', onKeyDown);
-        return () => window.removeEventListener('keydown', onKeyDown);
-      }, [walkFloat, closeWalkFloat]);
-
-      // Resolve the repository that belongs to the current workspace (not a shared global list).
-      // A tab restored at startup can load before the host half registers its routes (restart
-      // race), so retry with backoff instead of ending in a permanent error shell.
-      React.useEffect(() => {
-        let cancelled = false;
-        let timer = null;
-        let attempt = 0;
-        if (typeof cwd !== 'string' || cwd === '') {
-          setRepoContext(null);
-          setContextError('no-cwd');
-          setContextBusy(false);
-          return undefined;
-        }
-        setRepoContext(null);
-        setContextError('');
-        setContextBusy(true);
-        const load = () => {
-          attempt += 1;
-          void api(`/pr-review-api/context?cwd=${encodeURIComponent(cwd)}`)
-            .then((data) => {
-              if (cancelled) return;
-              if (data.supported === true && data.repo !== undefined && data.repo !== null) {
-                setRepoContext(data.repo);
-                setContextError('');
-                setContextBusy(false);
-                return;
-              }
-              setRepoContext(null);
-              setContextError(typeof data.reason === 'string' ? data.reason : 'unsupported');
-              setContextBusy(false);
-            })
-            .catch(() => {
-              if (cancelled) return;
-              if (attempt >= 5) {
-                setRepoContext(null);
-                setContextError('hostNotReady');
-                setContextBusy(false);
-                return;
-              }
-              setContextBusy(true);
-              timer = setTimeout(load, Math.min(8000, 500 * 2 ** (attempt - 1)));
-            });
-        };
-        load();
-        return () => {
-          cancelled = true;
-          if (timer !== null) clearTimeout(timer);
-        };
-      }, [cwd, contextAttempt]);
 
       // Switching workspace/repository must reset the selection so two repos never mix.
       React.useEffect(() => {
@@ -3686,16 +3816,6 @@ window.__ModuleLoader__.load({
         return () => observer.disconnect();
       }, [sidebar]);
 
-      // Periodically re-check developer feedback on the published comment (cheap unless new replies exist).
-      React.useEffect(() => {
-        if (review === null || review.status !== 'done') return undefined;
-        if (selectedIsCurrent === false) return undefined;
-        if ((review.published ?? []).length === 0) return undefined;
-        const timer = setInterval(() => {
-          if (!feedbackBusy) void checkFeedback();
-        }, 120_000);
-        return () => clearInterval(timer);
-      }, [review, feedbackBusy, checkFeedback, selectedIsCurrent]);
 
       // Poll the review while it is being generated; refresh the PR list slowly.
       React.useEffect(() => {
@@ -3946,11 +4066,21 @@ window.__ModuleLoader__.load({
 
       const banners = [
         list?.tokenMissing === true ? h('div', { className: 'prr-banner', key: 'token' }, t('tokenMissing')) : null,
+        list?.truncatedList === true ? h('div', { className: 'prr-banner', key: 'trunc' }, t('truncatedList')) : null,
+        typeof list?.cacheError === 'string' && list.cacheError !== ''
+          ? h('div', { className: 'prr-banner', key: 'cache' }, list.cacheError)
+          : null,
+        typeof list?.saveError === 'string' && list.saveError !== ''
+          ? h('div', { className: 'prr-banner', key: 'save' }, list.saveError)
+          : null,
         listError === '' ? null : h('div', { className: 'prr-banner', key: 'list' }, listError),
         list !== null && list.lastPollError !== null && list.lastPollError !== undefined && list.lastPollError !== ''
           ? h('div', { className: 'prr-banner', key: 'poll' }, list.lastPollError)
           : null,
         reviewError === '' ? null : h('div', { className: 'prr-banner', key: 'review' }, reviewError),
+        review?.filesTruncated === true
+          ? h('div', { className: 'prr-banner', key: 'files-trunc' }, t('filesTruncated'))
+          : null,
         publishError === '' ? null : h('div', { className: 'prr-banner', key: 'publish' }, publishError),
         feedbackError === '' ? null : h('div', { className: 'prr-banner', key: 'feedback' }, feedbackError),
         fileDiffError === '' ? null : h('div', { className: 'prr-banner', key: 'diff' }, fileDiffError),

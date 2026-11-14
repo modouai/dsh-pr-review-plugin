@@ -727,6 +727,11 @@ export function ensureConclusionIds(conclusion) {
 
 const VERDICTS = new Set(['block', 'suggest', 'pass']);
 
+/** Clamp one verdict to the known set; unknown values fall back (never trust a model enum). */
+export function normalizeVerdict(value, fallback = 'suggest') {
+  return VERDICTS.has(value) ? value : fallback;
+}
+
 /**
  * Normalize the final conclusion: stable ids, no empty items, no duplicate items,
  * and no phantom files (a file outside the review is marked in the point instead).
@@ -765,7 +770,7 @@ export function normalizeConclusion(raw, options = {}) {
     return items;
   };
   return {
-    verdict: VERDICTS.has(raw?.verdict) ? raw.verdict : 'suggest',
+    verdict: normalizeVerdict(raw?.verdict),
     summary: typeof raw?.summary === 'string' ? raw.summary.trim() : '',
     blockers: build('blocker', raw?.blockers),
     suggestions: build('suggestion', raw?.suggestions),
@@ -779,11 +784,14 @@ export function normalizeConclusion(raw, options = {}) {
  * Deterministic verdict calibration (P0).
  * A human-edited conclusion is returned untouched; otherwise blockers or an explicit
  * block severity win, and a "pass" that still carries suggestions becomes "suggest".
+ * Block severity on conclusion items is honored when present (the exported contract);
+ * the internal pipeline strips it in normalizeConclusion and passes per-file
+ * severities through `fileSeverities` instead.
  */
 export function calibrateVerdict(conclusion, options = {}) {
   if (conclusion === null || conclusion === undefined) return conclusion;
   if (options.humanEdited === true) return conclusion;
-  const verdict = VERDICTS.has(conclusion.verdict) ? conclusion.verdict : 'suggest';
+  const verdict = normalizeVerdict(conclusion.verdict);
   const blockers = Array.isArray(conclusion.blockers) ? conclusion.blockers : [];
   const suggestions = Array.isArray(conclusion.suggestions) ? conclusion.suggestions : [];
   const fileSeverities = Array.isArray(options.fileSeverities) ? options.fileSeverities : [];

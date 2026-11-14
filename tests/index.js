@@ -9,3 +9,4 @@
 
 import './llm.test.js';
 import './index.test.js';
+import './client.test.js';

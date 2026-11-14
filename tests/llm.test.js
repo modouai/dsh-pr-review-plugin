@@ -19,9 +19,21 @@ import {
   itemId,
   mergeConclusion,
   normalizeConclusion,
+  normalizeVerdict,
   parseFeedbackReply,
   textSimilarity,
 } from '../llm.js';
+
+test('normalizeVerdict: keeps known verdicts and falls back on anything else', () => {
+  assert.equal(normalizeVerdict('block'), 'block');
+  assert.equal(normalizeVerdict('suggest'), 'suggest');
+  assert.equal(normalizeVerdict('pass'), 'pass');
+  assert.equal(normalizeVerdict('BLOCK'), 'suggest');
+  assert.equal(normalizeVerdict('nonsense'), 'suggest');
+  assert.equal(normalizeVerdict(undefined), 'suggest');
+  assert.equal(normalizeVerdict(null, 'pass'), 'pass');
+  assert.equal(normalizeVerdict('', 'block'), 'block');
+});
 
 test('itemId: stable, kind-prefixed and distinct', () => {
   const blocker = itemId('blocker', 'src/a.js', '空指针风险');

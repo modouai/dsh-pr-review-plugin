@@ -15,11 +15,15 @@
 
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
-import { createClient, resolveProviderConfig, resolveToken } from './providers.js';
+import { HarnessError } from '@deepseek-ai/dsh-llm';
+import Schema from '@deepseek-ai/schemastery';
+
+import { createClient, MAX_PULL_FILES, resolveProviderConfig, resolveToken } from './providers.js';
 import { parseDiff } from './diff.js';
 import {
   buildChatPrompt,
@@ -42,6 +46,7 @@ import {
   normalizeConclusion,
   normalizeExplanation,
   normalizeReport,
+  normalizeVerdict,
 } from './llm.js';
 
 /** Cordis function-plugin name. */
@@ -72,6 +77,45 @@ const DEFAULTS = {
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_FILE_DIFF_BYTES = 400 * 1024;
+/** The poll list caps the number of open pull requests: it also bounds auto-review cost. */
+const MAX_LISTED_PRS = 20;
+/** Safety valve for the memory/disk footprint of the review cache. */
+const MAX_REVIEWS = 50;
+
+/**
+ * Config schema (Schemastery, a Standard Schema): the loader validates user values
+ * and fills missing keys from these defaults before `apply(ctx, config)` runs.
+ * Field defaults live in DEFAULTS and are referenced here, so the values have one source.
+ */
+export const Config = Schema.object({
+  platform: Schema.union(['forgejo', 'github']).default(DEFAULTS.platform),
+  baseUrl: Schema.string().default(DEFAULTS.baseUrl),
+  repo: Schema.string().default(DEFAULTS.repo),
+  token: Schema.string().default(DEFAULTS.token),
+  pollSeconds: Schema.number().min(15).default(DEFAULTS.pollSeconds),
+  autoReview: Schema.boolean().default(DEFAULTS.autoReview),
+  provider: Schema.string().default(DEFAULTS.provider),
+  model: Schema.string().default(DEFAULTS.model),
+  reasoningEffort: Schema.union(['off', 'low', 'high', 'max']).default(DEFAULTS.reasoningEffort),
+  maxDiffCharsPerFile: Schema.number().min(1000).default(DEFAULTS.maxDiffCharsPerFile),
+  maxFilesPerReview: Schema.number().min(1).default(DEFAULTS.maxFilesPerReview),
+  commentLanguage: Schema.union(['zh', 'en']).default(DEFAULTS.commentLanguage),
+  autoReconclude: Schema.boolean().default(DEFAULTS.autoReconclude),
+});
+
+/** Stable tool failure codes: the tool registry keeps `error.code` for HarnessError only. */
+const TOOL_ERROR = Object.freeze({
+  invalidArgs: 'INVALID_ARGS',
+  notFound: 'NOT_FOUND',
+  conflict: 'CONFLICT',
+  staleRevision: 'STALE_REVISION',
+  limitExceeded: 'LIMIT_EXCEEDED',
+});
+
+/** A tool failure with a stable machine-routable code (route on the code, never the message). */
+function toolError(code, message) {
+  return new HarnessError(message, code);
+}
 
 /** JSON response helper (no-store: every answer is a live fact). */
 function sendJson(res, status, payload) {
@@ -123,6 +167,7 @@ function serializeReview(record) {
     error: record.error,
     pull: record.pull,
     files: record.files,
+    filesTruncated: record.filesTruncated === true,
     report: record.report,
     explanations: [...record.explanations.entries()].map(([filePath, entry]) => ({
       file: filePath,
@@ -457,6 +502,7 @@ export function apply(ctx, config) {
   const state = {
     repoKey: `${provider.platform}:${provider.repo}`,
     prs: [],
+    prsTruncated: false,
     reviews: new Map(),
     lastPollAt: 0,
     lastPollError: null,
@@ -464,6 +510,8 @@ export function apply(ctx, config) {
     pollRunning: false,
     client: null,
     persisted: false,
+    cacheError: '',
+    saveError: '',
     saveTimer: null,
   };
 
@@ -592,56 +640,210 @@ export function apply(ctx, config) {
     }, 800);
   }
 
+  /** Serialize the lightweight review state (no diff text). */
+  function buildCachePayload() {
+    const payload = { savedAt: Date.now(), reviews: {} };
+    for (const [number, record] of state.reviews) {
+      if (record.status === 'reviewing') continue;
+      payload.reviews[number] = {
+        number: record.number,
+        status: record.status,
+        headSha: record.headSha,
+        startedAt: record.startedAt,
+        finishedAt: record.finishedAt,
+        error: record.error,
+        pull: record.pull,
+        files: record.files,
+        filesTruncated: record.filesTruncated === true,
+        report: record.report,
+        explanations: [...record.explanations.entries()].map(([filePath, entry]) => ({
+          file: filePath,
+          status: entry.status,
+          error: entry.error,
+          explanation: entry.explanation,
+          chat: entry.chat,
+          updatedAt: entry.updatedAt,
+        })),
+        pullChat: record.pullChat,
+        reportUpdatedAt: record.reportUpdatedAt ?? 0,
+        conclusionEditedAt: record.conclusionEditedAt ?? 0,
+        round: record.round ?? 1,
+        roundHistory: record.roundHistory ?? [],
+        humanItemIds: record.humanItemIds ?? [],
+        coverage: record.coverage ?? null,
+        concludeError: record.concludeError ?? null,
+        published: record.published ?? [],
+        publishedItems: record.publishedItems ?? [],
+        feedback: record.feedback ?? null,
+        delta: record.delta ?? null,
+        previousRound: record.previousRound ?? null,
+        conclusionAt: record.conclusionAt ?? 0,
+        conclusion: record.conclusion,
+        comment: record.comment ?? null,
+        revision: record.revision ?? 0,
+        audit: Array.isArray(record.audit) ? record.audit : [],
+      };
+    }
+    return payload;
+  }
+
+  /** Temp path next to the cache file: same directory keeps the rename atomic. */
+  function cacheTempPath() {
+    return `${cachePath}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  }
+
+  /** Rename with short retries: Windows sync tools can briefly lock the target (EBUSY/EPERM). */
+  async function renameWithRetry(from, to) {
+    const waitBefore = [0, 80, 240];
+    for (let attempt = 0; attempt < waitBefore.length; attempt += 1) {
+      if (waitBefore[attempt] > 0) await new Promise((resolve) => setTimeout(resolve, waitBefore[attempt]));
+      try {
+        await rename(from, to);
+        return;
+      } catch (error) {
+        if (attempt === waitBefore.length - 1) throw error;
+      }
+    }
+  }
+
+  /**
+   * Persist through a temp file + rename: a crash mid-write can never leave a
+   * truncated cache behind, because the previous file stays intact until the rename.
+   */
   async function saveNow() {
     // Nothing to persist before a workspace (or explicit config) names the repository.
     if (provider.repo === '') return;
+    const tempPath = cacheTempPath();
     try {
-      const payload = { savedAt: Date.now(), reviews: {} };
-      for (const [number, record] of state.reviews) {
-        if (record.status === 'reviewing') continue;
-        payload.reviews[number] = {
-          number: record.number,
-          status: record.status,
-          headSha: record.headSha,
-          startedAt: record.startedAt,
-          finishedAt: record.finishedAt,
-          error: record.error,
-          pull: record.pull,
-          files: record.files,
-          report: record.report,
-          explanations: [...record.explanations.entries()].map(([filePath, entry]) => ({
-            file: filePath,
-            status: entry.status,
-            error: entry.error,
-            explanation: entry.explanation,
-            chat: entry.chat,
-            updatedAt: entry.updatedAt,
-          })),
-          pullChat: record.pullChat,
-          reportUpdatedAt: record.reportUpdatedAt ?? 0,
-          conclusionEditedAt: record.conclusionEditedAt ?? 0,
-          round: record.round ?? 1,
-          roundHistory: record.roundHistory ?? [],
-          humanItemIds: record.humanItemIds ?? [],
-          coverage: record.coverage ?? null,
-          concludeError: record.concludeError ?? null,
-          published: record.published ?? [],
-          publishedItems: record.publishedItems ?? [],
-          feedback: record.feedback ?? null,
-          delta: record.delta ?? null,
-          previousRound: record.previousRound ?? null,
-          conclusionAt: record.conclusionAt ?? 0,
-          conclusion: record.conclusion,
-          comment: record.comment ?? null,
-          revision: record.revision ?? 0,
-          audit: Array.isArray(record.audit) ? record.audit : [],
-        };
-      }
+      const text = JSON.stringify(buildCachePayload());
       await mkdir(cacheDir(), { recursive: true });
-      await writeFile(cachePath, JSON.stringify(payload), 'utf8');
+      await writeFile(tempPath, text, 'utf8');
+      await renameWithRetry(tempPath, cachePath);
+      state.saveError = '';
     } catch (error) {
       console.warn('[pr-review] 保存审查缓存失败', error);
+      state.saveError = `保存审查缓存失败：${error instanceof Error ? error.message : String(error)}`;
+      try {
+        await unlink(tempPath);
+      } catch {
+        // Temp file already gone or locked; the next save uses a fresh temp name.
+      }
     }
+  }
+
+  /** Synchronous best-effort save for teardown, when async work may not get another turn. */
+  function saveNowSync() {
+    if (provider.repo === '') return;
+    const tempPath = cacheTempPath();
+    try {
+      mkdirSync(cacheDir(), { recursive: true });
+      writeFileSync(tempPath, JSON.stringify(buildCachePayload()), 'utf8');
+      renameSync(tempPath, cachePath);
+    } catch (error) {
+      console.warn('[pr-review] 退出前保存审查缓存失败', error);
+      try {
+        unlinkSync(tempPath);
+      } catch {
+        // Temp file already gone or locked.
+      }
+    }
+  }
+
+  /**
+   * Rebuild one persisted review record, tolerating missing or older fields.
+   * Returns null when the entry has no usable number.
+   */
+  function restoreReviewRecord(saved, key) {
+    const explanations = new Map();
+    for (const entry of Array.isArray(saved.explanations) ? saved.explanations : []) {
+      if (typeof entry?.file !== 'string') continue;
+      explanations.set(entry.file, {
+        status: entry.status ?? 'done',
+        error: entry.error ?? null,
+        explanation: entry.explanation ?? null,
+        chat: Array.isArray(entry.chat) ? entry.chat : [],
+        updatedAt: entry.updatedAt ?? 0,
+      });
+    }
+    const number = Number(saved.number ?? key);
+    if (!Number.isFinite(number)) return null;
+    const record = {
+      number,
+      status: saved.status === 'reviewing' ? 'stale' : (saved.status ?? 'done'),
+      // A failed review keeps no head marker, so the next poll retries it.
+      headSha: saved.status === 'error' ? '' : (saved.headSha ?? ''),
+      startedAt: saved.startedAt ?? 0,
+      finishedAt: saved.finishedAt ?? 0,
+      error: saved.error ?? null,
+      pull: saved.pull ?? null,
+      files: Array.isArray(saved.files) ? saved.files : [],
+      filesTruncated: saved.filesTruncated === true,
+      report: saved.report ?? null,
+      explanations,
+      pullChat: Array.isArray(saved.pullChat) ? saved.pullChat : [],
+      reportUpdatedAt: saved.reportUpdatedAt ?? 0,
+      conclusionEditedAt: saved.conclusionEditedAt ?? 0,
+      round: saved.round ?? 1,
+      published: (Array.isArray(saved.published) ? saved.published : []).map((entry) => ({
+        ...entry,
+        version: Number.isFinite(entry?.version) ? entry.version : 0,
+      })),
+      publishedItems: Array.isArray(saved.publishedItems) ? saved.publishedItems : [],
+      feedback: saved.feedback ?? null,
+      delta: saved.delta ?? null,
+      previousRound: saved.previousRound ?? null,
+      conclusionAt: saved.conclusionAt ?? 0,
+      conclusion: saved.conclusion ?? null,
+      comment: saved.comment ?? null,
+      humanItemIds: Array.isArray(saved.humanItemIds)
+        ? saved.humanItemIds.filter((id) => typeof id === 'string' && id !== '')
+        : [],
+      coverage: saved.coverage ?? null,
+      roundHistory: [],
+      concluding: null,
+      concludingAbort: null,
+      publishing: false,
+      concludeError: null,
+      lastAutoConcludeAt: 0,
+      diffFiles: undefined,
+      revision: Number.isInteger(saved.revision) && saved.revision >= 0 ? saved.revision : 0,
+      audit: Array.isArray(saved.audit) ? saved.audit.filter((item) => item !== null && typeof item === 'object') : [],
+    };
+    if (Array.isArray(saved.roundHistory) && saved.roundHistory.length > 0) {
+      record.roundHistory = saved.roundHistory.map((entry, index) => sanitizeRoundEntry(entry, index));
+    } else {
+      // Legacy cache: synthesize the single round it had so the history starts non-empty.
+      const legacyRound = Number.isFinite(record.round) && record.round > 0 ? record.round : 1;
+      record.roundHistory = [sanitizeRoundEntry({
+        round: legacyRound,
+        headSha: record.headSha,
+        startedAt: record.startedAt,
+        finishedAt: record.finishedAt,
+        conclusions: record.conclusion === null || record.conclusion === undefined
+          ? []
+          : [{
+              version: 1,
+              createdAt: record.conclusionAt || record.finishedAt || record.startedAt || Date.now(),
+              source: 'model',
+              conclusion: record.conclusion,
+              coverage: record.coverage ?? null,
+            }],
+        delta: record.delta ?? null,
+        feedback: record.feedback ?? null,
+        publishedIds: record.published
+          .filter((entry) => (entry.round ?? legacyRound) === legacyRound && typeof entry.id === 'number')
+          .map((entry) => entry.id),
+      }, 0)];
+    }
+    // Legacy published items get the same stable ids the current commentItems() would use.
+    record.publishedItems = record.publishedItems.map((item) => (
+      item !== null && typeof item === 'object' && (typeof item.id !== 'string' || item.id === '')
+        ? { ...item, id: itemId(item.kind, item.file, item.point) }
+        : item
+    ));
+    const current = syncTopLevelFromHistory(record);
+    record.round = current.round;
+    return record;
   }
 
   async function loadCache() {
@@ -650,101 +852,24 @@ export function apply(ctx, config) {
       const payload = JSON.parse(text);
       const reviews = payload.reviews ?? {};
       for (const key of Object.keys(reviews)) {
-        const saved = reviews[key];
-        const explanations = new Map();
-        for (const entry of Array.isArray(saved.explanations) ? saved.explanations : []) {
-          if (typeof entry?.file !== 'string') continue;
-          explanations.set(entry.file, {
-            status: entry.status ?? 'done',
-            error: entry.error ?? null,
-            explanation: entry.explanation ?? null,
-            chat: Array.isArray(entry.chat) ? entry.chat : [],
-            updatedAt: entry.updatedAt ?? 0,
-          });
-        }
-        const number = Number(saved.number ?? key);
-        if (!Number.isFinite(number)) continue;
-        const record = {
-          number,
-          status: saved.status === 'reviewing' ? 'stale' : (saved.status ?? 'done'),
-          // A failed review keeps no head marker, so the next poll retries it.
-          headSha: saved.status === 'error' ? '' : (saved.headSha ?? ''),
-          startedAt: saved.startedAt ?? 0,
-          finishedAt: saved.finishedAt ?? 0,
-          error: saved.error ?? null,
-          pull: saved.pull ?? null,
-          files: Array.isArray(saved.files) ? saved.files : [],
-          report: saved.report ?? null,
-          explanations,
-          pullChat: Array.isArray(saved.pullChat) ? saved.pullChat : [],
-          reportUpdatedAt: saved.reportUpdatedAt ?? 0,
-          conclusionEditedAt: saved.conclusionEditedAt ?? 0,
-          round: saved.round ?? 1,
-          published: (Array.isArray(saved.published) ? saved.published : []).map((entry) => ({
-            ...entry,
-            version: Number.isFinite(entry?.version) ? entry.version : 0,
-          })),
-          publishedItems: Array.isArray(saved.publishedItems) ? saved.publishedItems : [],
-          feedback: saved.feedback ?? null,
-          delta: saved.delta ?? null,
-          previousRound: saved.previousRound ?? null,
-          conclusionAt: saved.conclusionAt ?? 0,
-          conclusion: saved.conclusion ?? null,
-          comment: saved.comment ?? null,
-          humanItemIds: Array.isArray(saved.humanItemIds)
-            ? saved.humanItemIds.filter((id) => typeof id === 'string' && id !== '')
-            : [],
-          coverage: saved.coverage ?? null,
-          roundHistory: [],
-          concluding: null,
-          concludingAbort: null,
-          publishing: false,
-          concludeError: null,
-          lastAutoConcludeAt: 0,
-          diffFiles: undefined,
-          revision: Number.isInteger(saved.revision) && saved.revision >= 0 ? saved.revision : 0,
-          audit: Array.isArray(saved.audit) ? saved.audit.filter((item) => item !== null && typeof item === 'object') : [],
-        };
-        if (Array.isArray(saved.roundHistory) && saved.roundHistory.length > 0) {
-          record.roundHistory = saved.roundHistory.map((entry, index) => sanitizeRoundEntry(entry, index));
-        } else {
-          // Legacy cache: synthesize the single round it had so the history starts non-empty.
-          const legacyRound = Number.isFinite(record.round) && record.round > 0 ? record.round : 1;
-          record.roundHistory = [sanitizeRoundEntry({
-            round: legacyRound,
-            headSha: record.headSha,
-            startedAt: record.startedAt,
-            finishedAt: record.finishedAt,
-            conclusions: record.conclusion === null || record.conclusion === undefined
-              ? []
-              : [{
-                  version: 1,
-                  createdAt: record.conclusionAt || record.finishedAt || record.startedAt || Date.now(),
-                  source: 'model',
-                  conclusion: record.conclusion,
-                  coverage: record.coverage ?? null,
-                }],
-            delta: record.delta ?? null,
-            feedback: record.feedback ?? null,
-            publishedIds: record.published
-              .filter((entry) => (entry.round ?? legacyRound) === legacyRound && typeof entry.id === 'number')
-              .map((entry) => entry.id),
-          }, 0)];
-        }
-        // Legacy published items get the same stable ids the current commentItems() would use.
-        record.publishedItems = record.publishedItems.map((item) => (
-          item !== null && typeof item === 'object' && (typeof item.id !== 'string' || item.id === '')
-            ? { ...item, id: itemId(item.kind, item.file, item.point) }
-            : item
-        ));
-        const current = syncTopLevelFromHistory(record);
-        record.round = current.round;
-        state.reviews.set(number, record);
+        const record = restoreReviewRecord(reviews[key], key);
+        if (record !== null) state.reviews.set(record.number, record);
       }
       state.persisted = true;
-    } catch {
-      // A missing or unreadable cache simply starts empty.
+    } catch (error) {
       state.persisted = false;
+      // First run for this repository: no cache to read, start empty.
+      if (error?.code === 'ENOENT') return;
+      // Never let the next save overwrite a cache we could not read: keep it for recovery.
+      const archivedPath = `${cachePath}.corrupt-${Date.now()}`;
+      try {
+        await rename(cachePath, archivedPath);
+        state.cacheError = `审查缓存读取失败，原文件已另存为 ${path.basename(archivedPath)}（${error instanceof Error ? error.message : String(error)}）`;
+      } catch (renameError) {
+        state.cacheError = `审查缓存读取失败：${error instanceof Error ? error.message : String(error)}`;
+        console.warn('[pr-review] 缓存留档失败', renameError);
+      }
+      console.warn('[pr-review] 审查缓存读取失败', error);
     }
   }
 
@@ -762,6 +887,7 @@ export function apply(ctx, config) {
     cachePath = cacheFile(provider);
     state.repoKey = key;
     state.prs = [];
+    state.prsTruncated = false;
     state.reviews = new Map();
     state.lastPollAt = 0;
     state.lastPollError = null;
@@ -769,6 +895,8 @@ export function apply(ctx, config) {
     state.client = null;
     state.tokenMissing = false;
     state.persisted = false;
+    state.cacheError = '';
+    state.saveError = '';
     await loadCache();
     void refreshPulls();
     return true;
@@ -798,10 +926,11 @@ export function apply(ctx, config) {
     const token = await resolveToken(settings, provider);
     if (token === null || token === undefined) {
       state.tokenMissing = true;
-      throw new Error(
+      throw new HarnessError(
         provider.platform === 'github'
           ? '缺少 GitHub token：请在插件配置填写 token，或设置 GITHUB_TOKEN / GH_TOKEN，或先 `gh auth login`。'
           : '缺少 Forgejo token：请在插件配置填写 token，或设置 FORGEJO_TOKEN，或先 `tea login`。',
+        'MISSING_CREDENTIAL',
       );
     }
     state.tokenMissing = false;
@@ -836,6 +965,28 @@ export function apply(ctx, config) {
 
   // ---------- pull list ----------
 
+  /**
+   * Keep the review cache bounded: drop the oldest finished records that were never
+   * published. Records with published comments are the reviewer's history and stay
+   * forever (the product promises version history is never deleted).
+   */
+  function pruneReviews() {
+    if (state.reviews.size <= MAX_REVIEWS) return;
+    const candidates = [...state.reviews.entries()]
+      .filter(([, record]) => record.status !== 'reviewing' && (record.published ?? []).length === 0)
+      .sort((left, right) => (left[1].finishedAt ?? 0) - (right[1].finishedAt ?? 0));
+    let pruned = 0;
+    for (const [number] of candidates) {
+      if (state.reviews.size <= MAX_REVIEWS) break;
+      state.reviews.delete(number);
+      pruned += 1;
+    }
+    if (pruned > 0) {
+      console.log(`[pr-review] 已淘汰 ${pruned} 条未发布的旧审查缓存（上限 ${MAX_REVIEWS}）`);
+      scheduleSave();
+    }
+  }
+
   async function refreshPulls() {
     if (state.pollRunning) return;
     // No configured repository yet: workspace sessions activate one from their git origin.
@@ -843,8 +994,12 @@ export function apply(ctx, config) {
     state.pollRunning = true;
     try {
       const client = await ensureClient();
-      const prs = await client.listOpenPulls();
+      // The provider asks for one extra entry: a full page means older PRs were cut off,
+      // and the panel says so instead of silently hiding them.
+      const fetched = await client.listOpenPulls();
+      const prs = fetched.slice(0, MAX_LISTED_PRS);
       state.prs = prs;
+      state.prsTruncated = fetched.length > MAX_LISTED_PRS;
       state.lastPollAt = Date.now();
       state.lastPollError = null;
       if (settings.autoReview !== false) {
@@ -868,6 +1023,7 @@ export function apply(ctx, config) {
           }
         }
       }
+      pruneReviews();
     } catch (error) {
       state.lastPollError = error instanceof Error ? error.message : String(error);
     } finally {
@@ -877,6 +1033,86 @@ export function apply(ctx, config) {
 
   // ---------- review pipeline ----------
 
+  /** A brand-new record shell for round 1; runReview fills it in. */
+  function newReviewRecord(number, now) {
+    const record = {
+      number,
+      round: 1,
+      status: 'reviewing',
+      startedAt: now,
+      finishedAt: 0,
+      headSha: '',
+      error: null,
+      pull: null,
+      files: [],
+      filesTruncated: false,
+      report: null,
+      explanations: new Map(),
+      pullChat: [],
+      reportUpdatedAt: 0,
+      conclusionEditedAt: 0,
+      conclusionAt: 0,
+      conclusion: null,
+      comment: null,
+      published: [],
+      publishedItems: [],
+      feedback: null,
+      delta: null,
+      previousRound: null,
+      humanItemIds: [],
+      coverage: null,
+      roundHistory: [],
+      concluding: null,
+      concludingAbort: null,
+      publishing: false,
+      concludeError: null,
+      lastAutoConcludeAt: 0,
+      diffFiles: undefined,
+    };
+    const round = roundHistoryOf(record)[0];
+    round.startedAt = now;
+    round.headSha = '';
+    return record;
+  }
+
+  /**
+   * Start a new round on an existing record: remember the previous conclusion for
+   * the resolved-vs-still-open comparison, then clear every per-round field.
+   */
+  function rollNewRound(record, now) {
+    const history = roundHistoryOf(record);
+    const previousRoundEntry = history[history.length - 1];
+    const previousVersion = latestConclusionVersionOf(record);
+    const previousItems = previousVersion === null ? [] : commentItems(previousVersion.conclusion);
+    record.previousRound = previousVersion === null ? null : {
+      round: previousRoundEntry.round,
+      headSha: previousRoundEntry.headSha || record.headSha || '',
+      conclusion: cloneJson(previousVersion.conclusion),
+      items: previousItems.length > 0
+        ? previousItems
+        : (Array.isArray(record.publishedItems) ? record.publishedItems : []),
+    };
+    abortConclude(record);
+    history.push(makeRoundEntry(previousRoundEntry.round + 1, '', now));
+    record.round = previousRoundEntry.round + 1;
+    record.report = null;
+    record.explanations = new Map();
+    record.filesTruncated = false;
+    record.pullChat = [];
+    record.reportUpdatedAt = 0;
+    record.conclusionEditedAt = 0;
+    record.conclusionAt = 0;
+    record.conclusion = null;
+    record.comment = null;
+    record.publishedItems = [];
+    record.feedback = null;
+    record.delta = null;
+    record.humanItemIds = [];
+    record.coverage = null;
+    record.concludeError = null;
+    record.lastAutoConcludeAt = 0;
+  }
+
   /** Create the record shell and kick off the report; safe to call repeatedly. */
   function startReview(number, force) {
     const existing = state.reviews.get(number);
@@ -884,76 +1120,10 @@ export function apply(ctx, config) {
     const now = Date.now();
     let record;
     if (existing === undefined) {
-      record = {
-        number,
-        round: 1,
-        status: 'reviewing',
-        startedAt: now,
-        finishedAt: 0,
-        headSha: '',
-        error: null,
-        pull: null,
-        files: [],
-        report: null,
-        explanations: new Map(),
-        pullChat: [],
-        reportUpdatedAt: 0,
-        conclusionEditedAt: 0,
-        conclusionAt: 0,
-        conclusion: null,
-        comment: null,
-        published: [],
-        publishedItems: [],
-        feedback: null,
-        delta: null,
-        previousRound: null,
-        humanItemIds: [],
-        coverage: null,
-        roundHistory: [],
-        concluding: null,
-        concludingAbort: null,
-        publishing: false,
-        concludeError: null,
-        lastAutoConcludeAt: 0,
-        diffFiles: undefined,
-      };
-      const round = roundHistoryOf(record)[0];
-      round.startedAt = now;
-      round.headSha = '';
+      record = newReviewRecord(number, now);
     } else {
       record = existing;
-      if (force) {
-        const history = roundHistoryOf(record);
-        const previousRoundEntry = history[history.length - 1];
-        const previousVersion = latestConclusionVersionOf(record);
-        const previousItems = previousVersion === null ? [] : commentItems(previousVersion.conclusion);
-        record.previousRound = previousVersion === null ? null : {
-          round: previousRoundEntry.round,
-          headSha: previousRoundEntry.headSha || record.headSha || '',
-          conclusion: cloneJson(previousVersion.conclusion),
-          items: previousItems.length > 0
-            ? previousItems
-            : (Array.isArray(record.publishedItems) ? record.publishedItems : []),
-        };
-        abortConclude(record);
-        history.push(makeRoundEntry(previousRoundEntry.round + 1, '', now));
-        record.round = previousRoundEntry.round + 1;
-        record.report = null;
-        record.explanations = new Map();
-        record.pullChat = [];
-        record.reportUpdatedAt = 0;
-        record.conclusionEditedAt = 0;
-        record.conclusionAt = 0;
-        record.conclusion = null;
-        record.comment = null;
-        record.publishedItems = [];
-        record.feedback = null;
-        record.delta = null;
-        record.humanItemIds = [];
-        record.coverage = null;
-        record.concludeError = null;
-        record.lastAutoConcludeAt = 0;
-      }
+      if (force) rollNewRound(record, now);
       record.status = 'reviewing';
       record.startedAt = now;
       record.finishedAt = 0;
@@ -980,6 +1150,9 @@ export function apply(ctx, config) {
     currentRoundEntry(record).headSha = pull.headSha;
     const files = await client.pullFiles(record.number);
     record.files = files;
+    // A full last page means the API has more files than the page cap; the panel says so.
+    record.filesTruncated = files.length >= MAX_PULL_FILES;
+    if (record.filesTruncated) console.warn(`[pr-review] PR #${record.number} 的变更文件超过 ${MAX_PULL_FILES} 个，列表已截断`);
     const diffText = await client.pullDiff(record.number);
     record.diffFiles = parseDiff(diffText);
     // The host file endpoint may cap its page; keep every path the diff knows.
@@ -1029,6 +1202,9 @@ export function apply(ctx, config) {
     scheduleSave();
   }
 
+  /** In-flight file explanations: duplicate requests share one model call. */
+  const explainInFlight = new Map();
+
   /** Explain one file: deep logic walkthrough + findings. */
   async function explainFile(number, filePath, force) {
     const record = state.reviews.get(number);
@@ -1041,6 +1217,22 @@ export function apply(ctx, config) {
     if (!force && cached !== undefined && cached.status === 'done' && cached.explanation !== null) {
       return { explanation: cached.explanation, cached: true };
     }
+    // A double click, a panel retry or the agent tool can ask for the same file at once;
+    // they await the same promise instead of paying for two model calls.
+    const inFlightKey = `${number}:${filePath}`;
+    const running = explainInFlight.get(inFlightKey);
+    if (running !== undefined) return running;
+    const task = explainFileUncached(record, number, filePath, cached);
+    explainInFlight.set(inFlightKey, task);
+    try {
+      return await task;
+    } finally {
+      explainInFlight.delete(inFlightKey);
+    }
+  }
+
+  /** The model call behind explainFile; callers deduplicate through explainInFlight. */
+  async function explainFileUncached(record, number, filePath, cached) {
     const diffFiles = await ensureDiffFiles(record);
     const file = (record.files ?? []).find((item) => item.path === filePath) ?? {
       path: filePath,
@@ -1137,30 +1329,45 @@ export function apply(ctx, config) {
   }
 
   /** The staged job behind POST /conclude: collect → model → parse → write. */
+  /** Everything the conclusion prompt needs from the finished per-file analyses. */
+  function concludeInputsOf(record) {
+    const files = Array.isArray(record.files) ? record.files : [];
+    // Only finished explanations feed the conclusion and the coverage number.
+    const done = new Map();
+    const fileSeverities = [];
+    for (const [filePath, entry] of record.explanations) {
+      if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
+      done.set(filePath, entry.explanation);
+      for (const issue of Array.isArray(entry.explanation.issues) ? entry.explanation.issues : []) {
+        fileSeverities.push({ file: filePath, severity: issue?.severity === 'block' ? 'block' : 'suggest' });
+      }
+    }
+    return { files, done, fileSeverities, coverage: conclusionCoverage(record.explanations, files) };
+  }
+
+  /** Resolved-vs-still-open delta against the previous round's items. */
+  function concludeDeltaOf(record) {
+    const previousItems = Array.isArray(record.previousRound?.items) ? record.previousRound.items : [];
+    if (previousItems.length === 0) return null;
+    const compared = compareComments(previousItems, commentItems(record.conclusion));
+    return {
+      round: record.round ?? 1,
+      previousRound: record.previousRound?.round ?? (record.round ?? 1) - 1,
+      resolved: compared.resolved.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
+      stillOpen: compared.stillOpen.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
+      comparedAt: Date.now(),
+    };
+  }
+
   async function runConclude(record, abort) {
     const stillCurrent = () => record.concludingAbort === abort;
     try {
-      const files = Array.isArray(record.files) ? record.files : [];
-      // Only finished explanations feed the conclusion and the coverage number.
-      const done = new Map();
-      for (const [filePath, entry] of record.explanations) {
-        if (entry.status === 'done' && entry.explanation !== null && entry.explanation !== undefined) {
-          done.set(filePath, entry.explanation);
-        }
-      }
-      const coverage = conclusionCoverage(record.explanations, files);
+      const { files, done, fileSeverities, coverage } = concludeInputsOf(record);
       const previousVersion = latestConclusionVersionOf(record);
       const previousConclusion = previousVersion === null ? null : previousVersion.conclusion;
       const humanEdited = (record.conclusionEditedAt ?? 0) > 0
         && previousVersion !== null
         && previousVersion.source === 'human';
-      const fileSeverities = [];
-      for (const [filePath, entry] of record.explanations) {
-        if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-        for (const issue of Array.isArray(entry.explanation.issues) ? entry.explanation.issues : []) {
-          fileSeverities.push({ file: filePath, severity: issue?.severity === 'block' ? 'block' : 'suggest' });
-        }
-      }
       const prompt = buildConcludePrompt(
         record.pull ?? { number: record.number, title: '', repo: provider.repo, platform: provider.platform },
         record.report,
@@ -1193,16 +1400,7 @@ export function apply(ctx, config) {
       record.reportUpdatedAt = 0;
       record.error = null;
       record.concludeError = null;
-      const previousItems = Array.isArray(record.previousRound?.items) ? record.previousRound.items : [];
-      const currentItems = commentItems(record.conclusion);
-      const compared = previousItems.length === 0 ? null : compareComments(previousItems, currentItems);
-      const delta = compared === null ? null : {
-        round: record.round ?? 1,
-        previousRound: record.previousRound?.round ?? (record.round ?? 1) - 1,
-        resolved: compared.resolved.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
-        stillOpen: compared.stillOpen.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
-        comparedAt: Date.now(),
-      };
+      const delta = concludeDeltaOf(record);
       currentRoundEntry(record).delta = delta;
       record.delta = delta;
       scheduleSave();
@@ -1314,6 +1512,9 @@ export function apply(ctx, config) {
         tokenMissing: state.tokenMissing,
         model: modelLabel,
         prs: state.prs,
+        truncatedList: state.prsTruncated,
+        cacheError: state.cacheError,
+        saveError: state.saveError,
         reviews,
       });
     },
@@ -1574,10 +1775,10 @@ export function apply(ctx, config) {
    */
   async function publishReviewComment(record, options) {
     if (record.conclusion === null || record.conclusion === undefined) {
-      throw Object.assign(new Error('请先生成最终结论，再发布审查评论'), { code: 'no-conclusion' });
+      throw new HarnessError('请先生成最终结论，再发布审查评论', 'no-conclusion');
     }
     if (record.publishing === true) {
-      throw Object.assign(new Error('正在发布评论，请稍候。'), { code: 'publishing' });
+      throw new HarnessError('正在发布评论，请稍候。', 'publishing');
     }
     const round = record.round ?? 1;
     const version = latestConclusionVersionOf(record);
@@ -1585,16 +1786,13 @@ export function apply(ctx, config) {
     const alreadyPublished = (Array.isArray(record.published) ? record.published : [])
       .some((entry) => (entry.round ?? 1) === round && (Number(entry.version) || 0) === versionNumber);
     if (alreadyPublished && options.force !== true) {
-      throw Object.assign(
-        new Error('这一轮的这个结论版本已经发布过；如需再追加一条评论请显式 force。'),
-        { code: 'already-published' },
-      );
+      throw new HarnessError('这一轮的这个结论版本已经发布过；如需再追加一条评论请显式 force。', 'already-published');
     }
     const includeIds = Array.isArray(options.includeIds) ? options.includeIds : null;
     const publishConclusion = includeIds === null ? record.conclusion : filterConclusionItems(record.conclusion, includeIds);
     const totalItems = commentItems(record.conclusion ?? null).length;
     if (includeIds !== null && totalItems > 0 && commentItems(publishConclusion).length === 0) {
-      throw Object.assign(new Error('请至少选择一条审查意见再发布。'), { code: 'empty-selection' });
+      throw new HarnessError('请至少选择一条审查意见再发布。', 'empty-selection');
     }
     record.publishing = true;
     try {
@@ -1836,7 +2034,7 @@ export function apply(ctx, config) {
   function requireToolReview(agent, explicitNumber) {
     const record = resolveToolReview(agent, explicitNumber);
     if (record === null) {
-      throw new Error('找不到对应的审查：请先在右侧「审查」面板打开该 PR，或在调用里带上 number。');
+      throw toolError(TOOL_ERROR.notFound, '找不到对应的审查：请先在右侧「审查」面板打开该 PR，或在调用里带上 number。');
     }
     return record;
   }
@@ -1973,7 +2171,7 @@ export function apply(ctx, config) {
   function assertToolRevision(record, revision) {
     const current = record.revision ?? 0;
     if (revision !== current) {
-      throw new Error(`审查数据已被更新（当前 revision ${current}，传入 ${revision}）：请重新调用 review_get 读取 revision 后再改。`);
+      throw toolError(TOOL_ERROR.staleRevision, `审查数据已被更新（当前 revision ${current}，传入 ${revision}）：请重新调用 review_get 读取 revision 后再改。`);
     }
   }
 
@@ -1993,10 +2191,10 @@ export function apply(ctx, config) {
 
   /** Keep one model-written issue/suggestion inside the size and shape limits. */
   function sanitizeToolItem(item, kind) {
-    if (item === null || typeof item !== 'object') throw new Error(`${kind} 必须是对象`);
+    if (item === null || typeof item !== 'object') throw toolError(TOOL_ERROR.invalidArgs, `${kind} 必须是对象`);
     const text = typeof item.point === 'string' ? item.point : (typeof item.title === 'string' ? item.title : '');
-    if (text.trim() === '') throw new Error(`${kind} 需要 point 或 title`);
-    if (text.length > 500) throw new Error(`${kind} 超过 500 字，请拆成多条`);
+    if (text.trim() === '') throw toolError(TOOL_ERROR.invalidArgs, `${kind} 需要 point 或 title`);
+    if (text.length > 500) throw toolError(TOOL_ERROR.limitExceeded, `${kind} 超过 500 字，请拆成多条`);
     const line = Number.isInteger(item.line) && item.line > 0 ? item.line : 0;
     const output = {
       point: text,
@@ -2105,10 +2303,10 @@ export function apply(ctx, config) {
     const seen = new Set();
     const output = [];
     for (const raw of Array.isArray(items) ? items : []) {
-      if (raw === null || typeof raw !== 'object') throw new Error(`${kind} 每条必须是对象`);
+      if (raw === null || typeof raw !== 'object') throw toolError(TOOL_ERROR.invalidArgs, `${kind} 每条必须是对象`);
       const point = typeof raw.point === 'string' ? raw.point.trim() : '';
-      if (point === '') throw new Error(`${kind} 每条需要 point`);
-      if (point.length > 500) throw new Error(`${kind} 某条超过 500 字，请拆分后重试`);
+      if (point === '') throw toolError(TOOL_ERROR.invalidArgs, `${kind} 每条需要 point`);
+      if (point.length > 500) throw toolError(TOOL_ERROR.limitExceeded, `${kind} 某条超过 500 字，请拆分后重试`);
       const file = typeof raw.file === 'string' ? raw.file.trim() : '';
       const line = Number.isInteger(raw.line) && raw.line > 0 ? raw.line : 0;
       const prior = byKey.get(`${file}|${point}`);
@@ -2139,8 +2337,10 @@ export function apply(ctx, config) {
    * - `suggest`: the above plus suggest-severity per-file issues;
    * - `all`: every per-file issue/suggestion and every initial risk.
    * Block-severity items survive the two narrower scopes so a real blocker is not silenced.
+   * `at` stamps the edits: callers writing a conclusion pass the same instant they used
+   * for it, so a cleared finding can never look newer than the conclusion it belongs to.
    */
-  function clearOverviewFindings(record, scope) {
+  function clearOverviewFindings(record, scope, at = Date.now()) {
     const cleared = { suggestions: 0, issues: 0, risks: 0 };
     if (scope !== 'suggestions' && scope !== 'suggest' && scope !== 'all') return cleared;
     const keepBlockRisks = scope === 'suggestions' || scope === 'suggest';
@@ -2157,7 +2357,7 @@ export function apply(ctx, config) {
       cleared.issues += issues.length - nextIssues.length;
       if (nextSuggestions.length === suggestions.length && nextIssues.length === issues.length) continue;
       entry.explanation = { ...explanation, issues: nextIssues, suggestions: nextSuggestions };
-      entry.updatedAt = Date.now();
+      entry.updatedAt = at;
     }
     const risks = Array.isArray(record.report?.risks) ? record.report.risks : [];
     const nextRisks = keepBlockRisks ? risks.filter((item) => item?.severity === 'block') : [];
@@ -2166,19 +2366,9 @@ export function apply(ctx, config) {
     return cleared;
   }
 
-  /** Register the review tools on the context that carries a tool registry (root or agent). */
-  function registerReviewTools(ownerCtx) {
-    const toolsService = ownerCtx.get('tools') ?? ownerCtx.tools;
-    if (toolsService === undefined || toolsService === null || typeof toolsService.register !== 'function') return;
-    const numberProperty = {
-      type: 'integer',
-      description: 'PR 编号；省略时使用当前会话在审查面板打开的 PR（没有绑定时取最近一次审查的 PR）。',
-    };
-    const textOutput = {
-      schema: { type: 'string' },
-      render: (_args, value) => [{ type: 'text', text: String(value) }],
-    };
-    const definitions = [
+  /** Read-only review tools: they never mutate review data. */
+  function readOnlyToolDefinitions(numberProperty, textOutput) {
+    return [
       {
         name: 'review_list_prs',
         description: '列出当前仓库的 open PR 及其审查状态（审查中/已报告/结论/是否已发布），用来发现可审查的 PR 编号。',
@@ -2280,7 +2470,7 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
-          if (typeof args.path !== 'string' || args.path === '') throw new Error('path 不能为空');
+          if (typeof args.path !== 'string' || args.path === '') throw toolError(TOOL_ERROR.invalidArgs, 'path 不能为空');
           return analysisText(args.path, record.explanations.get(args.path));
         },
       },
@@ -2299,7 +2489,7 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
-          if (typeof args.path !== 'string' || args.path === '') throw new Error('path 不能为空');
+          if (typeof args.path !== 'string' || args.path === '') throw toolError(TOOL_ERROR.invalidArgs, 'path 不能为空');
           return diffText(record, args.path);
         },
       },
@@ -2320,7 +2510,7 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
-          if (typeof args.path !== 'string' || args.path === '') throw new Error('path 不能为空');
+          if (typeof args.path !== 'string' || args.path === '') throw toolError(TOOL_ERROR.invalidArgs, 'path 不能为空');
           const file = await ensureFileContent(record, args.path);
           let text = typeof file?.content === 'string' ? file.content : '';
           let suffix = file?.truncated === true ? '\n…（文件过大，已截断）' : '';
@@ -2366,7 +2556,7 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
-          if (!Number.isInteger(args.round) || args.round <= 0) throw new Error('round 必须是正整数');
+          if (!Number.isInteger(args.round) || args.round <= 0) throw toolError(TOOL_ERROR.invalidArgs, 'round 必须是正整数');
           const entry = roundHistoryOf(record).find((item) => item.round === args.round);
           return roundText(entry);
         },
@@ -2389,6 +2579,13 @@ export function apply(ctx, config) {
           return toolText(lines);
         },
       },
+    ];
+  }
+
+  /** Mutating review tools: they rewrite review data or drive conclude/publish. */
+  /** Write review tools: they rewrite analyses, report or conclusion in place. */
+  function writeToolDefinitions(numberProperty, textOutput) {
+    return [
       {
         name: 'review_update_analysis',
         description: '更新单个变更文件的逐文件分析（结论/摘要/代码逻辑/审查意见/改进建议），改写审查数据，右栏面板随后可见。必须带 review_get 返回的 revision 做乐观锁。',
@@ -2418,9 +2615,9 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
-          if (typeof args.path !== 'string' || args.path === '') throw new Error('path 不能为空');
+          if (typeof args.path !== 'string' || args.path === '') throw toolError(TOOL_ERROR.invalidArgs, 'path 不能为空');
           const file = (record.files ?? []).find((item) => item.path === args.path);
-          if (file === undefined) throw new Error(`path 不在变更文件里：${args.path}`);
+          if (file === undefined) throw toolError(TOOL_ERROR.notFound, `path 不在变更文件里：${args.path}`);
           assertToolRevision(record, args.revision);
           const issues = args.issues === undefined
             ? undefined
@@ -2438,7 +2635,7 @@ export function apply(ctx, config) {
           };
           const before = entry.explanation ?? null;
           const next = {
-            verdict: args.verdict ?? before?.verdict ?? 'suggest',
+            verdict: normalizeVerdict(args.verdict, before?.verdict ?? 'suggest'),
             summary: args.summary ?? before?.summary ?? '',
             logic: args.logic ?? before?.logic ?? '',
             walkthrough: Array.isArray(before?.walkthrough) ? before.walkthrough : [],
@@ -2446,7 +2643,7 @@ export function apply(ctx, config) {
             suggestions: suggestions ?? (Array.isArray(before?.suggestions) ? before.suggestions : []),
           };
           if (JSON.stringify(next).length > 12_000) {
-            throw new Error('该文件分析超过 12000 字符，请精简 issues/suggestions 后重试。');
+            throw toolError(TOOL_ERROR.limitExceeded, '该文件分析超过 12000 字符，请精简 issues/suggestions 后重试。');
           }
           entry.explanation = next;
           entry.status = 'done';
@@ -2492,19 +2689,19 @@ export function apply(ctx, config) {
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
           if (record.report === null || record.report === undefined) {
-            throw new Error('还没有总体报告：请先完成审查（review_list_prs 可看状态）。');
+            throw toolError(TOOL_ERROR.notFound, '还没有总体报告：请先完成审查（review_list_prs 可看状态）。');
           }
           assertToolRevision(record, args.revision);
           const before = record.report;
           const next = { ...before };
-          if (args.verdict !== undefined) next.verdict = args.verdict;
+          if (args.verdict !== undefined) next.verdict = normalizeVerdict(args.verdict, before.verdict ?? 'suggest');
           if (args.summary !== undefined) next.summary = String(args.summary);
           if (args.risks !== undefined) {
             next.risks = args.risks.map((item) => {
-              if (item === null || typeof item !== 'object') throw new Error('risks 的每一行必须是对象');
+              if (item === null || typeof item !== 'object') throw toolError(TOOL_ERROR.invalidArgs, 'risks 的每一行必须是对象');
               const point = typeof item.point === 'string' ? item.point.trim() : '';
-              if (point === '') throw new Error('risks 每行需要 point');
-              if (point.length > 500) throw new Error('risks 某条超过 500 字，请精简');
+              if (point === '') throw toolError(TOOL_ERROR.invalidArgs, 'risks 每行需要 point');
+              if (point.length > 500) throw toolError(TOOL_ERROR.limitExceeded, 'risks 某条超过 500 字，请精简');
               return {
                 severity: item.severity === 'block' ? 'block' : 'suggest',
                 file: typeof item.file === 'string' ? item.file : '',
@@ -2514,15 +2711,15 @@ export function apply(ctx, config) {
           }
           if (args.order !== undefined) {
             next.order = args.order.map((item) => {
-              if (item === null || typeof item !== 'object') throw new Error('order 的每一行必须是对象');
+              if (item === null || typeof item !== 'object') throw toolError(TOOL_ERROR.invalidArgs, 'order 的每一行必须是对象');
               const file2 = typeof item.file === 'string' ? item.file : '';
-              if (file2 === '') throw new Error('order 每行需要 file');
+              if (file2 === '') throw toolError(TOOL_ERROR.invalidArgs, 'order 每行需要 file');
               return { file: file2, reason: typeof item.reason === 'string' ? item.reason : '' };
             });
           }
           if (args.focus !== undefined) next.focus = args.focus;
           if (JSON.stringify(next).length > 12_000) {
-            throw new Error('报告超过 12000 字符，请精简 risks/order/summary 后重试。');
+            throw toolError(TOOL_ERROR.limitExceeded, '报告超过 12000 字符，请精简 risks/order/summary 后重试。');
           }
           record.report = next;
           record.reportUpdatedAt = Date.now();
@@ -2570,7 +2767,7 @@ export function apply(ctx, config) {
           const record = requireToolReview(exec.agent, args.number);
           const before = record.conclusion ?? null;
           if (before === null || before === undefined) {
-            throw new Error('当前轮还没有最终结论：请先在审查面板生成结论，再调整。');
+            throw toolError(TOOL_ERROR.notFound, '当前轮还没有最终结论：请先在审查面板生成结论，再调整。');
           }
           assertToolRevision(record, args.revision);
           const working = {
@@ -2585,7 +2782,7 @@ export function apply(ctx, config) {
             nextSteps: args.nextSteps === undefined
               ? (Array.isArray(before.nextSteps) ? before.nextSteps : [])
               : args.nextSteps.map((item) => {
-                  if (typeof item !== 'string' || item.trim() === '') throw new Error('nextSteps 每条必须是非空字符串');
+                  if (typeof item !== 'string' || item.trim() === '') throw toolError(TOOL_ERROR.invalidArgs, 'nextSteps 每条必须是非空字符串');
                   return item.trim();
                 }),
           };
@@ -2605,6 +2802,12 @@ export function apply(ctx, config) {
           ]);
         },
       },
+    ];
+  }
+
+  /** Action review tools: they drive conclude, publish and platform links. */
+  function actionToolDefinitions(numberProperty, textOutput) {
+    return [
       {
         name: 'review_conclude',
         description: '为当前轮触发（重新）生成最终结论，等同于审查面板的「生成最终结论 / 重新生成结论」按钮。后台运行，可用 review_get 查看进度与结果。',
@@ -2616,11 +2819,11 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
-          if (record.status === 'reviewing') throw new Error('该 PR 正在审查中，请等审查完成后再生成结论。');
-          if (record.report === null || record.report === undefined) throw new Error('还没有审查报告，请先完成审查再生成结论。');
-          if (record.concluding !== null && record.concluding !== undefined) throw new Error('结论正在生成中，请稍候。');
+          if (record.status === 'reviewing') throw toolError(TOOL_ERROR.conflict, '该 PR 正在审查中，请等审查完成后再生成结论。');
+          if (record.report === null || record.report === undefined) throw toolError(TOOL_ERROR.notFound, '还没有审查报告，请先完成审查再生成结论。');
+          if (record.concluding !== null && record.concluding !== undefined) throw toolError(TOOL_ERROR.conflict, '结论正在生成中，请稍候。');
           const started = startConclude(record);
-          if (!started.ok) throw new Error('结论正在生成中，请稍候。');
+          if (!started.ok) throw toolError(TOOL_ERROR.conflict, '结论正在生成中，请稍候。');
           return toolText([
             `已开始生成结论：PR #${record.number} 第 ${record.round ?? 1} 轮（后台任务）`,
             '稍后用 review_get 查看状态与 revision；生成完成后可在对话里继续调整，或让用户点「发布」。',
@@ -2727,7 +2930,7 @@ export function apply(ctx, config) {
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
           if (record.report === null || record.report === undefined) {
-            throw new Error('还没有总体报告：请先完成审查（review_list_prs 可看状态）。');
+            throw toolError(TOOL_ERROR.notFound, '还没有总体报告：请先完成审查（review_list_prs 可看状态）。');
           }
           assertToolRevision(record, args.revision);
           const beforeReport = record.report;
@@ -2737,36 +2940,36 @@ export function apply(ctx, config) {
           // 1) report-level fields
           const nextReport = { ...beforeReport };
           let reportChanged = false;
-          if (args.verdict !== undefined) { nextReport.verdict = args.verdict; reportChanged = true; }
+          if (args.verdict !== undefined) { nextReport.verdict = normalizeVerdict(args.verdict, beforeReport.verdict ?? 'suggest'); reportChanged = true; }
           if (args.summary !== undefined) { nextReport.summary = String(args.summary); reportChanged = true; }
           if (args.risks !== undefined) {
             nextReport.risks = args.risks.map((item) => {
-              if (item === null || typeof item !== 'object') throw new Error('risks 的每一行必须是对象');
+              if (item === null || typeof item !== 'object') throw toolError(TOOL_ERROR.invalidArgs, 'risks 的每一行必须是对象');
               const point = typeof item.point === 'string' ? item.point.trim() : '';
-              if (point === '') throw new Error('risks 每行需要 point');
-              if (point.length > 500) throw new Error('risks 某条超过 500 字，请精简');
+              if (point === '') throw toolError(TOOL_ERROR.invalidArgs, 'risks 每行需要 point');
+              if (point.length > 500) throw toolError(TOOL_ERROR.limitExceeded, 'risks 某条超过 500 字，请精简');
               return { severity: item.severity === 'block' ? 'block' : 'suggest', file: typeof item.file === 'string' ? item.file : '', point };
             });
             reportChanged = true;
           }
           if (args.order !== undefined) {
             nextReport.order = args.order.map((item) => {
-              if (item === null || typeof item !== 'object') throw new Error('order 的每一行必须是对象');
+              if (item === null || typeof item !== 'object') throw toolError(TOOL_ERROR.invalidArgs, 'order 的每一行必须是对象');
               const file = typeof item.file === 'string' ? item.file : '';
-              if (file === '') throw new Error('order 每行需要 file');
+              if (file === '') throw toolError(TOOL_ERROR.invalidArgs, 'order 每行需要 file');
               return { file, reason: typeof item.reason === 'string' ? item.reason : '' };
             });
             reportChanged = true;
           }
           if (args.focus !== undefined) { nextReport.focus = args.focus; reportChanged = true; }
           if (reportChanged) {
-            if (JSON.stringify(nextReport).length > 12_000) throw new Error('报告超过 12000 字符，请精简后重试。');
+            if (JSON.stringify(nextReport).length > 12_000) throw toolError(TOOL_ERROR.limitExceeded, '报告超过 12000 字符，请精简后重试。');
             record.report = nextReport;
           }
 
           // 2) conclusion-level fields (one human version, ids preserved)
           const working = {
-            verdict: args.verdict ?? beforeConclusion?.verdict ?? 'suggest',
+            verdict: normalizeVerdict(args.verdict, beforeConclusion?.verdict ?? 'suggest'),
             summary: args.summary ?? beforeConclusion?.summary ?? '',
             blockers: args.blockers === undefined
               ? (Array.isArray(beforeConclusion?.blockers) ? beforeConclusion.blockers : [])
@@ -2777,19 +2980,23 @@ export function apply(ctx, config) {
             nextSteps: args.nextSteps === undefined
               ? (Array.isArray(beforeConclusion?.nextSteps) ? beforeConclusion.nextSteps : [])
               : args.nextSteps.map((item) => {
-                  if (typeof item !== 'string' || item.trim() === '') throw new Error('nextSteps 每条必须是非空字符串');
+                  if (typeof item !== 'string' || item.trim() === '') throw toolError(TOOL_ERROR.invalidArgs, 'nextSteps 每条必须是非空字符串');
                   return item.trim();
                 }),
           };
           const normalized = normalizeConclusion(working, { files: (record.files ?? []).map((file) => file.path) });
+          // One instant for every stamp. The conclusion is written last, so the report and
+          // explanation edits below can never read as newer than it (which would mark the
+          // fresh conclusion stale again — a millisecond tick used to do exactly that).
+          const writeAt = Date.now();
           pushConclusionVersion(record, 'human', normalized, record.coverage);
-          record.conclusionEditedAt = Date.now();
+          record.conclusionEditedAt = writeAt;
           const touched = [...normalized.blockers, ...normalized.suggestions].map((item) => item.id);
           record.humanItemIds = [...new Set([...(record.humanItemIds ?? []), ...touched])];
 
           // 3) optional findings cleanup (evidence layer the overview renders)
-          const cleared = clearOverviewFindings(record, args.clearFindings ?? 'none');
-          if (reportChanged || cleared.risks > 0) record.reportUpdatedAt = Date.now();
+          const cleared = clearOverviewFindings(record, args.clearFindings ?? 'none', writeAt);
+          if (reportChanged || cleared.risks > 0) record.reportUpdatedAt = writeAt;
 
           const afterCounts = overviewCounts(record);
           recordToolAudit(
@@ -2808,6 +3015,25 @@ export function apply(ctx, config) {
           ]);
         },
       },
+    ];
+  }
+
+  /** Register the review tools on the context that carries a tool registry (root or agent). */
+  function registerReviewTools(ownerCtx) {
+    const toolsService = ownerCtx.get('tools') ?? ownerCtx.tools;
+    if (toolsService === undefined || toolsService === null || typeof toolsService.register !== 'function') return;
+    const numberProperty = {
+      type: 'integer',
+      description: 'PR 编号；省略时使用当前会话在审查面板打开的 PR（没有绑定时取最近一次审查的 PR）。',
+    };
+    const textOutput = {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: String(value) }],
+    };
+    const definitions = [
+      ...readOnlyToolDefinitions(numberProperty, textOutput),
+      ...writeToolDefinitions(numberProperty, textOutput),
+      ...actionToolDefinitions(numberProperty, textOutput),
     ];
     ownerCtx.effect(() => {
       const disposers = [];
@@ -2934,7 +3160,8 @@ export function apply(ctx, config) {
   ctx.effect(() => () => {
     if (state.saveTimer !== null) clearTimeout(state.saveTimer);
     for (const record of state.reviews.values()) abortConclude(record);
-    void saveNow();
+    // Synchronous flush: teardown may be the last turn the event loop gets.
+    saveNowSync();
   }, 'pr-review: flush cache on unload');
 
   console.log(provider.repo === ''

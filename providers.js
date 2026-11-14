@@ -130,6 +130,9 @@ export async function resolveToken(config, provider) {
 
 const MAX_PAGES = 4;
 
+/** Changed files fetched per pull request (100 per page); callers flag a full page. */
+export const MAX_PULL_FILES = MAX_PAGES * 100;
+
 /** Encode one repository file path for the contents endpoint (slashes stay). */
 function encodePath(path) {
   return String(path).split('/').map((segment) => encodeURIComponent(segment)).join('/');
@@ -177,7 +180,9 @@ export function createClient(config, provider, token) {
   }
 
   async function listOpenPulls(signal) {
-    const raw = await getJson('/pulls?state=open&sort=updated&per_page=20', signal);
+    // One extra entry: the host slices to its list cap and uses the overflow as a
+    // "there are older PRs" signal, without a second request.
+    const raw = await getJson('/pulls?state=open&sort=updated&per_page=21', signal);
     return raw.map((pull) => ({
       number: pull.number,
       title: pull.title ?? '',
@@ -278,16 +283,6 @@ export function createClient(config, provider, token) {
     return { id, url };
   }
 
-  /** Edit an existing issue comment in place (keeps the PR thread free of duplicates). */
-  async function editComment(commentId, body, number, signal) {
-    const comment = await requestJson('PATCH', `/issues/comments/${commentId}`, { body }, signal);
-    const id = typeof comment?.id === 'number' ? comment.id : commentId;
-    const url = typeof comment?.html_url === 'string' && comment.html_url !== ''
-      ? comment.html_url
-      : commentUrl(number, id);
-    return { id, url };
-  }
-
   /**
    * Full text of one file at a given ref (the PR head by default). Uses the
    * contents API on both platforms, which returns base64; large files are
@@ -332,5 +327,5 @@ export function createClient(config, provider, token) {
     }));
   }
 
-  return { listOpenPulls, pullDetail, pullFiles, pullDiff, pullCommits, createComment, editComment, pullFileContent, listIssueComments };
+  return { listOpenPulls, pullDetail, pullFiles, pullDiff, pullCommits, createComment, pullFileContent, listIssueComments };
 }

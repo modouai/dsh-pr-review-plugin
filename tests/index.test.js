@@ -10,7 +10,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -190,7 +190,8 @@ async function setup(options = {}) {
   const cachePath = path.join(home, '.dsh', 'pr-review', CACHE_SLUG);
   await mkdir(path.dirname(cachePath), { recursive: true });
   const reviews = options.reviews === undefined ? { 1: legacyReview() } : options.reviews;
-  await writeFile(cachePath, JSON.stringify({ savedAt: 1, reviews }), 'utf8');
+  // `cacheText` writes a pre-baked (possibly corrupt) cache instead of the legacy payload.
+  await writeFile(cachePath, options.cacheText ?? JSON.stringify({ savedAt: 1, reviews }), 'utf8');
 
   const previousHome = process.env.HOME;
   process.env.HOME = home;
@@ -273,13 +274,16 @@ async function setup(options = {}) {
   }
 
   // Wait until the async cache load has put the legacy record in place.
-  let loaded = null;
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    loaded = await review();
-    if (loaded !== null) break;
-    await delay(10);
+  // Corrupt-cache and prune-only setups have no record 1 to wait for.
+  if (options.skipLoadedCheck !== true) {
+    let loaded = null;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      loaded = await review();
+      if (loaded !== null) break;
+      await delay(10);
+    }
+    assert.notEqual(loaded, null, 'legacy review record loaded from cache');
   }
-  assert.notEqual(loaded, null, 'legacy review record loaded from cache');
 
   return {
     home,
@@ -1597,5 +1601,207 @@ test('review_update_overview clearFindings keeps block items for narrower scopes
     assert.deepEqual(stored.report.risks.map((item) => item.severity), ['block']);
   } finally {
     await suggestOnly.dispose();
+  }
+});
+
+// ---------- cache durability, list truncation, pruning, explain dedupe ----------
+
+test('an unreadable cache is archived aside and surfaced rather than silently overwritten', async () => {
+  const plugin = await setup({ cacheText: '{"reviews": {', skipLoadedCheck: true });
+  try {
+    let prs = null;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      prs = await plugin.call('/pr-review-api/prs');
+      if (String(prs.json.cacheError) !== '') break;
+      await delay(10);
+    }
+    assert.equal(prs.status, 200);
+    assert.match(String(prs.json.cacheError), /另存为/);
+    const dir = path.join(plugin.home, '.dsh', 'pr-review');
+    const files = await readdir(dir);
+    assert.equal(files.some((name) => name.includes('.corrupt-')), true, 'corrupt cache kept for recovery');
+    assert.equal(files.includes(CACHE_SLUG), false, 'the unreadable file is moved, not left to be overwritten');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('cache saves go through a temp file and leave no stray files behind', async () => {
+  const plugin = await setup({
+    llm: llmFromText(JSON.stringify({ verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] })),
+  });
+  try {
+    await plugin.call('/pr-review-api/conclude', 'POST', { number: 1 });
+    await plugin.waitForConcluding();
+    await delay(950); // scheduleSave debounce
+    const dir = path.join(plugin.home, '.dsh', 'pr-review');
+    const files = await readdir(dir);
+    assert.deepEqual(files, [CACHE_SLUG], 'only the cache file remains (temp file was renamed away)');
+    const payload = JSON.parse(await readFile(path.join(dir, CACHE_SLUG), 'utf8'));
+    assert.ok(payload.reviews['1'], 'cache parses and still carries the review');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the pull list flags when older open pull requests were cut off', async () => {
+  const pulls = Array.from({ length: 21 }, (_, index) => ({
+    number: index + 2,
+    title: `PR ${index + 2}`,
+    user: { login: 'dev' },
+    head: { ref: 'feature', sha: '' },
+    base: { ref: 'main' },
+    updated_at: '',
+    created_at: '',
+    additions: 0,
+    deletions: 0,
+    changed_files: 0,
+    html_url: '',
+  }));
+  const fetchHandler = async (url) => {
+    const target = String(url);
+    if (target.includes('/pulls?state=open')) return jsonResponse(200, pulls);
+    throw new Error(`unexpected fetch in test: ${target}`);
+  };
+  const plugin = await setup({ fetch: fetchHandler });
+  try {
+    let list = null;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      list = (await plugin.call('/pr-review-api/prs')).json;
+      if (list.lastPollAt > 0) break;
+      await delay(10);
+    }
+    assert.equal(list.prs.length, 20, 'the list is capped at the newest 20');
+    assert.equal(list.prs[0].number, 2);
+    assert.equal(list.truncatedList, true, 'the cut-off is flagged for the panel');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the cache prunes the oldest unpublished reviews and keeps published history', async () => {
+  const reviews = {};
+  for (let number = 2; number <= 52; number += 1) {
+    reviews[number] = legacyReview({
+      number,
+      headSha: `h${number}`,
+      finishedAt: number * 10,
+      published: [],
+      publishedItems: [],
+      comment: null,
+    });
+  }
+  // Oldest record of all, but published: must survive the prune.
+  reviews[100] = legacyReview({
+    number: 100,
+    headSha: 'h100',
+    finishedAt: 1,
+    published: [{ id: 900, url: 'https://git.example/comment/900', round: 1, publishedAt: 1, itemCount: 1 }],
+  });
+  const plugin = await setup({ reviews, skipLoadedCheck: true });
+  try {
+    let list = null;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      list = (await plugin.call('/pr-review-api/prs')).json;
+      if (list.lastPollAt > 0) break;
+      await delay(10);
+    }
+    const kept = Object.keys(list.reviews).map(Number);
+    assert.equal(kept.length, 50, 'the cache is capped at 50 records');
+    assert.equal(kept.includes(2), false, 'oldest unpublished record was pruned');
+    assert.equal(kept.includes(3), false);
+    assert.equal(kept.includes(52), true, 'newest record survives');
+    assert.equal(kept.includes(100), true, 'published history is never pruned');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('duplicate explain requests for one file share a single model call', async () => {
+  const diffText = [
+    'diff --git a/src/a.js b/src/a.js',
+    '--- a/src/a.js',
+    '+++ b/src/a.js',
+    '@@ -1,2 +1,3 @@',
+    ' line one',
+    '-old',
+    '+new',
+    '+more',
+  ].join('\n');
+  const fetchHandler = async (url) => {
+    const target = String(url);
+    if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
+    if (target.includes('/pulls/1.diff')) return textResponse(200, diffText);
+    if (target.includes('/contents/src/a.js')) {
+      return jsonResponse(200, {
+        path: 'src/a.js',
+        encoding: 'base64',
+        content: Buffer.from('line one\nnew\nmore\n', 'utf8').toString('base64'),
+        size: 18,
+      });
+    }
+    throw new Error(`unexpected fetch in test: ${target}`);
+  };
+  let modelCalls = 0;
+  const llm = () => {
+    modelCalls += 1;
+    return (async function* () {
+      await delay(60);
+      yield {
+        type: 'text-delta',
+        text: JSON.stringify({ verdict: 'suggest', summary: '讲解', logic: '逻辑', issues: [], suggestions: [] }),
+      };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })();
+  };
+  const plugin = await setup({ fetch: fetchHandler, llm });
+  try {
+    const [first, second] = await Promise.all([
+      plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true }),
+      plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true }),
+    ]);
+    assert.equal(first.status, 200);
+    assert.equal(second.status, 200);
+    assert.deepEqual(first.json.explanation, second.json.explanation);
+    assert.equal(modelCalls, 1, 'the second request awaited the in-flight call');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+// ---------- DSH plugin conventions ----------
+
+test('Config schema fills defaults and rejects invalid values', async () => {
+  const { Config } = await import('../index.js');
+  const filled = Config({ platform: 'github' });
+  assert.equal(filled.platform, 'github');
+  assert.equal(filled.pollSeconds, 60);
+  assert.equal(filled.commentLanguage, 'zh');
+  assert.equal(filled.autoReview, true);
+  assert.equal(filled.reasoningEffort, 'off');
+  assert.throws(() => Config({ platform: 'gitlab' }), /platform/);
+  assert.throws(() => Config({ pollSeconds: 5 }), /pollSeconds/);
+  assert.throws(() => Config({ reasoningEffort: 'ultra' }), /reasoningEffort/);
+});
+
+test('tool failures carry stable HarnessError codes', async () => {
+  const plugin = await setup();
+  try {
+    await assert.rejects(
+      plugin.runTool('review_update_analysis', { path: '', revision: 0 }),
+      (error) => {
+        assert.equal(error.code, 'INVALID_ARGS');
+        return true;
+      },
+    );
+    await assert.rejects(
+      plugin.runTool('review_update_analysis', { path: 'src/a.js', revision: 99 }),
+      (error) => {
+        assert.equal(error.code, 'STALE_REVISION');
+        return true;
+      },
+    );
+  } finally {
+    await plugin.dispose();
   }
 });
