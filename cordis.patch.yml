@@ -1,0 +1,18 @@
+- insert:
+    - id: pr-review
+      name: '@local/dsh-pr-review'
+      config:
+        # 必填或留空：留空时按会话工作区的 git origin 自动识别；固定仓库时在此填写
+        platform: 'forgejo'
+        baseUrl: ''
+        repo: ''
+        token: ''
+        pollSeconds: 60
+        autoReview: true
+        provider: ''
+        model: ''
+        reasoningEffort: 'off'
+        maxDiffCharsPerFile: 14000
+        maxFilesPerReview: 60
+        commentLanguage: 'zh'
+        autoReconclude: false

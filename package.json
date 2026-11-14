@@ -1,0 +1,41 @@
+{
+  "name": "@local/dsh-pr-review",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Review a Forgejo pull request from the Harness Web UI: automatic report, entry-first reading order, per-file explanation, and follow-up conversation.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "providers.js",
+    "diff.js",
+    "llm.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-sidebar-right"
+      ]
+    }
+  },
+  "license": "MIT"
+}

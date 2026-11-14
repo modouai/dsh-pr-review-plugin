@@ -1,0 +1,2943 @@
+/**
+ * Host half of the PR review plugin.
+ *
+ * Responsibilities:
+ * - poll one code host (Forgejo or GitHub) for open pull requests and review
+ *   new heads automatically when `autoReview` is on;
+ * - answer the browser half over same-origin `/pr-review-api/*` routes behind
+ *   the connection trust fence;
+ * - stream model calls through the Host `llm` service for the report, the
+ *   per-file logic walkthrough, follow-up chat, and the final conclusion.
+ *
+ * The browser half owns presentation only; every fact here comes from the API
+ * or the model, and a failure carries its reason.
+ */
+
+import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import path from 'node:path';
+
+import { createClient, resolveProviderConfig, resolveToken } from './providers.js';
+import { parseDiff } from './diff.js';
+import {
+  buildChatPrompt,
+  buildCommentMarkdown,
+  buildConcludePrompt,
+  buildFeedbackPrompt,
+  calibrateVerdict,
+  commentItems,
+  compareComments,
+  conclusionCoverage,
+  ensureConclusionIds,
+  parseChatReply,
+  parseFeedbackReply,
+  buildExplainPrompt,
+  buildReportPrompt,
+  callModel,
+  extractJson,
+  itemId,
+  mergeConclusion,
+  normalizeConclusion,
+  normalizeExplanation,
+  normalizeReport,
+} from './llm.js';
+
+/** Cordis function-plugin name. */
+export const name = 'pr-review';
+
+/** The route carrier, the trust fence, and the model service. The default model is read optionally via ctx.get. */
+export const inject = ['webServer', 'connection', 'llm'];
+
+const PREFIX = '/pr-review-api';
+
+const DEFAULTS = {
+  platform: 'forgejo',
+  // Empty by default: a workspace session resolves its own git origin, and installs that want a
+  // fixed repository set these in the profile's cordis.patch.yml.
+  baseUrl: '',
+  repo: '',
+  token: '',
+  pollSeconds: 60,
+  autoReview: true,
+  provider: '',
+  model: '',
+  reasoningEffort: 'off',
+  maxDiffCharsPerFile: 14000,
+  maxFilesPerReview: 60,
+  commentLanguage: 'zh',
+  autoReconclude: false,
+};
+
+const MAX_BODY_BYTES = 64 * 1024;
+const MAX_FILE_DIFF_BYTES = 400 * 1024;
+
+/** JSON response helper (no-store: every answer is a live fact). */
+function sendJson(res, status, payload) {
+  res.statusCode = status;
+  res.setHeader('content-type', 'application/json; charset=utf-8');
+  res.setHeader('cache-control', 'no-store');
+  res.end(JSON.stringify(payload));
+}
+
+/** One structured failure for the browser half. */
+function sendError(res, status, code, message) {
+  sendJson(res, status, { ok: false, error: { code, message } });
+}
+
+/** Collect a bounded request body as UTF-8 text; null past the ceiling. */
+async function readBoundedBody(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.byteLength;
+    if (size > MAX_BODY_BYTES) {
+      req.resume();
+      return null;
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks, size).toString('utf8');
+}
+
+/** Parse a JSON body; null when the text is not a JSON object. */
+function parseBody(text) {
+  try {
+    const value = JSON.parse(text);
+    return value !== null && typeof value === 'object' ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Serialize one review record for the browser half (no diff text, no Maps, no abort handles). */
+function serializeReview(record) {
+  if (record === undefined) return null;
+  return {
+    number: record.number,
+    status: record.status,
+    headSha: record.headSha,
+    startedAt: record.startedAt,
+    finishedAt: record.finishedAt,
+    error: record.error,
+    pull: record.pull,
+    files: record.files,
+    report: record.report,
+    explanations: [...record.explanations.entries()].map(([filePath, entry]) => ({
+      file: filePath,
+      status: entry.status,
+      error: entry.error,
+      explanation: entry.explanation,
+      chat: entry.chat,
+      updatedAt: entry.updatedAt ?? 0,
+    })),
+    pullChat: record.pullChat,
+    reportUpdatedAt: record.reportUpdatedAt ?? 0,
+    conclusionEditedAt: record.conclusionEditedAt ?? 0,
+    round: record.round ?? 1,
+    roundHistory: Array.isArray(record.roundHistory) ? record.roundHistory : [],
+    humanItemIds: Array.isArray(record.humanItemIds) ? record.humanItemIds : [],
+    coverage: record.coverage ?? null,
+    concluding: record.concluding === null || record.concluding === undefined
+      ? null
+      : { stage: record.concluding.stage, startedAt: record.concluding.startedAt },
+    concludeError: record.concludeError ?? null,
+    publishing: record.publishing === true,
+    published: record.published ?? [],
+    publishedItems: record.publishedItems ?? [],
+    feedback: record.feedback ?? null,
+    delta: record.delta ?? null,
+    conclusionAt: record.conclusionAt ?? 0,
+    conclusion: record.conclusion,
+    comment: record.comment ?? null,
+    revision: record.revision ?? 0,
+    audit: Array.isArray(record.audit) ? record.audit : [],
+  };
+}
+
+/** A quick status row for the pull list; the final conclusion wins over the initial report. */
+function reviewSummary(record) {
+  if (record === undefined) return null;
+  return {
+    status: record.status,
+    headSha: record.headSha,
+    verdict: record.conclusion?.verdict ?? record.report?.verdict ?? null,
+    updatedAt: record.finishedAt ?? record.startedAt ?? 0,
+  };
+}
+
+/**
+ * Apply the conversation's mutations directly to the overview's existing content:
+ * the report's initial risks and the final conclusion's blockers/suggestions/nextSteps.
+ * Same 1-based validation as the file list; unknown or missing targets are ignored.
+ * A conclusion edit appends a `human` version, locks the touched item ids, and marks
+ * the conclusion as edited; touching the report calls `onReportTouched`.
+ */
+function applyOverviewOps(record, ops, onReportTouched) {
+  const report = record.report;
+  if (report === null || report === undefined) return [];
+  // Work on a copy so earlier history versions stay immutable.
+  const working = record.conclusion === null || record.conclusion === undefined
+    ? null
+    : ensureConclusionIds(cloneJson(record.conclusion));
+  const listFor = (target) => {
+    if (target === 'risk') return Array.isArray(report.risks) ? report.risks : undefined;
+    if (target === 'blocker') return Array.isArray(working?.blockers) ? working.blockers : undefined;
+    if (target === 'suggestion') return Array.isArray(working?.suggestions) ? working.suggestions : undefined;
+    if (target === 'nextStep') return Array.isArray(working?.nextSteps) ? working.nextSteps : undefined;
+    return undefined;
+  };
+  const applied = [];
+  let touchedRisk = false;
+  let touchedConclusion = false;
+  const touchedIds = new Set();
+  for (const op of Array.isArray(ops) ? ops : []) {
+    const target = typeof op.target === 'string' ? op.target : '';
+    const list = listFor(target);
+    if (list === undefined) continue;
+    const index = typeof op.index === 'number' ? op.index - 1 : -1;
+    const isStep = target === 'nextStep';
+    const kind = target === 'blocker' ? 'blocker' : target === 'suggestion' ? 'suggestion' : '';
+    if (op.op === 'remove') {
+      if (index < 0 || index >= list.length) continue;
+      const [removed] = list.splice(index, 1);
+      applied.push({ op: 'remove', target, index: index + 1 });
+      if (target === 'risk') touchedRisk = true;
+      else touchedConclusion = true;
+      if (kind !== '' && removed !== null && typeof removed === 'object' && typeof removed.id === 'string') {
+        touchedIds.add(removed.id);
+      }
+    } else if (op.op === 'update') {
+      if (index < 0 || index >= list.length) continue;
+      if (isStep) {
+        list[index] = op.text;
+      } else if (target === 'risk') {
+        const before = list[index];
+        list[index] = {
+          severity: op.severity ?? before.severity ?? 'suggest',
+          file: op.file ?? before.file ?? '',
+          point: op.text,
+        };
+      } else {
+        const before = list[index];
+        const file = op.file ?? before?.file ?? '';
+        const id = typeof before?.id === 'string' && before.id !== ''
+          ? before.id
+          : itemId(kind, file, op.text);
+        // Keep the line only when the edit stays on the same file; new items carry line 0.
+        const line = file === (before?.file ?? '') && Number.isInteger(before?.line) && before.line > 0 ? before.line : 0;
+        list[index] = { id, file, point: op.text, line };
+        touchedIds.add(id);
+      }
+      applied.push({ op: 'update', target, index: index + 1 });
+      if (target === 'risk') touchedRisk = true;
+      else touchedConclusion = true;
+    } else if (op.op === 'add') {
+      if (isStep) {
+        list.push(op.text);
+      } else if (target === 'risk') {
+        list.push({
+          severity: op.severity === 'block' ? 'block' : 'suggest',
+          file: typeof op.file === 'string' ? op.file : '',
+          point: op.text,
+        });
+      } else {
+        const file = typeof op.file === 'string' ? op.file : '';
+        const id = itemId(kind, file, op.text);
+        list.push({ id, file, point: op.text, line: 0 });
+        touchedIds.add(id);
+      }
+      applied.push({ op: 'add', target });
+      if (target === 'risk') touchedRisk = true;
+      else touchedConclusion = true;
+    }
+  }
+  if (applied.length > 0) {
+    if (touchedRisk) record.reportUpdatedAt = Date.now();
+    if (touchedConclusion && working !== null) {
+      record.conclusion = working;
+      pushConclusionVersion(record, 'human', working, record.coverage ?? null);
+      record.conclusionEditedAt = Date.now();
+      const ids = new Set(Array.isArray(record.humanItemIds) ? record.humanItemIds : []);
+      for (const id of touchedIds) if (typeof id === 'string' && id !== '') ids.add(id);
+      record.humanItemIds = [...ids];
+    }
+    if (touchedRisk && typeof onReportTouched === 'function') onReportTouched(record);
+  }
+  return applied;
+}
+
+/**
+ * Apply the discussion's suggestion mutations to one file's suggestion list.
+ * Indices are 1-based and validated against the current list, so an out-of-range
+ * op from the model is ignored instead of corrupting the data.
+ */
+function applySuggestionOps(existing, ops) {
+  const list = Array.isArray(existing) ? [...existing] : [];
+  const applied = [];
+  for (const op of Array.isArray(ops) ? ops : []) {
+    const index = typeof op.index === 'number' ? op.index - 1 : -1;
+    if (op.op === 'remove') {
+      if (index < 0 || index >= list.length) continue;
+      const [removed] = list.splice(index, 1);
+      applied.push({ op: 'remove', index: index + 1, text: removed });
+    } else if (op.op === 'update') {
+      if (index < 0 || index >= list.length) continue;
+      const before = list[index];
+      list[index] = op.text;
+      applied.push({ op: 'update', index: index + 1, before, text: op.text });
+    } else if (op.op === 'add') {
+      list.push(op.text);
+      applied.push({ op: 'add', text: op.text });
+    }
+  }
+  return { list, applied };
+}
+
+/** Depth of the persisted cache directory. */
+function cacheDir() {
+  return path.join(homedir(), '.dsh', 'pr-review');
+}
+
+/** One cache file per platform + repository pair. */
+function cacheFile(provider) {
+  const slug = `${provider.platform}-${provider.repo.replace(/[^A-Za-z0-9._-]+/g, '__')}`;
+  return path.join(cacheDir(), `${slug}.json`);
+}
+
+// `buildCommentMarkdown` now lives in llm.js; re-exported to keep the old import path working.
+export { buildCommentMarkdown };
+
+// ---------- conclusion history helpers (contract §1) ----------
+
+/** Deep copy of JSON-shaped state so history versions never alias live objects. */
+function cloneJson(value) {
+  return value === undefined ? null : JSON.parse(JSON.stringify(value));
+}
+
+/** Build one round entry of the permanent conclusion history. */
+function makeRoundEntry(round, headSha, startedAt) {
+  return {
+    round,
+    headSha: typeof headSha === 'string' ? headSha : '',
+    startedAt: startedAt ?? Date.now(),
+    finishedAt: 0,
+    conclusions: [],
+    delta: null,
+    feedback: null,
+    publishedIds: [],
+  };
+}
+
+/** The permanent round history; a legacy record without one gets a synthesized single round. */
+function roundHistoryOf(record) {
+  if (!Array.isArray(record.roundHistory) || record.roundHistory.length === 0) {
+    const round = Number.isFinite(record.round) && record.round > 0 ? record.round : 1;
+    const conclusion = record.conclusion ?? null;
+    record.roundHistory = [{
+      round,
+      headSha: typeof record.headSha === 'string' ? record.headSha : '',
+      startedAt: record.startedAt ?? 0,
+      finishedAt: record.finishedAt ?? 0,
+      conclusions: conclusion === null ? [] : [{
+        version: 1,
+        createdAt: record.conclusionAt || record.finishedAt || record.startedAt || Date.now(),
+        source: 'model',
+        conclusion,
+        coverage: record.coverage ?? null,
+      }],
+      delta: record.delta ?? null,
+      feedback: record.feedback ?? null,
+      publishedIds: (Array.isArray(record.published) ? record.published : [])
+        .filter((entry) => (entry.round ?? round) === round && typeof entry.id === 'number')
+        .map((entry) => entry.id),
+    }];
+  }
+  return record.roundHistory;
+}
+
+/** The current round is always the last entry (ascending history). */
+function currentRoundEntry(record) {
+  const history = roundHistoryOf(record);
+  return history[history.length - 1];
+}
+
+/** Newest conclusion version of the current round (null before the first generation). */
+function latestConclusionVersionOf(record) {
+  const round = currentRoundEntry(record);
+  return round.conclusions.length === 0 ? null : round.conclusions[round.conclusions.length - 1];
+}
+
+/** Copy the current round's newest conclusion back onto the legacy top-level fields. */
+function syncTopLevelFromHistory(record) {
+  const round = currentRoundEntry(record);
+  record.round = round.round;
+  record.delta = round.delta ?? null;
+  record.feedback = round.feedback ?? null;
+  const version = round.conclusions.length === 0 ? null : round.conclusions[round.conclusions.length - 1];
+  record.conclusion = version === null ? null : version.conclusion;
+  record.conclusionAt = version === null ? 0 : (version.createdAt ?? 0);
+  record.coverage = version === null ? null : (version.coverage ?? null);
+  return round;
+}
+
+/** Append one conclusion version to the current round (model generation or human edit). */
+function pushConclusionVersion(record, source, conclusion, coverage) {
+  if (conclusion === null || conclusion === undefined) return null;
+  const round = currentRoundEntry(record);
+  const previous = round.conclusions.length === 0 ? null : round.conclusions[round.conclusions.length - 1];
+  const version = {
+    version: previous === null ? 1 : (Number(previous.version) || round.conclusions.length) + 1,
+    createdAt: Date.now(),
+    source: source === 'human' ? 'human' : 'model',
+    conclusion: cloneJson(conclusion),
+    coverage: coverage === undefined ? (previous?.coverage ?? null) : cloneJson(coverage),
+  };
+  round.conclusions.push(version);
+  record.conclusion = version.conclusion;
+  record.conclusionAt = version.createdAt;
+  record.coverage = version.coverage;
+  record.round = round.round;
+  return version;
+}
+
+/** One persisted round entry, tolerating missing or older fields. */
+function sanitizeRoundEntry(entry, index) {
+  const round = Number.isFinite(entry?.round) && entry.round > 0 ? entry.round : index + 1;
+  const conclusions = (Array.isArray(entry?.conclusions) ? entry.conclusions : [])
+    .filter((version) => version !== null && typeof version === 'object' && version.conclusion !== null && typeof version.conclusion === 'object')
+    .map((version, versionIndex) => ({
+      version: Number.isFinite(version.version) && version.version > 0 ? version.version : versionIndex + 1,
+      createdAt: Number.isFinite(version.createdAt) ? version.createdAt : 0,
+      source: version.source === 'human' ? 'human' : 'model',
+      conclusion: ensureConclusionIds(version.conclusion),
+      coverage: version.coverage ?? null,
+    }));
+  return {
+    round,
+    headSha: typeof entry?.headSha === 'string' ? entry.headSha : '',
+    startedAt: Number.isFinite(entry?.startedAt) ? entry.startedAt : 0,
+    finishedAt: Number.isFinite(entry?.finishedAt) ? entry.finishedAt : 0,
+    conclusions,
+    delta: entry?.delta ?? null,
+    feedback: entry?.feedback ?? null,
+    publishedIds: Array.isArray(entry?.publishedIds) ? entry.publishedIds.filter((id) => typeof id === 'number') : [],
+  };
+}
+
+/** Write feedback on both the top-level field and the current round entry. */
+function setCurrentRoundFeedback(record, feedback) {
+  currentRoundEntry(record).feedback = feedback ?? null;
+  record.feedback = feedback ?? null;
+}
+
+/**
+ * Copy a conclusion with only the item ids in `includeIds` kept (publish selection).
+ * summary/verdict/nextSteps always survive; unknown ids are ignored, so an empty
+ * list publishes the summary without any numbered item.
+ */
+function filterConclusionItems(conclusion, includeIds) {
+  const allowed = new Set((Array.isArray(includeIds) ? includeIds : []).filter((id) => typeof id === 'string' && id !== ''));
+  const keep = (kind, item) => {
+    if (item === null || typeof item !== 'object') return false;
+    const id = typeof item.id === 'string' && item.id !== '' ? item.id : itemId(kind, item.file, item.point);
+    return allowed.has(id);
+  };
+  return {
+    ...conclusion,
+    blockers: (Array.isArray(conclusion?.blockers) ? conclusion.blockers : []).filter((item) => keep('blocker', item)),
+    suggestions: (Array.isArray(conclusion?.suggestions) ? conclusion.suggestions : []).filter((item) => keep('suggestion', item)),
+  };
+}
+
+export function apply(ctx, config) {
+  const settings = { ...DEFAULTS, ...(typeof config === 'object' && config !== null ? config : {}) };
+  let provider = resolveProviderConfig(settings);
+  const state = {
+    repoKey: `${provider.platform}:${provider.repo}`,
+    prs: [],
+    reviews: new Map(),
+    lastPollAt: 0,
+    lastPollError: null,
+    tokenMissing: false,
+    pollRunning: false,
+    client: null,
+    persisted: false,
+    saveTimer: null,
+  };
+
+  let cachePath = cacheFile(provider);
+
+  /** Workspace cwd → resolved repository (the same workspace always maps to the same repo). */
+  const repoByCwd = new Map();
+
+  /** Effective comment language ('zh' default, 'en' opt-in). */
+  function commentLanguage() {
+    return settings.commentLanguage === 'en' ? 'en' : 'zh';
+  }
+
+  /** Newest report/explanation time the current conclusion has not caught up with. */
+  function latestContextAt(record) {
+    let latest = record.reportUpdatedAt ?? 0;
+    for (const entry of record.explanations.values()) {
+      if (entry.status === 'done') latest = Math.max(latest, entry.updatedAt ?? 0);
+    }
+    return latest;
+  }
+
+  /** A conclusion older than the newest report/explanation edit is stale. */
+  function isStale(record) {
+    const version = latestConclusionVersionOf(record);
+    const createdAt = version === null ? 0 : (version.createdAt ?? 0);
+    return createdAt < latestContextAt(record);
+  }
+
+  /** Stop a running conclusion job without letting it record a cancellation error. */
+  function abortConclude(record) {
+    const abort = record.concludingAbort;
+    record.concludingAbort = null;
+    record.concluding = null;
+    if (abort !== null && abort !== undefined) abort.abort();
+  }
+
+  /** Background auto-regeneration (opt-in): only when stale, idle and rate-limited. */
+  function maybeAutoConclude(record) {
+    if (settings.autoReconclude !== true) return false;
+    if (record === undefined || record === null) return false;
+    if (record.concluding !== null && record.concluding !== undefined) return false;
+    if (record.status === 'reviewing') return false;
+    if (record.report === null || record.report === undefined) return false;
+    if (!isStale(record)) return false;
+    const now = Date.now();
+    if (now - (record.lastAutoConcludeAt ?? 0) < 300_000) return false;
+    record.lastAutoConcludeAt = now;
+    return startConclude(record).ok === true;
+  }
+
+  /** Parse a git remote URL into a reviewable repository description. */
+  function parseRemote(remote) {
+    const value = String(remote ?? '').trim();
+    let host = '';
+    let pathname = '';
+    let match = /^(?:https?|ssh):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/.exec(value);
+    if (match !== null) {
+      host = match[1];
+      pathname = match[2];
+    } else {
+      match = /^[^@]+@([^:]+):(.+)$/.exec(value);
+      if (match !== null) {
+        host = match[1];
+        pathname = match[2];
+      }
+    }
+    if (host === '' || pathname === '') return null;
+    const repo = pathname.replace(/^\.git$/, '').replace(/\.git$/, '').replace(/^\/+/, '');
+    if (!/^[^/]+\/[^/]+$/.test(repo)) return null;
+    const platform = /(^|\.)github\.com$/i.test(host) ? 'github' : 'forgejo';
+    return {
+      platform,
+      repo,
+      baseUrl: platform === 'github' ? 'https://api.github.com' : `https://${host}`,
+    };
+  }
+
+  /** Try `git -C <dir> remote get-url origin`, tolerating a GUI app's minimal PATH. */
+  async function readGitRemote(dir) {
+    const candidates = ['git', '/usr/bin/git', '/opt/homebrew/bin/git', '/usr/local/bin/git'];
+    for (const binary of candidates) {
+      const result = await new Promise((resolve) => {
+        execFile(binary, ['-C', dir, 'remote', 'get-url', 'origin'], { timeout: 8000 }, (error, stdout, stderr) => {
+          resolve({ error, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
+        });
+      });
+      if (result.error === null || result.error === undefined) {
+        return { ok: true, remote: result.stdout.trim() };
+      }
+      if (result.error.code === 'ENOENT') continue;
+      const detail = result.stderr.trim().slice(0, 200);
+      const lower = detail.toLowerCase();
+      if (lower.includes('no such remote') || detail.includes('没有那个远程')) {
+        return { ok: false, reason: 'no-origin', detail };
+      }
+      return { ok: false, reason: 'not-git', detail };
+    }
+    return { ok: false, reason: 'git-missing' };
+  }
+
+  /** Resolve the repository that owns a workspace directory (git remote origin). */
+  async function resolveRepoForPath(cwd) {
+    const dir = typeof cwd === 'string' ? cwd.trim() : '';
+    if (dir === '') return { supported: false, reason: 'no-cwd', cwd: dir };
+    const cached = repoByCwd.get(dir);
+    if (cached !== undefined) return cached;
+    const remote = await readGitRemote(dir);
+    if (!remote.ok) return { supported: false, reason: remote.reason, detail: remote.detail, cwd: dir };
+    if (remote.remote === '') return { supported: false, reason: 'no-origin', cwd: dir };
+    const parsed = parseRemote(remote.remote);
+    if (parsed === null) return { supported: false, reason: 'unsupported-remote', remote: remote.remote, cwd: dir };
+    const result = { supported: true, ...parsed, cwd: dir };
+    repoByCwd.set(dir, result);
+    return result;
+  }
+
+  // ---------- persistence ----------
+
+  /** Persist the lightweight review state (no diff text). */
+  function scheduleSave() {
+    if (state.saveTimer !== null) return;
+    state.saveTimer = setTimeout(() => {
+      state.saveTimer = null;
+      void saveNow();
+    }, 800);
+  }
+
+  async function saveNow() {
+    // Nothing to persist before a workspace (or explicit config) names the repository.
+    if (provider.repo === '') return;
+    try {
+      const payload = { savedAt: Date.now(), reviews: {} };
+      for (const [number, record] of state.reviews) {
+        if (record.status === 'reviewing') continue;
+        payload.reviews[number] = {
+          number: record.number,
+          status: record.status,
+          headSha: record.headSha,
+          startedAt: record.startedAt,
+          finishedAt: record.finishedAt,
+          error: record.error,
+          pull: record.pull,
+          files: record.files,
+          report: record.report,
+          explanations: [...record.explanations.entries()].map(([filePath, entry]) => ({
+            file: filePath,
+            status: entry.status,
+            error: entry.error,
+            explanation: entry.explanation,
+            chat: entry.chat,
+            updatedAt: entry.updatedAt,
+          })),
+          pullChat: record.pullChat,
+          reportUpdatedAt: record.reportUpdatedAt ?? 0,
+          conclusionEditedAt: record.conclusionEditedAt ?? 0,
+          round: record.round ?? 1,
+          roundHistory: record.roundHistory ?? [],
+          humanItemIds: record.humanItemIds ?? [],
+          coverage: record.coverage ?? null,
+          concludeError: record.concludeError ?? null,
+          published: record.published ?? [],
+          publishedItems: record.publishedItems ?? [],
+          feedback: record.feedback ?? null,
+          delta: record.delta ?? null,
+          previousRound: record.previousRound ?? null,
+          conclusionAt: record.conclusionAt ?? 0,
+          conclusion: record.conclusion,
+          comment: record.comment ?? null,
+          revision: record.revision ?? 0,
+          audit: Array.isArray(record.audit) ? record.audit : [],
+        };
+      }
+      await mkdir(cacheDir(), { recursive: true });
+      await writeFile(cachePath, JSON.stringify(payload), 'utf8');
+    } catch (error) {
+      console.warn('[pr-review] 保存审查缓存失败', error);
+    }
+  }
+
+  async function loadCache() {
+    try {
+      const text = await readFile(cachePath, 'utf8');
+      const payload = JSON.parse(text);
+      const reviews = payload.reviews ?? {};
+      for (const key of Object.keys(reviews)) {
+        const saved = reviews[key];
+        const explanations = new Map();
+        for (const entry of Array.isArray(saved.explanations) ? saved.explanations : []) {
+          if (typeof entry?.file !== 'string') continue;
+          explanations.set(entry.file, {
+            status: entry.status ?? 'done',
+            error: entry.error ?? null,
+            explanation: entry.explanation ?? null,
+            chat: Array.isArray(entry.chat) ? entry.chat : [],
+            updatedAt: entry.updatedAt ?? 0,
+          });
+        }
+        const number = Number(saved.number ?? key);
+        if (!Number.isFinite(number)) continue;
+        const record = {
+          number,
+          status: saved.status === 'reviewing' ? 'stale' : (saved.status ?? 'done'),
+          // A failed review keeps no head marker, so the next poll retries it.
+          headSha: saved.status === 'error' ? '' : (saved.headSha ?? ''),
+          startedAt: saved.startedAt ?? 0,
+          finishedAt: saved.finishedAt ?? 0,
+          error: saved.error ?? null,
+          pull: saved.pull ?? null,
+          files: Array.isArray(saved.files) ? saved.files : [],
+          report: saved.report ?? null,
+          explanations,
+          pullChat: Array.isArray(saved.pullChat) ? saved.pullChat : [],
+          reportUpdatedAt: saved.reportUpdatedAt ?? 0,
+          conclusionEditedAt: saved.conclusionEditedAt ?? 0,
+          round: saved.round ?? 1,
+          published: (Array.isArray(saved.published) ? saved.published : []).map((entry) => ({
+            ...entry,
+            version: Number.isFinite(entry?.version) ? entry.version : 0,
+          })),
+          publishedItems: Array.isArray(saved.publishedItems) ? saved.publishedItems : [],
+          feedback: saved.feedback ?? null,
+          delta: saved.delta ?? null,
+          previousRound: saved.previousRound ?? null,
+          conclusionAt: saved.conclusionAt ?? 0,
+          conclusion: saved.conclusion ?? null,
+          comment: saved.comment ?? null,
+          humanItemIds: Array.isArray(saved.humanItemIds)
+            ? saved.humanItemIds.filter((id) => typeof id === 'string' && id !== '')
+            : [],
+          coverage: saved.coverage ?? null,
+          roundHistory: [],
+          concluding: null,
+          concludingAbort: null,
+          publishing: false,
+          concludeError: null,
+          lastAutoConcludeAt: 0,
+          diffFiles: undefined,
+          revision: Number.isInteger(saved.revision) && saved.revision >= 0 ? saved.revision : 0,
+          audit: Array.isArray(saved.audit) ? saved.audit.filter((item) => item !== null && typeof item === 'object') : [],
+        };
+        if (Array.isArray(saved.roundHistory) && saved.roundHistory.length > 0) {
+          record.roundHistory = saved.roundHistory.map((entry, index) => sanitizeRoundEntry(entry, index));
+        } else {
+          // Legacy cache: synthesize the single round it had so the history starts non-empty.
+          const legacyRound = Number.isFinite(record.round) && record.round > 0 ? record.round : 1;
+          record.roundHistory = [sanitizeRoundEntry({
+            round: legacyRound,
+            headSha: record.headSha,
+            startedAt: record.startedAt,
+            finishedAt: record.finishedAt,
+            conclusions: record.conclusion === null || record.conclusion === undefined
+              ? []
+              : [{
+                  version: 1,
+                  createdAt: record.conclusionAt || record.finishedAt || record.startedAt || Date.now(),
+                  source: 'model',
+                  conclusion: record.conclusion,
+                  coverage: record.coverage ?? null,
+                }],
+            delta: record.delta ?? null,
+            feedback: record.feedback ?? null,
+            publishedIds: record.published
+              .filter((entry) => (entry.round ?? legacyRound) === legacyRound && typeof entry.id === 'number')
+              .map((entry) => entry.id),
+          }, 0)];
+        }
+        // Legacy published items get the same stable ids the current commentItems() would use.
+        record.publishedItems = record.publishedItems.map((item) => (
+          item !== null && typeof item === 'object' && (typeof item.id !== 'string' || item.id === '')
+            ? { ...item, id: itemId(item.kind, item.file, item.point) }
+            : item
+        ));
+        const current = syncTopLevelFromHistory(record);
+        record.round = current.round;
+        state.reviews.set(number, record);
+      }
+      state.persisted = true;
+    } catch {
+      // A missing or unreadable cache simply starts empty.
+      state.persisted = false;
+    }
+  }
+
+  /** Switch the active repository: flush the previous cache, reload this repo's cache, start polling. */
+  async function activateRepo(nextProvider) {
+    const key = `${nextProvider.platform}:${nextProvider.repo}`;
+    if (state.repoKey === key) return false;
+    if (state.saveTimer !== null) {
+      clearTimeout(state.saveTimer);
+      state.saveTimer = null;
+    }
+    await saveNow();
+    for (const record of state.reviews.values()) abortConclude(record);
+    provider = nextProvider;
+    cachePath = cacheFile(provider);
+    state.repoKey = key;
+    state.prs = [];
+    state.reviews = new Map();
+    state.lastPollAt = 0;
+    state.lastPollError = null;
+    state.pollRunning = false;
+    state.client = null;
+    state.tokenMissing = false;
+    state.persisted = false;
+    await loadCache();
+    void refreshPulls();
+    return true;
+  }
+
+  /** Honor the workspace-scoped ?repo=&platform=&baseUrl= query (browser half always sends it). */
+  async function ensureRepoFor(req) {
+    const url = pathOf(req);
+    const repo = url.searchParams.get('repo') ?? '';
+    const platform = url.searchParams.get('platform') ?? '';
+    if (repo === '' || platform === '') return;
+    const baseUrl = platform === 'github'
+      ? 'https://api.github.com'
+      : (url.searchParams.get('baseUrl') ?? settings.baseUrl);
+    await activateRepo(resolveProviderConfig({
+      ...settings,
+      platform: platform === 'github' ? 'github' : 'forgejo',
+      repo,
+      baseUrl,
+    }));
+  }
+
+  // ---------- provider client ----------
+
+  async function ensureClient() {
+    if (state.client !== null) return state.client;
+    const token = await resolveToken(settings, provider);
+    if (token === null || token === undefined) {
+      state.tokenMissing = true;
+      throw new Error(
+        provider.platform === 'github'
+          ? '缺少 GitHub token：请在插件配置填写 token，或设置 GITHUB_TOKEN / GH_TOKEN，或先 `gh auth login`。'
+          : '缺少 Forgejo token：请在插件配置填写 token，或设置 FORGEJO_TOKEN，或先 `tea login`。',
+      );
+    }
+    state.tokenMissing = false;
+    state.client = createClient(settings, provider, token);
+    return state.client;
+  }
+
+  /** Refetch the diff for a review whose in-memory copy is gone (e.g. after restart). */
+  async function ensureDiffFiles(record) {
+    if (record.diffFiles !== undefined) return record.diffFiles;
+    const client = await ensureClient();
+    const diff = await client.pullDiff(record.number);
+    record.diffFiles = parseDiff(diff);
+    if (!Array.isArray(record.files) || record.files.length === 0) {
+      record.files = await client.pullFiles(record.number);
+    }
+    return record.diffFiles;
+  }
+
+  /** Full text of one changed file at the PR head, cached per review record. */
+  async function ensureFileContent(record, filePath) {
+    const cache = record.fileContents ?? new Map();
+    record.fileContents = cache;
+    const cached = cache.get(filePath);
+    if (cached !== undefined) return cached;
+    const client = await ensureClient();
+    const ref = record.pull?.headSha ?? record.headSha ?? '';
+    const result = await client.pullFileContent(filePath, ref);
+    cache.set(filePath, result);
+    return result;
+  }
+
+  // ---------- pull list ----------
+
+  async function refreshPulls() {
+    if (state.pollRunning) return;
+    // No configured repository yet: workspace sessions activate one from their git origin.
+    if (provider.repo === '' || provider.baseUrl === '') return;
+    state.pollRunning = true;
+    try {
+      const client = await ensureClient();
+      const prs = await client.listOpenPulls();
+      state.prs = prs;
+      state.lastPollAt = Date.now();
+      state.lastPollError = null;
+      if (settings.autoReview !== false) {
+        for (const pr of prs) {
+          if (pr.headSha === '') continue;
+          const record = state.reviews.get(pr.number);
+          if (record === undefined) {
+            startReview(pr.number, false);
+            continue;
+          }
+          if (record.status === 'reviewing') continue;
+          // A failure is not a completed round: retry it in place (throttled) before
+          // looking at the head sha, so no round entry is appended by a retry.
+          if (record.status === 'error') {
+            if (Date.now() - (record.finishedAt ?? 0) > 300_000) startReview(pr.number, false);
+            continue;
+          }
+          if (record.headSha !== pr.headSha) {
+            startReview(pr.number, true);
+            continue;
+          }
+        }
+      }
+    } catch (error) {
+      state.lastPollError = error instanceof Error ? error.message : String(error);
+    } finally {
+      state.pollRunning = false;
+    }
+  }
+
+  // ---------- review pipeline ----------
+
+  /** Create the record shell and kick off the report; safe to call repeatedly. */
+  function startReview(number, force) {
+    const existing = state.reviews.get(number);
+    if (existing !== undefined && existing.status === 'reviewing') return false;
+    const now = Date.now();
+    let record;
+    if (existing === undefined) {
+      record = {
+        number,
+        round: 1,
+        status: 'reviewing',
+        startedAt: now,
+        finishedAt: 0,
+        headSha: '',
+        error: null,
+        pull: null,
+        files: [],
+        report: null,
+        explanations: new Map(),
+        pullChat: [],
+        reportUpdatedAt: 0,
+        conclusionEditedAt: 0,
+        conclusionAt: 0,
+        conclusion: null,
+        comment: null,
+        published: [],
+        publishedItems: [],
+        feedback: null,
+        delta: null,
+        previousRound: null,
+        humanItemIds: [],
+        coverage: null,
+        roundHistory: [],
+        concluding: null,
+        concludingAbort: null,
+        publishing: false,
+        concludeError: null,
+        lastAutoConcludeAt: 0,
+        diffFiles: undefined,
+      };
+      const round = roundHistoryOf(record)[0];
+      round.startedAt = now;
+      round.headSha = '';
+    } else {
+      record = existing;
+      if (force) {
+        const history = roundHistoryOf(record);
+        const previousRoundEntry = history[history.length - 1];
+        const previousVersion = latestConclusionVersionOf(record);
+        const previousItems = previousVersion === null ? [] : commentItems(previousVersion.conclusion);
+        record.previousRound = previousVersion === null ? null : {
+          round: previousRoundEntry.round,
+          headSha: previousRoundEntry.headSha || record.headSha || '',
+          conclusion: cloneJson(previousVersion.conclusion),
+          items: previousItems.length > 0
+            ? previousItems
+            : (Array.isArray(record.publishedItems) ? record.publishedItems : []),
+        };
+        abortConclude(record);
+        history.push(makeRoundEntry(previousRoundEntry.round + 1, '', now));
+        record.round = previousRoundEntry.round + 1;
+        record.report = null;
+        record.explanations = new Map();
+        record.pullChat = [];
+        record.reportUpdatedAt = 0;
+        record.conclusionEditedAt = 0;
+        record.conclusionAt = 0;
+        record.conclusion = null;
+        record.comment = null;
+        record.publishedItems = [];
+        record.feedback = null;
+        record.delta = null;
+        record.humanItemIds = [];
+        record.coverage = null;
+        record.concludeError = null;
+        record.lastAutoConcludeAt = 0;
+      }
+      record.status = 'reviewing';
+      record.startedAt = now;
+      record.finishedAt = 0;
+      record.error = null;
+      record.diffFiles = undefined;
+    }
+    state.reviews.set(number, record);
+    void runReview(record).catch((error) => {
+      record.status = 'error';
+      record.error = error instanceof Error ? error.message : String(error);
+      record.finishedAt = Date.now();
+      currentRoundEntry(record).finishedAt = record.finishedAt;
+      scheduleSave();
+    });
+    return true;
+  }
+
+  /** Fetch one pull request and produce the overall report plus reading order. */
+  async function runReview(record) {
+    const client = await ensureClient();
+    const pull = await client.pullDetail(record.number);
+    record.pull = pull;
+    record.headSha = pull.headSha;
+    currentRoundEntry(record).headSha = pull.headSha;
+    const files = await client.pullFiles(record.number);
+    record.files = files;
+    const diffText = await client.pullDiff(record.number);
+    record.diffFiles = parseDiff(diffText);
+    // The host file endpoint may cap its page; keep every path the diff knows.
+    if (record.diffFiles.size > 0) {
+      const fileMap = new Map(files.map((file) => [file.path, file]));
+      for (const [filePath, parsed] of record.diffFiles) {
+        if (!fileMap.has(filePath)) {
+          fileMap.set(filePath, {
+            path: filePath,
+            previousPath: '',
+            status: 'changed',
+            additions: parsed.additions,
+            deletions: parsed.deletions,
+            changes: parsed.additions + parsed.deletions,
+          });
+        }
+      }
+      record.files = [...fileMap.values()];
+    }
+    const prompt = buildReportPrompt(pull, record.files, record.diffFiles, settings);
+    let raw;
+    try {
+      raw = await callModel(ctx, settings, prompt);
+    } catch (error) {
+      record.status = 'error';
+      record.error = error instanceof Error ? error.message : String(error);
+      record.finishedAt = Date.now();
+      currentRoundEntry(record).finishedAt = record.finishedAt;
+      scheduleSave();
+      return;
+    }
+    const parsed = extractJson(raw);
+    if (parsed === null) {
+      record.status = 'error';
+      record.error = `模型没有返回可解析的 JSON。原始输出：${raw.slice(0, 400)}`;
+      record.finishedAt = Date.now();
+      currentRoundEntry(record).finishedAt = record.finishedAt;
+      scheduleSave();
+      return;
+    }
+    const order = Array.isArray(files) ? files.map((file) => file.path) : [];
+    record.report = normalizeReport(parsed, order);
+    record.reportUpdatedAt = 0;
+    record.status = 'done';
+    record.finishedAt = Date.now();
+    currentRoundEntry(record).finishedAt = record.finishedAt;
+    scheduleSave();
+  }
+
+  /** Explain one file: deep logic walkthrough + findings. */
+  async function explainFile(number, filePath, force) {
+    const record = state.reviews.get(number);
+    if (record === undefined) {
+      const started = startReview(number, false);
+      if (!started) throw new Error('该 PR 正在审查中，请稍后再试。');
+      throw new Error('该 PR 还没有审查报告，已开始审查，请稍后重试。');
+    }
+    const cached = record.explanations.get(filePath);
+    if (!force && cached !== undefined && cached.status === 'done' && cached.explanation !== null) {
+      return { explanation: cached.explanation, cached: true };
+    }
+    const diffFiles = await ensureDiffFiles(record);
+    const file = (record.files ?? []).find((item) => item.path === filePath) ?? {
+      path: filePath,
+      status: 'changed',
+      additions: 0,
+      deletions: 0,
+    };
+    const diff = diffFiles.get(filePath);
+    const diffText = diff === undefined ? '' : diff.text.slice(0, settings.maxDiffCharsPerFile ?? 14000);
+    const focus = record.report?.focus?.[filePath] ?? '';
+    let fileContent = '';
+    try {
+      const content = await ensureFileContent(record, filePath);
+      fileContent = content.content;
+    } catch (error) {
+      console.warn('[pr-review] 读取文件完整内容失败，讲解退化为仅 diff：', error);
+    }
+    const prompt = buildExplainPrompt(
+      record.pull ?? { number, title: '', repo: provider.repo, platform: provider.platform },
+      file,
+      diffText,
+      record.report,
+      focus,
+      fileContent,
+    );
+    const raw = await callModel(ctx, settings, prompt);
+    const parsed = extractJson(raw);
+    if (parsed === null) throw new Error(`模型没有返回可解析的 JSON。原始输出：${raw.slice(0, 400)}`);
+    const explanation = normalizeExplanation({
+      ...parsed,
+      // A single missing verdict must not present as "pass".
+      verdict: parsed.verdict ?? 'suggest',
+    });
+    record.explanations.set(filePath, {
+      status: 'done',
+      error: null,
+      explanation,
+      chat: cached?.chat ?? [],
+      updatedAt: Date.now(),
+    });
+    scheduleSave();
+    maybeAutoConclude(record);
+    return { explanation, cached: false };
+  }
+
+  /** Continue the conversation about one file, or about the whole PR. */
+  async function chat(number, filePath, question) {
+    const record = state.reviews.get(number);
+    if (record === undefined) throw new Error('该 PR 还没有审查记录，请先审查。');
+    const file = filePath === '' ? null : (record.files ?? []).find((item) => item.path === filePath) ?? { path: filePath, status: 'changed', additions: 0, deletions: 0 };
+    const entry = filePath === '' ? null : (record.explanations.get(filePath) ?? null);
+    const history = entry === null ? record.pullChat : entry.chat;
+    const prompt = buildChatPrompt(
+      record.pull ?? { number, title: '', repo: provider.repo, platform: provider.platform },
+      file,
+      entry?.explanation ?? null,
+      record.report,
+      history,
+      question,
+      record.conclusion ?? null,
+    );
+    const { answer, ops } = parseChatReply(await callModel(ctx, settings, prompt));
+    let applied = [];
+    if (entry === null) {
+      record.pullChat.push({ role: 'user', text: question }, { role: 'assistant', text: answer });
+      if (ops.length > 0) applied = applyOverviewOps(record, ops, () => maybeAutoConclude(record));
+    } else {
+      entry.chat.push({ role: 'user', text: question }, { role: 'assistant', text: answer });
+      entry.updatedAt = Date.now();
+      if (entry.explanation !== null && entry.explanation !== undefined && ops.length > 0) {
+        const result = applySuggestionOps(entry.explanation.suggestions ?? [], ops);
+        if (result.applied.length > 0) {
+          entry.explanation = { ...entry.explanation, suggestions: result.list };
+          applied = result.applied;
+        }
+      }
+    }
+    scheduleSave();
+    return { answer, applied };
+  }
+
+  // ---------- final conclusion (async task with cancellation) ----------
+
+  /** Start one background conclusion generation; returns immediately. */
+  function startConclude(record) {
+    if (record === undefined || record === null) return { ok: false, code: 'not-found' };
+    if (record.concluding !== null && record.concluding !== undefined) return { ok: false, code: 'concluding' };
+    record.concludeError = null;
+    record.concluding = { stage: 'collect', startedAt: Date.now() };
+    const abort = new AbortController();
+    record.concludingAbort = abort;
+    void runConclude(record, abort);
+    return { ok: true };
+  }
+
+  /** The staged job behind POST /conclude: collect → model → parse → write. */
+  async function runConclude(record, abort) {
+    const stillCurrent = () => record.concludingAbort === abort;
+    try {
+      const files = Array.isArray(record.files) ? record.files : [];
+      // Only finished explanations feed the conclusion and the coverage number.
+      const done = new Map();
+      for (const [filePath, entry] of record.explanations) {
+        if (entry.status === 'done' && entry.explanation !== null && entry.explanation !== undefined) {
+          done.set(filePath, entry.explanation);
+        }
+      }
+      const coverage = conclusionCoverage(record.explanations, files);
+      const previousVersion = latestConclusionVersionOf(record);
+      const previousConclusion = previousVersion === null ? null : previousVersion.conclusion;
+      const humanEdited = (record.conclusionEditedAt ?? 0) > 0
+        && previousVersion !== null
+        && previousVersion.source === 'human';
+      const fileSeverities = [];
+      for (const [filePath, entry] of record.explanations) {
+        if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
+        for (const issue of Array.isArray(entry.explanation.issues) ? entry.explanation.issues : []) {
+          fileSeverities.push({ file: filePath, severity: issue?.severity === 'block' ? 'block' : 'suggest' });
+        }
+      }
+      const prompt = buildConcludePrompt(
+        record.pull ?? { number: record.number, title: '', repo: provider.repo, platform: provider.platform },
+        record.report,
+        done,
+        previousConclusion,
+        {
+          coverage,
+          previousItems: commentItems(previousConclusion),
+          feedback: record.feedback ?? null,
+          pullChat: Array.isArray(record.pullChat) ? record.pullChat : [],
+          humanItemIds: Array.isArray(record.humanItemIds) ? record.humanItemIds : [],
+        },
+      );
+      if (record.concluding !== null) record.concluding.stage = 'model';
+      const raw = await callModel(ctx, settings, { ...prompt, signal: abort.signal });
+      if (abort.signal.aborted) throw new Error('已取消');
+      if (record.concluding !== null) record.concluding.stage = 'parse';
+      const parsed = extractJson(raw);
+      if (parsed === null) throw new Error(`模型没有返回可解析的 JSON。原始输出：${String(raw).slice(0, 400)}`);
+      const generated = normalizeConclusion(parsed, { files: files.map((file) => file.path) });
+      const merged = mergeConclusion(previousConclusion, generated, {
+        lockedItemIds: Array.isArray(record.humanItemIds) ? record.humanItemIds : [],
+      });
+      const calibrated = calibrateVerdict(merged, { humanEdited, fileSeverities });
+      if (abort.signal.aborted) throw new Error('已取消');
+      if (record.concluding !== null) record.concluding.stage = 'write';
+      const version = pushConclusionVersion(record, 'model', calibrated, coverage);
+      if (version === null) throw new Error('模型返回了空结论。');
+      record.conclusionEditedAt = 0;
+      record.reportUpdatedAt = 0;
+      record.error = null;
+      record.concludeError = null;
+      const previousItems = Array.isArray(record.previousRound?.items) ? record.previousRound.items : [];
+      const currentItems = commentItems(record.conclusion);
+      const compared = previousItems.length === 0 ? null : compareComments(previousItems, currentItems);
+      const delta = compared === null ? null : {
+        round: record.round ?? 1,
+        previousRound: record.previousRound?.round ?? (record.round ?? 1) - 1,
+        resolved: compared.resolved.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
+        stillOpen: compared.stillOpen.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
+        comparedAt: Date.now(),
+      };
+      currentRoundEntry(record).delta = delta;
+      record.delta = delta;
+      scheduleSave();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const cancelled = abort.signal.aborted || message.includes('已取消');
+      if (stillCurrent()) {
+        record.concludeError = cancelled ? `已取消：${message}` : message;
+        record.error = record.concludeError;
+      }
+    } finally {
+      if (stillCurrent()) {
+        record.concludingAbort = null;
+        record.concluding = null;
+      }
+      scheduleSave();
+    }
+  }
+
+  // ---------- HTTP routes ----------
+
+  const rejected = (req, res) => {
+    const rejection = ctx.connection.requestRejection(req);
+    if (rejection === undefined) return false;
+    res.statusCode = rejection;
+    res.end();
+    return true;
+  };
+
+  const pathOf = (req) => new URL(String(req.url), 'http://localhost');
+
+  function route(pathname, handlers) {
+    const methods = Object.keys(handlers).join(', ');
+    ctx.effect(() => ctx.webServer.register({
+      kind: 'exact',
+      path: pathname,
+      handler: async (req, res) => {
+        if (rejected(req, res)) return;
+        const handler = handlers[req.method];
+        try {
+          if (handler === undefined) {
+            res.statusCode = 405;
+            res.setHeader('allow', methods);
+            res.end();
+            return;
+          }
+          await handler(req, res);
+        } catch (error) {
+          console.warn('[pr-review]', error);
+          sendError(res, 500, 'internal', error instanceof Error ? error.message : String(error));
+        }
+      },
+    }), `pr-review: ${pathname} (${methods})`);
+  }
+
+  route(`${PREFIX}/context`, {
+    GET: async (req, res) => {
+      const url = pathOf(req);
+      const cwd = url.searchParams.get('cwd') ?? '';
+      const info = await resolveRepoForPath(cwd);
+      if (!info.supported) {
+        sendJson(res, 200, {
+          ok: true,
+          supported: false,
+          reason: info.reason,
+          detail: typeof info.detail === 'string' ? info.detail : '',
+          cwd: typeof info.cwd === 'string' ? info.cwd : cwd,
+        });
+        return;
+      }
+      await activateRepo(resolveProviderConfig({
+        ...settings,
+        platform: info.platform,
+        repo: info.repo,
+        baseUrl: info.baseUrl,
+      }));
+      sendJson(res, 200, {
+        ok: true,
+        supported: true,
+        repo: { platform: info.platform, repo: info.repo, baseUrl: info.baseUrl },
+      });
+    },
+  });
+
+  route(`${PREFIX}/prs`, {
+    GET: async (req, res) => {
+      await ensureRepoFor(req);
+      const reviews = {};
+      for (const [number, record] of state.reviews) reviews[number] = reviewSummary(record);
+      let modelLabel = '';
+      try {
+        const { resolveSelection } = await import('./llm.js');
+        const selection = resolveSelection(ctx, settings);
+        modelLabel = `${selection.provider}/${selection.model}`;
+      } catch {
+        modelLabel = '';
+      }
+      sendJson(res, 200, {
+        ok: true,
+        platform: provider.platform,
+        repo: provider.repo,
+        baseUrl: provider.baseUrl,
+        autoReview: settings.autoReview !== false,
+        pollSeconds: settings.pollSeconds,
+        commentLanguage: commentLanguage(),
+        autoReconclude: settings.autoReconclude === true,
+        lastPollAt: state.lastPollAt,
+        lastPollError: state.lastPollError,
+        tokenMissing: state.tokenMissing,
+        model: modelLabel,
+        prs: state.prs,
+        reviews,
+      });
+    },
+  });
+
+  route(`${PREFIX}/refresh`, {
+    POST: async (req, res) => {
+      await ensureRepoFor(req);
+      await refreshPulls();
+      sendJson(res, 200, { ok: true, lastPollAt: state.lastPollAt, lastPollError: state.lastPollError });
+    },
+  });
+
+  route(`${PREFIX}/review`, {
+    GET: async (req, res) => {
+      await ensureRepoFor(req);
+      const url = pathOf(req);
+      const number = Number(url.searchParams.get('number'));
+      if (!Number.isInteger(number) || number <= 0) {
+        sendError(res, 400, 'bad-request', 'number must be a positive integer');
+        return;
+      }
+      sendJson(res, 200, { ok: true, review: serializeReview(state.reviews.get(number)) });
+    },
+    POST: async (req, res) => {
+      await ensureRepoFor(req);
+      const text = await readBoundedBody(req);
+      const body = text === null ? null : parseBody(text);
+      const number = Number(body?.number);
+      if (!Number.isInteger(number) || number <= 0) {
+        sendError(res, 400, 'bad-request', 'number must be a positive integer');
+        return;
+      }
+      const started = startReview(number, body?.force === true);
+      sendJson(res, 200, { ok: true, started });
+    },
+  });
+
+  route(`${PREFIX}/file`, {
+    GET: async (req, res) => {
+      await ensureRepoFor(req);
+      const url = pathOf(req);
+      const number = Number(url.searchParams.get('number'));
+      const filePath = url.searchParams.get('path') ?? '';
+      if (!Number.isInteger(number) || number <= 0 || filePath === '') {
+        sendError(res, 400, 'bad-request', 'number and path are required');
+        return;
+      }
+      const record = state.reviews.get(number);
+      if (record === undefined) {
+        sendError(res, 404, 'not-found', 'review not found');
+        return;
+      }
+      const diffFiles = await ensureDiffFiles(record);
+      const diff = diffFiles.get(filePath);
+      sendJson(res, 200, {
+        ok: true,
+        file: {
+          path: filePath,
+          diff: diff === undefined ? '' : diff.text.slice(0, MAX_FILE_DIFF_BYTES),
+          additions: diff?.additions ?? 0,
+          deletions: diff?.deletions ?? 0,
+          truncated: diff !== undefined && diff.text.length > MAX_FILE_DIFF_BYTES,
+        },
+      });
+    },
+  });
+
+  route(`${PREFIX}/explain`, {
+    POST: async (req, res) => {
+      await ensureRepoFor(req);
+      const text = await readBoundedBody(req);
+      const body = text === null ? null : parseBody(text);
+      const number = Number(body?.number);
+      const filePath = typeof body?.path === 'string' ? body.path : '';
+      if (!Number.isInteger(number) || number <= 0 || filePath === '') {
+        sendError(res, 400, 'bad-request', 'number and path are required');
+        return;
+      }
+      const result = await explainFile(number, filePath, body?.force === true);
+      sendJson(res, 200, { ok: true, ...result });
+    },
+  });
+
+  route(`${PREFIX}/chat`, {
+    POST: async (req, res) => {
+      await ensureRepoFor(req);
+      const text = await readBoundedBody(req);
+      const body = text === null ? null : parseBody(text);
+      const number = Number(body?.number);
+      const question = typeof body?.message === 'string' ? body.message.trim() : '';
+      const filePath = typeof body?.path === 'string' ? body.path : '';
+      if (!Number.isInteger(number) || number <= 0 || question === '') {
+        sendError(res, 400, 'bad-request', 'number and message are required');
+        return;
+      }
+      const result = await chat(number, filePath, question);
+      sendJson(res, 200, { ok: true, answer: result.answer, applied: result.applied });
+    },
+  });
+
+  route(`${PREFIX}/conclude`, {
+    POST: async (req, res) => {
+      await ensureRepoFor(req);
+      const text = await readBoundedBody(req);
+      const body = text === null ? null : parseBody(text);
+      const number = Number(body?.number);
+      if (!Number.isInteger(number) || number <= 0) {
+        sendError(res, 400, 'bad-request', 'number must be a positive integer');
+        return;
+      }
+      const record = state.reviews.get(number);
+      if (record === undefined) {
+        sendError(res, 404, 'not-found', 'review not found');
+        return;
+      }
+      if (record.status === 'reviewing') {
+        sendError(res, 409, 'reviewing', '该 PR 正在审查中，请等审查完成后再生成结论。');
+        return;
+      }
+      if (record.report === null || record.report === undefined) {
+        sendError(res, 400, 'no-report', '还没有审查报告，请先完成审查再生成结论。');
+        return;
+      }
+      if (record.concluding !== null && record.concluding !== undefined) {
+        sendError(res, 409, 'concluding', '结论正在生成中，请稍候。');
+        return;
+      }
+      const started = startConclude(record);
+      if (!started.ok) {
+        sendError(res, 409, started.code === 'concluding' ? 'concluding' : 'conflict', '结论正在生成中，请稍候。');
+        return;
+      }
+      sendJson(res, 200, { ok: true, started: true });
+    },
+  });
+
+  route(`${PREFIX}/conclude/cancel`, {
+    POST: async (req, res) => {
+      await ensureRepoFor(req);
+      const text = await readBoundedBody(req);
+      const body = text === null ? null : parseBody(text);
+      const number = Number(body?.number);
+      if (!Number.isInteger(number) || number <= 0) {
+        sendError(res, 400, 'bad-request', 'number must be a positive integer');
+        return;
+      }
+      const record = state.reviews.get(number);
+      if (record === undefined) {
+        sendError(res, 404, 'not-found', 'review not found');
+        return;
+      }
+      const abort = record.concludingAbort;
+      if (abort === null || abort === undefined) {
+        sendJson(res, 200, { ok: true, cancelled: false });
+        return;
+      }
+      abort.abort();
+      sendJson(res, 200, { ok: true, cancelled: true });
+    },
+  });
+
+  route(`${PREFIX}/file-content`, {
+    GET: async (req, res) => {
+      await ensureRepoFor(req);
+      const url = pathOf(req);
+      const number = Number(url.searchParams.get('number'));
+      const filePath = url.searchParams.get('path') ?? '';
+      if (!Number.isInteger(number) || number <= 0 || filePath === '') {
+        sendError(res, 400, 'bad-request', 'number and path are required');
+        return;
+      }
+      const record = state.reviews.get(number);
+      if (record === undefined) {
+        sendError(res, 404, 'not-found', 'review not found');
+        return;
+      }
+      const content = await ensureFileContent(record, filePath);
+      sendJson(res, 200, { ok: true, file: content });
+    },
+  });
+
+  /** Publish-selection counts so a partial comment never reads as "no blockers". */
+  function selectionInfo(record, conclusion) {
+    const all = commentItems(record.conclusion ?? null);
+    const kept = commentItems(conclusion ?? null);
+    const countOf = (list, kind) => list.filter((item) => item.kind === kind).length;
+    return {
+      total: all.length,
+      included: kept.length,
+      omittedBlockers: countOf(all, 'blocker') - countOf(kept, 'blocker'),
+      omittedSuggestions: countOf(all, 'suggestion') - countOf(kept, 'suggestion'),
+    };
+  }
+
+  /**
+   * Appendix payload for the PR comment: the review content that would otherwise stay in the
+   * panel only (initial risks, per-file findings, reading order, re-review comparison, and the
+   * files that were not analyzed at all).
+   */
+  function commentAppendixOf(record) {
+    const report = record.report ?? {};
+    const severityOf = (value) => (value === 'block' ? 'block' : value === 'suggest' ? 'suggest' : '');
+    const pointOf = (item) => (typeof item?.point === 'string' ? item.point : '');
+    const risks = (Array.isArray(report.risks) ? report.risks : [])
+      .map((item) => ({
+        severity: severityOf(item?.severity),
+        file: typeof item?.file === 'string' ? item.file : '',
+        point: pointOf(item),
+      }))
+      .filter((item) => item.point !== '');
+    const files = [];
+    for (const file of Array.isArray(record.files) ? record.files : []) {
+      const entry = record.explanations.get(file.path);
+      if (entry === undefined || entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
+      const explanation = entry.explanation;
+      const issues = (Array.isArray(explanation.issues) ? explanation.issues : [])
+        .map((item) => ({
+          severity: severityOf(item?.severity),
+          point: pointOf(item),
+          line: Number.isFinite(item?.line) && item.line > 0 ? Math.floor(item.line) : 0,
+        }))
+        .filter((item) => item.point !== '');
+      const suggestions = (Array.isArray(explanation.suggestions) ? explanation.suggestions : [])
+        .filter((item) => typeof item === 'string' && item !== '');
+      if (issues.length === 0 && suggestions.length === 0) continue;
+      files.push({ file: file.path, issues, suggestions });
+    }
+    const order = (Array.isArray(report.order) ? report.order : [])
+      .map((item) => ({
+        file: typeof item?.file === 'string' ? item.file : '',
+        reason: typeof item?.reason === 'string' ? item.reason : '',
+      }))
+      .filter((item) => item.file !== '');
+    const deltaItems = (list) => (Array.isArray(list) ? list : [])
+      .map((item) => ({ file: typeof item?.file === 'string' ? item.file : '', point: pointOf(item) }))
+      .filter((item) => item.point !== '');
+    const delta = record.delta ?? null;
+    const coverage = record.coverage ?? null;
+    const unanalyzed = Array.isArray(coverage?.unanalyzed)
+      ? coverage.unanalyzed.filter((file) => typeof file === 'string' && file !== '')
+      : [];
+    return {
+      risks,
+      files,
+      order,
+      delta: delta === null
+        ? null
+        : { resolved: deltaItems(delta.resolved), stillOpen: deltaItems(delta.stillOpen) },
+      unanalyzed,
+    };
+  }
+
+  /** Markdown for a conclusion (defaults to the current one), with no side effects. */
+  /**
+   * Publish the current round's conclusion as one PR comment. Throws a code-tagged error the
+   * route turns into an HTTP status and the tool surfaces to the model. Returns what it posted.
+   */
+  async function publishReviewComment(record, options) {
+    if (record.conclusion === null || record.conclusion === undefined) {
+      throw Object.assign(new Error('请先生成最终结论，再发布审查评论'), { code: 'no-conclusion' });
+    }
+    if (record.publishing === true) {
+      throw Object.assign(new Error('正在发布评论，请稍候。'), { code: 'publishing' });
+    }
+    const round = record.round ?? 1;
+    const version = latestConclusionVersionOf(record);
+    const versionNumber = version === null ? 0 : (Number(version.version) || 0);
+    const alreadyPublished = (Array.isArray(record.published) ? record.published : [])
+      .some((entry) => (entry.round ?? 1) === round && (Number(entry.version) || 0) === versionNumber);
+    if (alreadyPublished && options.force !== true) {
+      throw Object.assign(
+        new Error('这一轮的这个结论版本已经发布过；如需再追加一条评论请显式 force。'),
+        { code: 'already-published' },
+      );
+    }
+    const includeIds = Array.isArray(options.includeIds) ? options.includeIds : null;
+    const publishConclusion = includeIds === null ? record.conclusion : filterConclusionItems(record.conclusion, includeIds);
+    const totalItems = commentItems(record.conclusion ?? null).length;
+    if (includeIds !== null && totalItems > 0 && commentItems(publishConclusion).length === 0) {
+      throw Object.assign(new Error('请至少选择一条审查意见再发布。'), { code: 'empty-selection' });
+    }
+    record.publishing = true;
+    try {
+      const client = await ensureClient();
+      const items = commentItems(publishConclusion);
+      const markdown = commentMarkdown(record, publishConclusion, { selection: includeIds !== null });
+      const result = await client.createComment(record.number, markdown);
+      const entry = {
+        id: result.id,
+        url: typeof result.url === 'string' ? result.url : '',
+        round,
+        version: versionNumber,
+        publishedAt: Date.now(),
+        itemCount: items.length,
+      };
+      record.comment = { id: result.id, url: entry.url, publishedAt: entry.publishedAt };
+      record.published = Array.isArray(record.published) ? record.published : [];
+      record.published.push(entry);
+      const current = currentRoundEntry(record);
+      if (!Array.isArray(current.publishedIds)) current.publishedIds = [];
+      current.publishedIds.push(entry.id);
+      record.publishedItems = items;
+      setCurrentRoundFeedback(record, null);
+      scheduleSave();
+      return { comment: record.comment, published: record.published };
+    } finally {
+      record.publishing = false;
+    }
+  }
+
+  /** PR page and published-comment links for the "open on the platform" actions. */
+  function reviewLinksOf(record) {
+    const pullUrl = typeof record.pull?.url === 'string' ? record.pull.url : '';
+    const published = [...(Array.isArray(record.published) ? record.published : [])]
+      .filter((entry) => typeof entry.url === 'string' && entry.url !== '')
+      .sort((left, right) => (right.publishedAt ?? 0) - (left.publishedAt ?? 0));
+    return { pullUrl, latestCommentUrl: published[0]?.url ?? (record.comment?.url ?? '') };
+  }
+
+  function commentMarkdown(record, conclusion = record.conclusion, options = {}) {
+    const version = latestConclusionVersionOf(record);
+    const headSha = typeof record.headSha === 'string' && record.headSha !== ''
+      ? record.headSha
+      : (typeof record.pull?.headSha === 'string' ? record.pull.headSha : '');
+    return buildCommentMarkdown(conclusion, record.pull, record.round ?? 1, {
+      language: commentLanguage(),
+      coverage: record.coverage ?? null,
+      headSha,
+      version: version === null ? 0 : (Number(version.version) || 0),
+      selection: options.selection === true ? selectionInfo(record, conclusion) : null,
+      appendix: commentAppendixOf(record),
+    });
+  }
+
+  route(`${PREFIX}/comment/preview`, {
+    POST: async (req, res) => {
+      await ensureRepoFor(req);
+      const text = await readBoundedBody(req);
+      const body = text === null ? null : parseBody(text);
+      const number = Number(body?.number);
+      if (!Number.isInteger(number) || number <= 0) {
+        sendError(res, 400, 'bad-request', 'number must be a positive integer');
+        return;
+      }
+      const record = state.reviews.get(number);
+      if (record === undefined) {
+        sendError(res, 404, 'not-found', 'review not found');
+        return;
+      }
+      if (record.conclusion === null || record.conclusion === undefined) {
+        sendError(res, 400, 'bad-request', '请先生成最终结论，再预览 PR 评论');
+        return;
+      }
+      // Optional publish selection: only the checked item ids go into the markdown.
+      const includeIds = Array.isArray(body?.includeIds) ? body.includeIds : null;
+      const previewConclusion = includeIds === null ? record.conclusion : filterConclusionItems(record.conclusion, includeIds);
+      const items = commentItems(record.conclusion).map((item) => ({
+        id: item.id,
+        kind: item.kind,
+        file: item.file,
+        point: item.point,
+        line: item.line,
+      }));
+      sendJson(res, 200, {
+        ok: true,
+        markdown: commentMarkdown(record, previewConclusion, { selection: includeIds !== null }),
+        language: commentLanguage(),
+        items,
+      });
+    },
+  });
+
+  route(`${PREFIX}/comment`, {
+    POST: async (req, res) => {
+      await ensureRepoFor(req);
+      const text = await readBoundedBody(req);
+      const body = text === null ? null : parseBody(text);
+      const number = Number(body?.number);
+      if (!Number.isInteger(number) || number <= 0) {
+        sendError(res, 400, 'bad-request', 'number must be a positive integer');
+        return;
+      }
+      const record = state.reviews.get(number);
+      if (record === undefined) {
+        sendError(res, 404, 'not-found', 'review not found');
+        return;
+      }
+      try {
+        const published = await publishReviewComment(record, {
+          includeIds: Array.isArray(body?.includeIds) ? body.includeIds : null,
+          force: body?.force === true,
+        });
+        sendJson(res, 200, { ok: true, ...published });
+      } catch (error) {
+        const code = typeof error?.code === 'string' ? error.code : 'publish-failed';
+        const status = code === 'publishing' || code === 'already-published' ? 409 : 400;
+        sendError(res, status, code, error instanceof Error ? error.message : String(error));
+      }
+    },
+  });
+
+  // ---------- developer feedback on our published comment ----------
+  route(`${PREFIX}/feedback`, {
+    POST: async (req, res) => {
+      await ensureRepoFor(req);
+      const text = await readBoundedBody(req);
+      const body = text === null ? null : parseBody(text);
+      const number = Number(body?.number);
+      if (!Number.isInteger(number) || number <= 0) {
+        sendError(res, 400, 'bad-request', 'number must be a positive integer');
+        return;
+      }
+      const record = state.reviews.get(number);
+      if (record === undefined) {
+        sendError(res, 404, 'not-found', 'review not found');
+        return;
+      }
+      // Feedback answers the review comment of the round before this one: the implementer
+      // replies to what we published for the previous round. The current round therefore does
+      // NOT need to be published first — only an earlier published comment must exist.
+      const published = Array.isArray(record.published) ? record.published : [];
+      const latest = published.length === 0 ? null : published[published.length - 1];
+      const roundPublished = latest !== null && (latest.round ?? 1) === (record.round ?? 1);
+      const previousItems = Array.isArray(record.previousRound?.items) ? record.previousRound.items : [];
+      const storedItems = Array.isArray(record.publishedItems) ? record.publishedItems : [];
+      // Match the items to the anchored comment: this round's own items when it has been
+      // published, otherwise the previous round's conclusion items.
+      const items = roundPublished ? storedItems : (previousItems.length > 0 ? previousItems : storedItems);
+      if (latest === null || items.length === 0) {
+        sendJson(res, 200, { ok: true, feedback: record.feedback ?? null, parsed: false, reason: 'no-previous-review' });
+        return;
+      }
+      const client = await ensureClient();
+      const comments = await client.listIssueComments(number);
+      const lastPublishedId = latest.id;
+      const lastIndex = comments.findIndex((comment) => comment.id === lastPublishedId);
+      const ourIds = new Set(published.map((entry) => entry.id));
+      const candidates = (lastIndex >= 0 ? comments.slice(lastIndex + 1) : [])
+        .filter((comment) => comment.body.trim() !== '' && !ourIds.has(comment.id));
+      const knownCommentId = record.feedback?.lastCommentId ?? 0;
+      const fresh = candidates.filter((comment) => comment.id > knownCommentId);
+      if (fresh.length === 0) {
+        sendJson(res, 200, { ok: true, feedback: record.feedback ?? null, parsed: false });
+        return;
+      }
+      const prompt = buildFeedbackPrompt(
+        record.pull ?? { number, title: '', repo: provider.repo, platform: provider.platform },
+        items,
+        fresh,
+      );
+      const parsed = parseFeedbackReply(await callModel(ctx, settings, prompt));
+      const states = { ...(record.feedback?.states ?? {}) };
+      const previousStates = { ...(record.feedback?.states ?? {}) };
+      for (const item of parsed.states) {
+        const target = items.find((entry) => entry.index === item.index);
+        if (target === undefined) continue;
+        // Feedback is keyed by the stable item id (legacy item key as fallback).
+        const stateKey = typeof target.id === 'string' && target.id !== '' ? target.id : target.key;
+        states[stateKey] = {
+          status: item.status,
+          reason: item.reason,
+          commentId: fresh[fresh.length - 1].id,
+          updatedAt: Date.now(),
+        };
+      }
+      const feedback = {
+        fetchedAt: Date.now(),
+        lastCommentId: fresh.reduce((max, comment) => Math.max(max, comment.id), knownCommentId),
+        comments: fresh.slice(-20).map((comment) => ({ id: comment.id, author: comment.author, createdAt: comment.createdAt, body: comment.body.slice(0, 6000) })),
+        states,
+        previousStates,
+        notes: parsed.notes,
+      };
+      setCurrentRoundFeedback(record, feedback);
+      scheduleSave();
+      sendJson(res, 200, { ok: true, feedback: record.feedback, parsed: true });
+    },
+  });
+
+  // ---------- review tools (the main conversation agent reads review data) ----------
+
+  /** Session → PR the reviewer currently has open in the right-side review panel. */
+  const activeReviewBySession = new Map();
+
+  /** The session id a tool call runs for, when the runtime exposes one. */
+  function agentSessionId(agent) {
+    const session = agent && typeof agent === 'object' ? agent.session : undefined;
+    const id = session?.id ?? session?.sessionId ?? agent?.sessionId ?? '';
+    return typeof id === 'string' ? id : '';
+  }
+
+  /** Resolve the record a tool call means: explicit number → session binding → newest review. */
+  function resolveToolReview(agent, explicitNumber) {
+    if (Number.isInteger(explicitNumber) && explicitNumber > 0) {
+      return state.reviews.get(explicitNumber) ?? null;
+    }
+    const sessionId = agentSessionId(agent);
+    if (sessionId !== '') {
+      const bound = activeReviewBySession.get(sessionId);
+      if (Number.isInteger(bound)) {
+        const boundRecord = state.reviews.get(bound);
+        if (boundRecord !== undefined) return boundRecord;
+      }
+    }
+    if (state.reviews.size === 1) return [...state.reviews.values()][0];
+    let latest = null;
+    let latestAt = -1;
+    for (const record of state.reviews.values()) {
+      const at = record.finishedAt ?? record.startedAt ?? 0;
+      if (at > latestAt) {
+        latest = record;
+        latestAt = at;
+      }
+    }
+    return latest;
+  }
+
+  /** Like resolveToolReview, but a missing record is a teaching error for the model. */
+  function requireToolReview(agent, explicitNumber) {
+    const record = resolveToolReview(agent, explicitNumber);
+    if (record === null) {
+      throw new Error('找不到对应的审查：请先在右侧「审查」面板打开该 PR，或在调用里带上 number。');
+    }
+    return record;
+  }
+
+  /** Coverage of the current round; recomputed when the persisted record has none. */
+  function toolCoverage(record) {
+    if (record.coverage !== null && record.coverage !== undefined) return record.coverage;
+    const files = Array.isArray(record.files) ? record.files.map((file) => file.path) : [];
+    return conclusionCoverage(record.explanations ?? new Map(), files);
+  }
+
+  /** Model-facing text from lines, dropping the empty ones. */
+  function toolText(lines) {
+    return lines.filter((line) => typeof line === 'string' && line.trim() !== '').join('\n');
+  }
+
+  /** One conclusion as markdown text (used by the round/report tools). */
+  function conclusionText(conclusion) {
+    if (conclusion === null || conclusion === undefined) return '（该轮还没有结论）';
+    const lines = [
+      `结论：${conclusion.verdict ?? ''}`,
+      `摘要：${conclusion.summary ?? ''}`,
+      (conclusion.blockers ?? []).length === 0 ? '阻塞项：无' : '阻塞项：',
+    ];
+    for (const item of conclusion.blockers ?? []) {
+      const where = [item.file, item.line].filter((value) => value !== undefined && value !== null && value !== '').join(':');
+      const id = typeof item.id === 'string' && item.id !== '' ? `[${item.id}] ` : '';
+      lines.push(`- ${id}${item.title ?? item.point ?? ''}${where === '' ? '' : `（${where}）`}`);
+    }
+    if ((conclusion.suggestions ?? []).length > 0) lines.push('修改建议：');
+    for (const item of conclusion.suggestions ?? []) {
+      const where = [item.file, item.line].filter((value) => value !== undefined && value !== null && value !== '').join(':');
+      const id = typeof item.id === 'string' && item.id !== '' ? `[${item.id}] ` : '';
+      lines.push(`- ${id}${item.title ?? item.point ?? ''}${where === '' ? '' : `（${where}）`}`);
+    }
+    if ((conclusion.nextSteps ?? []).length > 0) {
+      lines.push('下一步：');
+      for (const step of conclusion.nextSteps) lines.push(`- ${step}`);
+    }
+    return toolText(lines);
+  }
+
+  /** One report as markdown text. */
+  function reportText(report) {
+    if (report === null || report === undefined) return '（还没有总体报告）';
+    const lines = [
+      `总体评价：${report.verdict ?? ''}`,
+      `摘要：${report.summary ?? ''}`,
+    ];
+    if (Array.isArray(report.risks) && report.risks.length > 0) {
+      lines.push('总体初筛风险：');
+      for (const risk of report.risks) {
+        const where = typeof risk.file === 'string' && risk.file !== '' ? `（${risk.file}）` : '';
+        lines.push(`- [${risk.severity ?? '?'}] ${risk.point ?? ''}${where}`);
+      }
+    }
+    if (Array.isArray(report.order) && report.order.length > 0) {
+      lines.push('审查顺序：');
+      for (const item of report.order) lines.push(`- ${item.file}${item.reason ? `：${item.reason}` : ''}`);
+    }
+    if (report.focus && typeof report.focus === 'object' && Object.keys(report.focus).length > 0) {
+      lines.push(`审查重点：${JSON.stringify(report.focus)}`);
+    }
+    return toolText(lines);
+  }
+
+  /** Per-file analysis as markdown text. */
+  function analysisText(filePath, entry) {
+    if (entry === undefined) return `${filePath}：还没有分析（尚未请求过逐文件分析）。`;
+    if (entry.status === 'error') return `${filePath}：分析失败（${entry.error ?? '未知错误'}）。`;
+    if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) {
+      return `${filePath}：分析尚未完成（状态 ${entry.status ?? 'pending'}）。`;
+    }
+    const explanation = entry.explanation;
+    const lines = [
+      `文件：${filePath}`,
+      `结论：${explanation.verdict ?? ''} · ${explanation.summary ?? ''}`,
+    ];
+    if (typeof explanation.logic === 'string' && explanation.logic !== '') {
+      lines.push(`代码逻辑：${explanation.logic}`);
+    }
+    const issues = Array.isArray(explanation.issues) ? explanation.issues : [];
+    if (issues.length > 0) {
+      lines.push('审查意见：');
+      for (const issue of issues) {
+        const where = issue.line === undefined || issue.line === null ? '' : `（行 ${issue.line}）`;
+        lines.push(`- [${issue.severity ?? '?'}] ${issue.point ?? ''}${where}`);
+      }
+    }
+    const suggestions = Array.isArray(explanation.suggestions) ? explanation.suggestions : [];
+    if (suggestions.length > 0) {
+      lines.push('改进建议：');
+      for (const suggestion of suggestions) {
+        const where = suggestion.line === undefined || suggestion.line === null ? '' : `（行 ${suggestion.line}）`;
+        lines.push(`- ${suggestion.point ?? suggestion.text ?? ''}${where}`);
+      }
+    }
+    return toolText(lines);
+  }
+
+  /** One round entry as markdown text. */
+  function roundText(entry) {
+    if (entry === null || entry === undefined) return '（没有这一轮）';
+    const lines = [`第 ${entry.round} 轮 · head ${String(entry.headSha ?? '').slice(0, 8)} · 结论版本 ${(entry.conclusions ?? []).length} 个`];
+    const latest = (entry.conclusions ?? [])[entry.conclusions.length - 1];
+    if (latest !== undefined) lines.push(conclusionText(latest.conclusion));
+    const states = entry.feedback?.states ?? {};
+    const entries = Object.entries(states);
+    if (entries.length > 0) {
+      lines.push('实现者反馈：');
+      for (const [id, state] of entries) {
+        lines.push(`- ${id}：${state?.status ?? '?'}${state?.reason ? `（${state.reason}）` : ''}`);
+      }
+    }
+    const delta = entry.delta ?? null;
+    if (delta !== null && typeof delta === 'object') {
+      if (Array.isArray(delta.resolved) && delta.resolved.length > 0) lines.push(`已修复：${delta.resolved.length} 项`);
+      if (Array.isArray(delta.stillOpen) && delta.stillOpen.length > 0) lines.push(`仍未解决：${delta.stillOpen.length} 项`);
+    }
+    return toolText(lines);
+  }
+
+  /** One file's diff text, capped so a tool result cannot flood the conversation. */
+  async function diffText(record, filePath) {
+    const diffFiles = await ensureDiffFiles(record);
+    const diff = diffFiles.get(filePath);
+    if (diff === undefined) return `${filePath}：没有找到该文件的 diff（可能没有变更或路径不对）。`;
+    const limit = Math.max(4000, Number(settings.maxDiffCharsPerFile) || 14000);
+    const text = diff.text.length > limit ? `${diff.text.slice(0, limit)}\n…（已截断，共 ${diff.text.length} 字符；完整内容见审查面板）` : diff.text;
+    return text;
+  }
+
+  /** Reject a write whose revision is stale: the model re-reads and retries. */
+  function assertToolRevision(record, revision) {
+    const current = record.revision ?? 0;
+    if (revision !== current) {
+      throw new Error(`审查数据已被更新（当前 revision ${current}，传入 ${revision}）：请重新调用 review_get 读取 revision 后再改。`);
+    }
+  }
+
+  /** Append one audit entry and bump the record revision a write just produced. */
+  function recordToolAudit(record, exec, tool, summary) {
+    const audit = Array.isArray(record.audit) ? record.audit : [];
+    audit.push({
+      at: Date.now(),
+      tool,
+      sessionId: agentSessionId(exec.agent),
+      summary,
+    });
+    if (audit.length > 100) audit.splice(0, audit.length - 100);
+    record.audit = audit;
+    record.revision = (record.revision ?? 0) + 1;
+  }
+
+  /** Keep one model-written issue/suggestion inside the size and shape limits. */
+  function sanitizeToolItem(item, kind) {
+    if (item === null || typeof item !== 'object') throw new Error(`${kind} 必须是对象`);
+    const text = typeof item.point === 'string' ? item.point : (typeof item.title === 'string' ? item.title : '');
+    if (text.trim() === '') throw new Error(`${kind} 需要 point 或 title`);
+    if (text.length > 500) throw new Error(`${kind} 超过 500 字，请拆成多条`);
+    const line = Number.isInteger(item.line) && item.line > 0 ? item.line : 0;
+    const output = {
+      point: text,
+      line,
+    };
+    if (typeof item.severity === 'string') output.severity = item.severity === 'block' ? 'block' : 'suggest';
+    if (typeof item.file === 'string' && item.file !== '') output.file = item.file;
+    if (typeof item.suggestion === 'string' && item.suggestion.trim() !== '') output.suggestion = item.suggestion.trim().slice(0, 1000);
+    return output;
+  }
+
+  /** One write's before/after summary for the audit trail. */
+  function writeSummary(before, after) {
+    const beforeText = before === null || before === undefined ? 0 : JSON.stringify(before).length;
+    const afterText = after === null || after === undefined ? 0 : JSON.stringify(after).length;
+    return `${beforeText} → ${afterText} 字符`;
+  }
+
+  /** What the reviewer currently has on screen in the panel (reported by the client). */
+  const focusBySession = new Map();
+  /** Last time a snapshot was injected into a session (kept for diagnostics). */
+  const lastInjectAt = new Map();
+  /** Last snapshot text injected per session: identical snapshots are never injected twice. */
+  const lastSnapshotBySession = new Map();
+
+  /** Build the compact review snapshot injected into the main conversation (§5). */
+  function reviewSnapshotText(record, focus) {
+    const round = focus && Number.isInteger(focus.round) ? focus.round : (record.round ?? 1);
+    const latest = latestConclusionVersionOf(record);
+    const coverage = toolCoverage(record);
+    const lines = [
+      '<review-context>',
+      `${provider.repo} · PR #${record.number} · ${record.pull?.title ?? ''}`,
+      `head ${String(record.headSha ?? record.pull?.headSha ?? '').slice(0, 8)} · 第 ${round} 轮 · 结论：${record.conclusion === null || record.conclusion === undefined ? '尚未生成' : `${record.conclusion.verdict ?? ''}（v${latest?.version ?? '?'}，${latest?.published === true ? '已发布' : '未发布'}）`}`,
+      `覆盖率：已分析 ${coverage.analyzed ?? 0}/${coverage.total ?? (record.files ?? []).length} 个文件${isStale(record) ? ' · 结论之后有新的改动' : ''}`,
+    ];
+    const view = focus && typeof focus.view === 'string' ? focus.view : 'overview';
+    if (view === 'file' && typeof focus.path === 'string' && focus.path !== '') {
+      const entry = record.explanations.get(focus.path);
+      const analysis = entry === undefined
+        ? '未分析'
+        : entry.status === 'done'
+          ? `已分析（${(entry.explanation?.issues ?? []).length} 条意见 / ${(entry.explanation?.suggestions ?? []).length} 条建议）`
+          : entry.status === 'error' ? '分析失败' : '分析中';
+      lines.push(`当前查看：文件 ${focus.path}（${analysis}${focus.pane === 'analysis' ? '，分析面板' : '，代码变更面板'}）`);
+    } else {
+      lines.push('当前查看：总览');
+    }
+    lines.push(
+      `revision：${record.revision ?? 0}`,
+      '提示：用户说“这条/这里”时指上述范围；读取细节用 review_* 工具；写入必须带上面的 revision。',
+      '</review-context>',
+    );
+    return lines.join('\n');
+  }
+
+  /**
+   * Inject one runtime-context user message into the session's agent. Returns false when the
+   * runtime has no agent for it (headless or before the session is admitted); never throws.
+   */
+  function injectReviewContext(sessionId, text) {
+    try {
+      const agents = ctx.get('agents') ?? ctx.agents;
+      const agent = agents !== undefined && agents !== null && typeof agents.get === 'function'
+        ? agents.get(sessionId)
+        : undefined;
+      if (agent === undefined || agent === null || typeof agent.inject !== 'function') return false;
+      agent.inject({
+        id: randomUUID(),
+        role: 'user',
+        content: [{ type: 'text', text }],
+        source: { kind: 'runtime-context' },
+      });
+      lastInjectAt.set(sessionId, Date.now());
+      return true;
+    } catch (error) {
+      console.warn('[pr-review] 注入审查上下文失败', error);
+      return false;
+    }
+  }
+
+  /**
+   * Record the reviewer's current view and refresh the injected snapshot when it changed.
+   * The snapshot is the only way the agent can resolve "这个文件/这一条", so it must follow the
+   * panel: same snapshot is skipped, a real change injects immediately (2s debounce for bursts).
+   */
+  function reportReviewFocus(sessionId, record, focus, force) {
+    if (typeof sessionId !== 'string' || sessionId === '') return false;
+    focusBySession.set(sessionId, focus);
+    if (record === null || record === undefined) return false;
+    const text = reviewSnapshotText(record, focus);
+    if (text === (lastSnapshotBySession.get(sessionId) ?? '')) return false;
+    const injected = injectReviewContext(sessionId, text);
+    if (injected) lastSnapshotBySession.set(sessionId, text);
+    return injected;
+  }
+
+  /** Human-written conclusion items keep their existing ids where the point is unchanged. */
+  function normalizeConclusionItems(kind, items, existing) {
+    const byKey = new Map();
+    for (const item of Array.isArray(existing) ? existing : []) {
+      if (item !== null && typeof item === 'object' && typeof item.point === 'string') {
+        byKey.set(`${typeof item.file === 'string' ? item.file : ''}|${item.point}`, item.id);
+      }
+    }
+    const seen = new Set();
+    const output = [];
+    for (const raw of Array.isArray(items) ? items : []) {
+      if (raw === null || typeof raw !== 'object') throw new Error(`${kind} 每条必须是对象`);
+      const point = typeof raw.point === 'string' ? raw.point.trim() : '';
+      if (point === '') throw new Error(`${kind} 每条需要 point`);
+      if (point.length > 500) throw new Error(`${kind} 某条超过 500 字，请拆分后重试`);
+      const file = typeof raw.file === 'string' ? raw.file.trim() : '';
+      const line = Number.isInteger(raw.line) && raw.line > 0 ? raw.line : 0;
+      const prior = byKey.get(`${file}|${point}`);
+      let id = typeof prior === 'string' && prior !== '' ? prior : itemId(kind, file, point);
+      if (seen.has(id)) id = itemId(kind, file, point);
+      seen.add(id);
+      output.push({ id, file, point, line });
+    }
+    return output;
+  }
+
+  /** Totals the overview shows: initial risks, per-file issues, per-file suggestions. */
+  function overviewCounts(record) {
+    const risks = Array.isArray(record.report?.risks) ? record.report.risks.length : 0;
+    let issues = 0;
+    let suggestions = 0;
+    for (const entry of record.explanations.values()) {
+      if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
+      issues += Array.isArray(entry.explanation.issues) ? entry.explanation.issues.length : 0;
+      suggestions += Array.isArray(entry.explanation.suggestions) ? entry.explanation.suggestions.length : 0;
+    }
+    return { risks, issues, suggestions };
+  }
+
+  /**
+   * Clear the findings the overview renders, at the scope the caller names:
+   * - `suggestions`: every per-file suggestion plus suggest-severity initial risks;
+   * - `suggest`: the above plus suggest-severity per-file issues;
+   * - `all`: every per-file issue/suggestion and every initial risk.
+   * Block-severity items survive the two narrower scopes so a real blocker is not silenced.
+   */
+  function clearOverviewFindings(record, scope) {
+    const cleared = { suggestions: 0, issues: 0, risks: 0 };
+    if (scope !== 'suggestions' && scope !== 'suggest' && scope !== 'all') return cleared;
+    const keepBlockRisks = scope === 'suggestions' || scope === 'suggest';
+    for (const entry of record.explanations.values()) {
+      if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
+      const explanation = entry.explanation;
+      const suggestions = Array.isArray(explanation.suggestions) ? explanation.suggestions : [];
+      const issues = Array.isArray(explanation.issues) ? explanation.issues : [];
+      const nextSuggestions = [];
+      const nextIssues = scope === 'suggestions'
+        ? issues
+        : (scope === 'suggest' ? issues.filter((item) => item?.severity === 'block') : []);
+      cleared.suggestions += suggestions.length;
+      cleared.issues += issues.length - nextIssues.length;
+      if (nextSuggestions.length === suggestions.length && nextIssues.length === issues.length) continue;
+      entry.explanation = { ...explanation, issues: nextIssues, suggestions: nextSuggestions };
+      entry.updatedAt = Date.now();
+    }
+    const risks = Array.isArray(record.report?.risks) ? record.report.risks : [];
+    const nextRisks = keepBlockRisks ? risks.filter((item) => item?.severity === 'block') : [];
+    cleared.risks = risks.length - nextRisks.length;
+    if (cleared.risks > 0) record.report = { ...record.report, risks: nextRisks };
+    return cleared;
+  }
+
+  /** Register the review tools on the context that carries a tool registry (root or agent). */
+  function registerReviewTools(ownerCtx) {
+    const toolsService = ownerCtx.get('tools') ?? ownerCtx.tools;
+    if (toolsService === undefined || toolsService === null || typeof toolsService.register !== 'function') return;
+    const numberProperty = {
+      type: 'integer',
+      description: 'PR 编号；省略时使用当前会话在审查面板打开的 PR（没有绑定时取最近一次审查的 PR）。',
+    };
+    const textOutput = {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: String(value) }],
+    };
+    const definitions = [
+      {
+        name: 'review_list_prs',
+        description: '列出当前仓库的 open PR 及其审查状态（审查中/已报告/结论/是否已发布），用来发现可审查的 PR 编号。',
+        parameters: { type: 'object', additionalProperties: false, properties: {} },
+        output: textOutput,
+        async execute() {
+          const prs = Array.isArray(state.prs) ? state.prs : [];
+          const lines = [`${provider.repo}（${provider.platform}）open PR：${prs.length} 个`];
+          for (const pr of prs) {
+            const record = state.reviews.get(pr.number);
+            const summary = record === undefined ? null : reviewSummary(record);
+            const verdict = summary?.verdict ?? null;
+            const progress = record === undefined
+              ? '未审查'
+              : record.status === 'reviewing'
+                ? '审查中'
+                : record.status === 'error'
+                  ? `审查失败：${record.error ?? ''}`
+                  : record.conclusion === null
+                    ? '已报告，未生成结论'
+                    : `结论 ${verdict ?? ''}`;
+            lines.push(`- #${pr.number} ${pr.title ?? ''}（${progress}；第 ${record?.round ?? 1} 轮；head ${String(pr.headSha ?? '').slice(0, 8)}）`);
+          }
+          if (prs.length === 0) lines.push('- 暂无 open PR（列表可能还没轮询到，可稍后再试）。');
+          return toolText(lines);
+        },
+      },
+      {
+        name: 'review_get',
+        description: '读取一个 PR 审查的概要：轮次、状态、head、结论版本与发布状态、覆盖率、是否过期、变更文件数。',
+        parameters: { type: 'object', additionalProperties: false, properties: { number: numberProperty } },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          const latest = latestConclusionVersionOf(record);
+          const coverage = toolCoverage(record);
+          return toolText([
+            `PR #${record.number} · ${record.pull?.title ?? ''}`,
+            `状态：${record.status ?? '?'}${record.error ? `（${record.error}）` : ''} · 第 ${record.round ?? 1} 轮 · head ${String(record.headSha ?? record.pull?.headSha ?? '').slice(0, 8)}`,
+            `结论：${record.conclusion === null || record.conclusion === undefined ? '尚未生成' : `${record.conclusion.verdict ?? ''}（v${latest?.version ?? '?'}，${latest?.published === true ? '已发布' : '未发布'}）`}`,
+            `覆盖率：已分析 ${coverage.analyzed ?? 0}/${coverage.total ?? (record.files ?? []).length} 个文件`,
+            `过期：${isStale(record) ? '结论之后有新的报告/分析改动，可重新生成结论' : '无'}`,
+            `变更文件：${(record.files ?? []).length} 个 · 已发布评论：${(record.published ?? []).length} 条`,
+            `总览：初筛风险 ${overviewCounts(record).risks} · 逐文件意见 ${overviewCounts(record).issues} / 建议 ${overviewCounts(record).suggestions}（review_update_overview 可一次改总览）`,
+            `revision：${record.revision ?? 0}（写入工具必须带回这个值）`,
+          ]);
+        },
+      },
+      {
+        name: 'review_get_report',
+        description: '读取总体报告：总体评价、摘要、总体初筛风险、审查顺序与审查重点。',
+        parameters: { type: 'object', additionalProperties: false, properties: { number: numberProperty } },
+        output: textOutput,
+        async execute(args, exec) {
+          return reportText(requireToolReview(exec.agent, args.number).report);
+        },
+      },
+      {
+        name: 'review_list_files',
+        description: '列出变更文件及逐文件分析状态（未分析/分析中/已分析、意见与建议数量），按审查顺序排列。',
+        parameters: { type: 'object', additionalProperties: false, properties: { number: numberProperty } },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          const files = Array.isArray(record.files) ? record.files : [];
+          const order = Array.isArray(record.report?.order) ? record.report.order.map((item) => item.file) : [];
+          const rank = (filePath) => {
+            const index = order.indexOf(filePath);
+            return index < 0 ? order.length + files.findIndex((file) => file.path === filePath) : index;
+          };
+          const sorted = [...files].sort((left, right) => rank(left.path) - rank(right.path));
+          const lines = [`变更文件 ${files.length} 个（按审查顺序）：`];
+          for (const file of sorted) {
+            const entry = record.explanations.get(file.path);
+            const progress = entry === undefined
+              ? '未分析'
+              : entry.status === 'done'
+                ? `已分析（${(entry.explanation?.issues ?? []).length} 条意见 / ${(entry.explanation?.suggestions ?? []).length} 条建议）`
+                : entry.status === 'error'
+                  ? '分析失败'
+                  : '分析中';
+            lines.push(`- ${file.path}（${file.status ?? ''} +${file.additions ?? 0}/-${file.deletions ?? 0}；${progress}）`);
+          }
+          return toolText(lines);
+        },
+      },
+      {
+        name: 'review_get_analysis',
+        description: '读取单个变更文件的逐文件分析：结论、代码逻辑、审查意见（含行号）与改进建议。',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            path: { type: 'string', description: '变更文件路径（相对仓库根）。' },
+            number: numberProperty,
+          },
+          required: ['path'],
+        },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          if (typeof args.path !== 'string' || args.path === '') throw new Error('path 不能为空');
+          return analysisText(args.path, record.explanations.get(args.path));
+        },
+      },
+      {
+        name: 'review_get_diff',
+        description: '读取单个变更文件的 diff 文本（可能被截断，完整内容在审查面板）。',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            path: { type: 'string', description: '变更文件路径（相对仓库根）。' },
+            number: numberProperty,
+          },
+          required: ['path'],
+        },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          if (typeof args.path !== 'string' || args.path === '') throw new Error('path 不能为空');
+          return diffText(record, args.path);
+        },
+      },
+      {
+        name: 'review_get_file',
+        description: '读取 PR head 版本的文件完整内容（可指定行区间），用于核对实现细节。',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            path: { type: 'string', description: '文件路径（相对仓库根）。' },
+            start: { type: 'integer', description: '起始行（1 起，含）。' },
+            end: { type: 'integer', description: '结束行（1 起，含）。' },
+            number: numberProperty,
+          },
+          required: ['path'],
+        },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          if (typeof args.path !== 'string' || args.path === '') throw new Error('path 不能为空');
+          const file = await ensureFileContent(record, args.path);
+          let text = typeof file?.content === 'string' ? file.content : '';
+          let suffix = file?.truncated === true ? '\n…（文件过大，已截断）' : '';
+          const start = Number.isInteger(args.start) && args.start > 0 ? args.start : 0;
+          const end = Number.isInteger(args.end) && args.end >= start && start > 0 ? args.end : 0;
+          if (start > 0) {
+            const lines = text.split('\n');
+            const last = end > 0 ? Math.min(end, lines.length) : Math.min(start + 199, lines.length);
+            text = lines.slice(start - 1, last).join('\n');
+            suffix = `\n（显示第 ${start}-${last} 行，共 ${lines.length} 行）`;
+          }
+          return `${text.slice(0, 120_000)}${suffix}`;
+        },
+      },
+      {
+        name: 'review_list_rounds',
+        description: '列出审查轮次：每轮 head、结论版本数、是否发布、实现者反馈与复审对比摘要。',
+        parameters: { type: 'object', additionalProperties: false, properties: { number: numberProperty } },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          const rounds = roundHistoryOf(record);
+          if (rounds.length === 0) return '（还没有轮次记录）';
+          const lines = [`PR #${record.number} 共 ${rounds.length} 轮：`];
+          for (const entry of rounds) {
+            const latest = (entry.conclusions ?? [])[entry.conclusions.length - 1];
+            lines.push(
+              `- 第 ${entry.round} 轮 · head ${String(entry.headSha ?? '').slice(0, 8)} · 结论 ${latest === undefined ? '无' : `v${latest.version ?? '?'}（${latest.published === true ? '已发布' : '未发布'}）`} · 反馈状态 ${Object.keys(entry.feedback?.states ?? {}).length} 条`,
+            );
+          }
+          return toolText(lines);
+        },
+      },
+      {
+        name: 'review_get_round',
+        description: '读取指定轮次的结论、实现者反馈状态与复审对比（已修复/仍未解决）。',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { round: { type: 'integer', description: '轮次编号（从 1 开始）。' }, number: numberProperty },
+          required: ['round'],
+        },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          if (!Number.isInteger(args.round) || args.round <= 0) throw new Error('round 必须是正整数');
+          const entry = roundHistoryOf(record).find((item) => item.round === args.round);
+          return roundText(entry);
+        },
+      },
+      {
+        name: 'review_get_comments',
+        description: '读取代码平台上该 PR 的评论（含实现者反馈原文，markdown）。',
+        parameters: { type: 'object', additionalProperties: false, properties: { number: numberProperty } },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          const client = await ensureClient();
+          const comments = await client.listIssueComments(record.number);
+          if (!Array.isArray(comments) || comments.length === 0) return '（该 PR 还没有评论）';
+          const lines = [`PR #${record.number} 评论 ${comments.length} 条（从旧到新）：`];
+          for (const comment of comments) {
+            lines.push(`\n--- ${comment.author ?? '?'} · ${new Date(comment.createdAt ?? 0).toISOString().slice(0, 16)}`);
+            lines.push(String(comment.body ?? '').slice(0, 6000));
+          }
+          return toolText(lines);
+        },
+      },
+      {
+        name: 'review_update_analysis',
+        description: '更新单个变更文件的逐文件分析（结论/摘要/代码逻辑/审查意见/改进建议），改写审查数据，右栏面板随后可见。必须带 review_get 返回的 revision 做乐观锁。',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            path: { type: 'string', description: '变更文件路径（相对仓库根）。' },
+            revision: { type: 'integer', description: 'review_get 返回的 revision。' },
+            verdict: { type: 'string', enum: ['pass', 'suggest', 'block'], description: '该文件的结论。' },
+            summary: { type: 'string', description: '该文件的一句话结论。' },
+            logic: { type: 'string', description: '代码逻辑说明（整体，不复述 diff）。' },
+            issues: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+              description: '审查意见列表（传入即整体替换）；每条 { point, line?, severity? }，point ≤ 500 字。',
+            },
+            suggestions: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+              description: '改进建议列表（传入即整体替换）；每条 { point, line? }，point ≤ 500 字。',
+            },
+            number: numberProperty,
+          },
+          required: ['path', 'revision'],
+        },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          if (typeof args.path !== 'string' || args.path === '') throw new Error('path 不能为空');
+          const file = (record.files ?? []).find((item) => item.path === args.path);
+          if (file === undefined) throw new Error(`path 不在变更文件里：${args.path}`);
+          assertToolRevision(record, args.revision);
+          const issues = args.issues === undefined
+            ? undefined
+            : args.issues.map((item) => sanitizeToolItem(item, 'issue'));
+          const suggestions = args.suggestions === undefined
+            ? undefined
+            : args.suggestions.map((item) => sanitizeToolItem(item, 'suggestion'));
+          const entry = record.explanations.get(args.path) ?? {
+            file: args.path,
+            status: 'done',
+            error: null,
+            explanation: null,
+            chat: [],
+            updatedAt: 0,
+          };
+          const before = entry.explanation ?? null;
+          const next = {
+            verdict: args.verdict ?? before?.verdict ?? 'suggest',
+            summary: args.summary ?? before?.summary ?? '',
+            logic: args.logic ?? before?.logic ?? '',
+            walkthrough: Array.isArray(before?.walkthrough) ? before.walkthrough : [],
+            issues: issues ?? (Array.isArray(before?.issues) ? before.issues : []),
+            suggestions: suggestions ?? (Array.isArray(before?.suggestions) ? before.suggestions : []),
+          };
+          if (JSON.stringify(next).length > 12_000) {
+            throw new Error('该文件分析超过 12000 字符，请精简 issues/suggestions 后重试。');
+          }
+          entry.explanation = next;
+          entry.status = 'done';
+          entry.error = null;
+          entry.updatedAt = Date.now();
+          record.explanations.set(args.path, entry);
+          recordToolAudit(record, exec, 'review_update_analysis', `${args.path}: ${writeSummary(before, next)}`);
+          scheduleSave();
+          return toolText([
+            `已更新分析：${args.path}（revision ${record.revision}）`,
+            `结论：${next.verdict} · ${next.summary}`,
+            `意见 ${next.issues.length} 条 / 建议 ${next.suggestions.length} 条`,
+            '需要继续修改请重新 review_get 取 revision。',
+          ]);
+        },
+      },
+      {
+        name: 'review_update_report',
+        description: '更新总体报告（总体评价/摘要/总体初筛风险/审查顺序/审查重点），改写审查数据，右栏面板随后可见。必须带 review_get 返回的 revision 做乐观锁。',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            revision: { type: 'integer', description: 'review_get 返回的 revision。' },
+            verdict: { type: 'string', enum: ['pass', 'suggest', 'block'], description: '总体评价。' },
+            summary: { type: 'string', description: '总体摘要。' },
+            risks: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+              description: '总体初筛风险（传入即整体替换）；每条 { severity?, file?, point }，point ≤ 500 字。',
+            },
+            order: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+              description: '审查顺序（传入即整体替换）；每条 { file, reason? }。',
+            },
+            focus: { type: 'object', additionalProperties: true, description: '审查重点（自由结构）。' },
+            number: numberProperty,
+          },
+          required: ['revision'],
+        },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          if (record.report === null || record.report === undefined) {
+            throw new Error('还没有总体报告：请先完成审查（review_list_prs 可看状态）。');
+          }
+          assertToolRevision(record, args.revision);
+          const before = record.report;
+          const next = { ...before };
+          if (args.verdict !== undefined) next.verdict = args.verdict;
+          if (args.summary !== undefined) next.summary = String(args.summary);
+          if (args.risks !== undefined) {
+            next.risks = args.risks.map((item) => {
+              if (item === null || typeof item !== 'object') throw new Error('risks 的每一行必须是对象');
+              const point = typeof item.point === 'string' ? item.point.trim() : '';
+              if (point === '') throw new Error('risks 每行需要 point');
+              if (point.length > 500) throw new Error('risks 某条超过 500 字，请精简');
+              return {
+                severity: item.severity === 'block' ? 'block' : 'suggest',
+                file: typeof item.file === 'string' ? item.file : '',
+                point,
+              };
+            });
+          }
+          if (args.order !== undefined) {
+            next.order = args.order.map((item) => {
+              if (item === null || typeof item !== 'object') throw new Error('order 的每一行必须是对象');
+              const file2 = typeof item.file === 'string' ? item.file : '';
+              if (file2 === '') throw new Error('order 每行需要 file');
+              return { file: file2, reason: typeof item.reason === 'string' ? item.reason : '' };
+            });
+          }
+          if (args.focus !== undefined) next.focus = args.focus;
+          if (JSON.stringify(next).length > 12_000) {
+            throw new Error('报告超过 12000 字符，请精简 risks/order/summary 后重试。');
+          }
+          record.report = next;
+          record.reportUpdatedAt = Date.now();
+          recordToolAudit(record, exec, 'review_update_report', `报告: ${writeSummary(before, next)}`);
+          scheduleSave();
+          return toolText([
+            `已更新总体报告（revision ${record.revision}）`,
+            `总体评价：${next.verdict ?? ''} · ${String(next.summary ?? '').slice(0, 160)}`,
+            `初筛风险 ${(next.risks ?? []).length} 条 / 审查顺序 ${(next.order ?? []).length} 个文件`,
+            '报告更新会让结论变 stale，需要时可重新生成结论。',
+          ]);
+        },
+      },
+      {
+        name: 'review_update_conclusion',
+        description: '调整当前轮次的最终结论（总体评价/摘要/阻塞项/修改建议/下一步）。这是下一份「发布」评论的正文来源，改完再点发布即可。必须带 review_get 返回的 revision；不要直接去平台上编辑已发布的评论。用户要改的条目不唯一时，先 review_get_round 取条目 id 并用 ask_user_question 确认改哪几条。',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            revision: { type: 'integer', description: 'review_get 返回的 revision。' },
+            verdict: { type: 'string', enum: ['pass', 'suggest', 'block'], description: '总体评价。' },
+            summary: { type: 'string', description: '总体摘要。' },
+            blockers: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+              description: '阻塞项（传入即整体替换，[] 表示没有阻塞项）；每条 { point, file?, line? }，point ≤ 500 字。',
+            },
+            suggestions: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+              description: '修改建议（传入即整体替换，[] 表示去掉该小节）；每条 { point, file?, line? }。',
+            },
+            nextSteps: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '下一步清单（传入即整体替换，[] 表示清空）。',
+            },
+            number: numberProperty,
+          },
+          required: ['revision'],
+        },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          const before = record.conclusion ?? null;
+          if (before === null || before === undefined) {
+            throw new Error('当前轮还没有最终结论：请先在审查面板生成结论，再调整。');
+          }
+          assertToolRevision(record, args.revision);
+          const working = {
+            verdict: args.verdict ?? before.verdict,
+            summary: args.summary ?? before.summary,
+            blockers: args.blockers === undefined
+              ? (Array.isArray(before.blockers) ? before.blockers : [])
+              : normalizeConclusionItems('blocker', args.blockers, before.blockers),
+            suggestions: args.suggestions === undefined
+              ? (Array.isArray(before.suggestions) ? before.suggestions : [])
+              : normalizeConclusionItems('suggestion', args.suggestions, before.suggestions),
+            nextSteps: args.nextSteps === undefined
+              ? (Array.isArray(before.nextSteps) ? before.nextSteps : [])
+              : args.nextSteps.map((item) => {
+                  if (typeof item !== 'string' || item.trim() === '') throw new Error('nextSteps 每条必须是非空字符串');
+                  return item.trim();
+                }),
+          };
+          const normalized = normalizeConclusion(working, {
+            files: (record.files ?? []).map((file) => file.path),
+          });
+          pushConclusionVersion(record, 'human', normalized, record.coverage);
+          record.conclusionEditedAt = Date.now();
+          const touched = [...normalized.blockers, ...normalized.suggestions].map((item) => item.id);
+          record.humanItemIds = [...new Set([...(record.humanItemIds ?? []), ...touched])];
+          recordToolAudit(record, exec, 'review_update_conclusion', `结论: ${writeSummary(before, normalized)}`);
+          scheduleSave();
+          return toolText([
+            `已更新当前轮结论（revision ${record.revision}）：${normalized.verdict} · ${normalized.summary.slice(0, 160)}`,
+            `阻塞项 ${normalized.blockers.length} 条 · 修改建议 ${normalized.suggestions.length} 条 · 下一步 ${normalized.nextSteps.length} 条`,
+            '这就是下一份发布评论的正文；在审查面板点「发布」并按需勾选后即可发出。',
+          ]);
+        },
+      },
+      {
+        name: 'review_conclude',
+        description: '为当前轮触发（重新）生成最终结论，等同于审查面板的「生成最终结论 / 重新生成结论」按钮。后台运行，可用 review_get 查看进度与结果。',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { number: numberProperty },
+        },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          if (record.status === 'reviewing') throw new Error('该 PR 正在审查中，请等审查完成后再生成结论。');
+          if (record.report === null || record.report === undefined) throw new Error('还没有审查报告，请先完成审查再生成结论。');
+          if (record.concluding !== null && record.concluding !== undefined) throw new Error('结论正在生成中，请稍候。');
+          const started = startConclude(record);
+          if (!started.ok) throw new Error('结论正在生成中，请稍候。');
+          return toolText([
+            `已开始生成结论：PR #${record.number} 第 ${record.round ?? 1} 轮（后台任务）`,
+            '稍后用 review_get 查看状态与 revision；生成完成后可在对话里继续调整，或让用户点「发布」。',
+          ]);
+        },
+      },
+      {
+        name: 'review_publish',
+        description: '把当前轮的最终结论发布为一条新的 PR 评论（等同于审查面板的「发布」按钮）。默认全量选中；传 includeIds 只发布列出的条目（id 见 review_get_round 的结论条目）。会真实写入代码平台，用户明确要求发布时才调用；同一轮同一版本重复发布需要 force。若用户没说清发布范围、或是否要追加一条重复评论，先用 ask_user_question 列出候选让用户选，不要猜。',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            number: numberProperty,
+            force: { type: 'boolean', description: '同一轮同一结论版本已发布过时，是否仍然追加一条评论。' },
+            includeIds: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '只发布这些阻塞项/修改建议的 id（来自 review_get_round 的结论条目）；省略或空数组外的省略即全量。',
+            },
+          },
+        },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          const includeIds = Array.isArray(args.includeIds) && args.includeIds.length > 0
+            ? args.includeIds.filter((id) => typeof id === 'string' && id !== '')
+            : null;
+          const result = await publishReviewComment(record, {
+            force: args.force === true,
+            includeIds,
+          });
+          const url = typeof result.comment?.url === 'string' ? result.comment.url : '';
+          return toolText([
+            `已发布审查评论：PR #${record.number} 第 ${record.round ?? 1} 轮（版本 v${latestConclusionVersionOf(record)?.version ?? '?'}）`,
+            url === '' ? '' : `评论链接：${url}`,
+            `已发布评论总数：${Array.isArray(result.published) ? result.published.length : 0}`,
+            includeIds === null ? '' : `本次仅纳入 ${includeIds.length} 条勾选条目（其余未发布）。`,
+          ]);
+        },
+      },
+      {
+        name: 'review_get_links',
+        description: '返回该 PR 的代码平台链接与最新一条审查评论链接，用于「在代码平台打开 / 查看评论」。',
+        parameters: { type: 'object', additionalProperties: false, properties: { number: numberProperty } },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          const links = reviewLinksOf(record);
+          return toolText([
+            `PR #${record.number} · ${record.pull?.title ?? ''}`,
+            links.pullUrl === '' ? 'PR 链接：无' : `代码平台：${links.pullUrl}`,
+            links.latestCommentUrl === '' ? '最新审查评论：还没有发布过评论' : `最新审查评论：${links.latestCommentUrl}`,
+            `已发布评论：${Array.isArray(record.published) ? record.published.length : 0} 条`,
+          ]);
+        },
+      },
+      {
+        name: 'review_update_overview',
+        description: '一次更新「总览」：总体评价/摘要、总体初筛风险、审查顺序、审查重点，以及当前轮结论（阻塞项/修改建议/下一步），可选清理逐文件意见与建议（clearFindings）。会刷新结论时间戳（清除 stale），并让面板、发布评论与后续重新生成看到同一份总览；用户说“结论通过 / 去掉所有建议 / 清理意见”时优先用它，不要逐个文件改。必须带 revision。',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            revision: { type: 'integer', description: 'review_get 返回的 revision。' },
+            verdict: { type: 'string', enum: ['pass', 'suggest', 'block'], description: '总体评价（同时写入总体报告与结论）。' },
+            summary: { type: 'string', description: '总体摘要（同时写入总体报告与结论）。' },
+            risks: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+              description: '总体初筛风险（传入即整体替换）；每条 { severity?, file?, point }，point ≤ 500 字。',
+            },
+            order: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+              description: '审查顺序（传入即整体替换）；每条 { file, reason? }。',
+            },
+            focus: { type: 'object', additionalProperties: true, description: '审查重点（自由结构）。' },
+            blockers: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+              description: '结论阻塞项（传入即整体替换，[] 表示没有阻塞项）；每条 { point, file?, line? }。',
+            },
+            suggestions: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+              description: '结论修改建议（传入即整体替换，[] 表示去掉该小节）；每条 { point, file?, line? }。',
+            },
+            nextSteps: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '结论下一步清单（传入即整体替换，[] 表示清空）。',
+            },
+            clearFindings: {
+              type: 'string',
+              enum: ['none', 'suggestions', 'suggest', 'all'],
+              description: '清理逐文件/风险层面的 findings：suggestions=清所有建议与 suggest 级风险（保留阻塞项）；suggest=再清 suggest 级审查意见（保留阻塞）；all=清空全部意见/建议/风险。默认 none。',
+            },
+            number: numberProperty,
+          },
+          required: ['revision'],
+        },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          if (record.report === null || record.report === undefined) {
+            throw new Error('还没有总体报告：请先完成审查（review_list_prs 可看状态）。');
+          }
+          assertToolRevision(record, args.revision);
+          const beforeReport = record.report;
+          const beforeConclusion = record.conclusion ?? null;
+          const beforeCounts = overviewCounts(record);
+
+          // 1) report-level fields
+          const nextReport = { ...beforeReport };
+          let reportChanged = false;
+          if (args.verdict !== undefined) { nextReport.verdict = args.verdict; reportChanged = true; }
+          if (args.summary !== undefined) { nextReport.summary = String(args.summary); reportChanged = true; }
+          if (args.risks !== undefined) {
+            nextReport.risks = args.risks.map((item) => {
+              if (item === null || typeof item !== 'object') throw new Error('risks 的每一行必须是对象');
+              const point = typeof item.point === 'string' ? item.point.trim() : '';
+              if (point === '') throw new Error('risks 每行需要 point');
+              if (point.length > 500) throw new Error('risks 某条超过 500 字，请精简');
+              return { severity: item.severity === 'block' ? 'block' : 'suggest', file: typeof item.file === 'string' ? item.file : '', point };
+            });
+            reportChanged = true;
+          }
+          if (args.order !== undefined) {
+            nextReport.order = args.order.map((item) => {
+              if (item === null || typeof item !== 'object') throw new Error('order 的每一行必须是对象');
+              const file = typeof item.file === 'string' ? item.file : '';
+              if (file === '') throw new Error('order 每行需要 file');
+              return { file, reason: typeof item.reason === 'string' ? item.reason : '' };
+            });
+            reportChanged = true;
+          }
+          if (args.focus !== undefined) { nextReport.focus = args.focus; reportChanged = true; }
+          if (reportChanged) {
+            if (JSON.stringify(nextReport).length > 12_000) throw new Error('报告超过 12000 字符，请精简后重试。');
+            record.report = nextReport;
+          }
+
+          // 2) conclusion-level fields (one human version, ids preserved)
+          const working = {
+            verdict: args.verdict ?? beforeConclusion?.verdict ?? 'suggest',
+            summary: args.summary ?? beforeConclusion?.summary ?? '',
+            blockers: args.blockers === undefined
+              ? (Array.isArray(beforeConclusion?.blockers) ? beforeConclusion.blockers : [])
+              : normalizeConclusionItems('blocker', args.blockers, beforeConclusion?.blockers),
+            suggestions: args.suggestions === undefined
+              ? (Array.isArray(beforeConclusion?.suggestions) ? beforeConclusion.suggestions : [])
+              : normalizeConclusionItems('suggestion', args.suggestions, beforeConclusion?.suggestions),
+            nextSteps: args.nextSteps === undefined
+              ? (Array.isArray(beforeConclusion?.nextSteps) ? beforeConclusion.nextSteps : [])
+              : args.nextSteps.map((item) => {
+                  if (typeof item !== 'string' || item.trim() === '') throw new Error('nextSteps 每条必须是非空字符串');
+                  return item.trim();
+                }),
+          };
+          const normalized = normalizeConclusion(working, { files: (record.files ?? []).map((file) => file.path) });
+          pushConclusionVersion(record, 'human', normalized, record.coverage);
+          record.conclusionEditedAt = Date.now();
+          const touched = [...normalized.blockers, ...normalized.suggestions].map((item) => item.id);
+          record.humanItemIds = [...new Set([...(record.humanItemIds ?? []), ...touched])];
+
+          // 3) optional findings cleanup (evidence layer the overview renders)
+          const cleared = clearOverviewFindings(record, args.clearFindings ?? 'none');
+          if (reportChanged || cleared.risks > 0) record.reportUpdatedAt = Date.now();
+
+          const afterCounts = overviewCounts(record);
+          recordToolAudit(
+            record,
+            exec,
+            'review_update_overview',
+            `风险 ${beforeCounts.risks}→${afterCounts.risks} · 意见 ${beforeCounts.issues}→${afterCounts.issues} · 建议 ${beforeCounts.suggestions}→${afterCounts.suggestions} · 结论 ${normalized.verdict}`,
+          );
+          scheduleSave();
+          return toolText([
+            `已更新总览（revision ${record.revision}）：结论 ${normalized.verdict} · ${normalized.summary.slice(0, 160)}`,
+            `阻塞项 ${normalized.blockers.length} 条 / 修改建议 ${normalized.suggestions.length} 条 / 下一步 ${normalized.nextSteps.length} 条`,
+            `初筛风险 ${afterCounts.risks} 条 · 逐文件意见 ${afterCounts.issues} 条 / 建议 ${afterCounts.suggestions} 条`,
+            cleared.suggestions + cleared.issues + cleared.risks === 0 ? '' : `已清理：建议 ${cleared.suggestions} 条、意见 ${cleared.issues} 条、风险 ${cleared.risks} 条`,
+            '结论时间戳已刷新（stale 清除）；下一份发布评论、面板总览与重新生成看到的是同一份数据。',
+          ]);
+        },
+      },
+    ];
+    ownerCtx.effect(() => {
+      const disposers = [];
+      for (const definition of definitions) {
+        try {
+          const dispose = toolsService.register(definition);
+          if (typeof dispose === 'function') disposers.push(dispose);
+        } catch (error) {
+          console.warn(`[pr-review] 注册工具 ${definition.name} 失败`, error);
+        }
+      }
+      return () => {
+        for (const dispose of disposers) {
+          try {
+            dispose();
+          } catch {
+            // registration cleanup is best-effort during unload
+          }
+        }
+      };
+    }, 'pr-review: review tools');
+  }
+
+  // The registry is a root service in some profiles; the Web composition mounts tools on each
+  // agent instead, so register there through agent/created and let the agent own the lifetime.
+  if (ctx.get('tools') !== undefined) {
+    registerReviewTools(ctx);
+  } else {
+    ctx.on('agent/created', ({ agent }) => {
+      if (agent === undefined || agent === null || agent.ctx === undefined) return;
+      registerReviewTools(agent.ctx);
+    });
+  }
+
+  // Steer the model to the local-data workflow: the platform comment is a render of the panel
+  // data, so edits belong in review_* before publishing, not in published comments.
+  const systemPrompt = ctx.get('systemPrompt');
+  if (systemPrompt !== undefined && systemPrompt !== null && typeof systemPrompt.section === 'function') {
+    try {
+      systemPrompt.section({
+        name: 'pr-review: review-data',
+        order: 60,
+        text: 'PR 审查插件：审查数据（总体报告、逐文件分析、当前轮结论）保存在本地，代码平台上的审查评论只是这份数据的渲染结果。要调整下一次发布的审查意见，用 review_update_overview 一次改总览（结论 + 总体评价/风险/顺序，可选 clearFindings 清理逐文件意见与建议）；只有单文件/单轮细节才用 review_update_conclusion / review_update_analysis / review_update_report（先 review_get 取 revision）；不要直接编辑平台上已发布的评论。用户要求「重新生成结论 / 发布 / 查看评论 / 在代码平台打开」时，分别用 review_conclude / review_publish / review_get_links 触发；发布是真实写操作，只在用户明确要求时调用。对话里出现 <review-context> 时，用户说「这个文件/这条/这里」默认指快照的「当前查看」范围：直接按它操作（例如标记该文件通过就 review_update_analysis + verdict），不要反问是哪个文件；只有没有快照时才问。需要确认时主动用 ask_user_question 问、不要猜：发布范围不唯一（哪些条目）、同一轮同一版本已发布过是否追加、要改哪一轮/哪个文件但快照缺失、或用户一句话里出现多个候选对象。',
+      });
+    } catch (error) {
+      console.warn('[pr-review] 注册提示词段落失败', error);
+    }
+  }
+
+  /** Read the optional panel focus fields a client reports alongside the active PR. */
+  function focusOfBody(body) {
+    if (body === null || typeof body !== 'object') return null;
+    return {
+      view: body.view === 'file' ? 'file' : 'overview',
+      path: typeof body.path === 'string' ? body.path : '',
+      pane: body.pane === 'analysis' ? 'analysis' : 'diff',
+      round: Number.isInteger(body.round) && body.round > 0 ? body.round : 0,
+    };
+  }
+
+  // The panel reports the PR it shows so tools default to what the reviewer is reading, and
+  // injects one compact snapshot so the conversation knows what "this file" means.
+  route(`${PREFIX}/active`, {
+    POST: async (req, res) => {
+      const text = await readBoundedBody(req);
+      const body = text === null ? null : parseBody(text);
+      const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : '';
+      const number = Number(body?.number);
+      if (sessionId === '') {
+        sendError(res, 400, 'bad-request', 'sessionId is required');
+        return;
+      }
+      const focus = focusOfBody(body);
+      let injected = false;
+      if (Number.isInteger(number) && number > 0) {
+        activeReviewBySession.set(sessionId, number);
+        const record = state.reviews.get(number) ?? null;
+        injected = reportReviewFocus(sessionId, record, focus, true);
+      } else {
+        activeReviewBySession.delete(sessionId);
+        focusBySession.delete(sessionId);
+        lastInjectAt.delete(sessionId);
+        lastSnapshotBySession.delete(sessionId);
+      }
+      sendJson(res, 200, { ok: true, active: Number.isInteger(number) && number > 0 ? number : null, injected });
+    },
+  });
+
+  // View/file changes update the recorded focus; the snapshot is refreshed at most once a minute.
+  route(`${PREFIX}/focus`, {
+    POST: async (req, res) => {
+      const text = await readBoundedBody(req);
+      const body = text === null ? null : parseBody(text);
+      const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : '';
+      const number = Number(body?.number);
+      if (sessionId === '' || !Number.isInteger(number) || number <= 0) {
+        sendError(res, 400, 'bad-request', 'sessionId and number are required');
+        return;
+      }
+      if (!activeReviewBySession.has(sessionId)) {
+        sendJson(res, 200, { ok: true, injected: false });
+        return;
+      }
+      const record = state.reviews.get(number) ?? null;
+      const injected = reportReviewFocus(sessionId, record, focusOfBody(body), false);
+      sendJson(res, 200, { ok: true, injected });
+    },
+  });
+
+  // ---------- lifecycle ----------
+
+  void loadCache().then(() => {
+    void refreshPulls();
+  });
+
+  const pollSeconds = Math.max(15, Number(settings.pollSeconds) || DEFAULTS.pollSeconds);
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      void refreshPulls();
+    }, pollSeconds * 1000);
+    return () => clearInterval(timer);
+  }, `pr-review: poll every ${pollSeconds}s`);
+
+  ctx.effect(() => () => {
+    if (state.saveTimer !== null) clearTimeout(state.saveTimer);
+    for (const record of state.reviews.values()) abortConclude(record);
+    void saveNow();
+  }, 'pr-review: flush cache on unload');
+
+  console.log(provider.repo === ''
+    ? '[pr-review] ready: 未配置仓库，等待工作区会话从 git origin 识别（也可在插件配置中填写 baseUrl/repo）'
+    : `[pr-review] ready: ${provider.label} → ${provider.baseUrl}`);
+}

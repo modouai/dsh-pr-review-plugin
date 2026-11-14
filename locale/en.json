@@ -1,0 +1,33 @@
+{
+  "meta": {
+    "title": "PR review",
+    "description": "Reviews Forgejo and GitHub pull requests: automatic report, entry-first file order, per-file explanation, and follow-up conversation."
+  },
+  "panel": {
+    "title": "PR review",
+    "open": "Review pull requests",
+    "close": "Close",
+    "refresh": "Refresh",
+    "prs": "Open pull requests",
+    "review": "Review now",
+    "reviewing": "Reviewing…",
+    "report": "Report",
+    "verdict": "Verdict",
+    "risks": "Risks",
+    "order": "Reading order",
+    "files": "Changed files",
+    "explain": "Explain",
+    "explaining": "Explaining…",
+    "ask": "Ask a question about this file…",
+    "send": "Send",
+    "conclude": "Final conclusion",
+    "concluding": "Concluding…",
+    "empty": "No pull requests loaded yet.",
+    "noToken": "Forgejo token missing. Add a token to the plugin config.",
+    "orderHint": "Entry files come first: review in this order.",
+    "changed": "changed",
+    "added": "added",
+    "removed": "removed",
+    "renamed": "renamed"
+  }
+}
