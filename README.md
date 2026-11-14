@@ -1,74 +1,93 @@
-# PR review（Cordis 插件）
+# dsh-pr-review-plugin
 
-在当前 Harness Web UI 里审查 Forgejo / GitHub 拉取请求。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-## 能做什么
+AI-assisted pull request review for the DeepSeek Harness Web UI. The plugin watches a Forgejo or GitHub repository for open pull requests, reviews new commits with the model behind your Harness session, and shows the whole review — report, per-file analysis, rounds, and final conclusion — in a panel docked next to the chat. Finished reviews are published as regular pull request comments, and follow-up discussion happens in the main conversation.
 
-- 后台轮询代码平台的 open PR；PR 出现新提交（head sha 变化）时自动开始新一轮审查（可用 `autoReview: false` 关闭）。
-- **右侧边栏面板**（会话内）：点会话头部「审查 PR」药丸，把当前工作区的审查 tab 停靠到右侧边栏（主对话保持可见），文件列表、diff、分析三列，**列宽可拖动**（拖动分隔条，双击恢复默认，宽度记住）。
-- **入口**：会话头部药丸与空态「审查 PR」卡片同形态（标题 + 当前工作区 open PR 数；0 个时不显示），按会话工作区区分。点击后通过 DSH 公开的 `sidebarRight.mounted` 信号打开：会话在屏（已有内容）时立即停靠；空会话先显示「排队：进入会话后自动打开审查面板」，发出首条消息、会话上屏后自动停靠一次。宿主路由未就绪时药丸显示「审查 PR …」并自动重试；不支持右栏或打开失败时显示「!」并点此重试，不弹浮层/抽屉。
-- **操作条**：面板底部常驻动作条（生成/重新生成结论、发布、查看评论、在代码平台打开）+「在对话中提问」；是否有新改动由底栏可展开的提示行表达（默认收起成一行「结论之后有更新的文件（N 处）」，点开展示文件清单、覆盖提示与自动重生成说明），主按钮只写「重新生成结论」、不重复数量。
-- **按工作区隔离**：审查页签根据当前会话所属工作区的 git `origin` 自动识别代码仓库（Forgejo / GitHub），只显示该仓库的 PR；切换工作区即切换到对应仓库的 PR 与审查数据，不同仓库互不混用；工作区不是 git 仓库或没有 origin 时给出提示。
-- 总览：总体评价（结论徽标 + 摘要）、总体初筛风险、逐文件审查发现（按文件聚合意见与建议，带已分析覆盖率）、审查顺序、最终结论。
-- **最终结论**：基于总体报告 + 所有已逐文件分析的内容 + 人机讨论 + 实现者反馈生成；服务端校验（verdict 与阻塞项自洽、过滤不存在的文件、去重）；结论带覆盖率（已分析 X/Y 文件）与版本号。
-- **结论版本历史**：每次生成结论、每次人工在对话中修改结论都会保留一个版本，永不删除；审查详情用**轮次页签**展示历史轮次（默认最新轮），轮内可用版本下拉回看旧版本（历史只读）。
-- **生成过程可见**：生成结论改为后台任务，按钮展示「收集资料 → 请求模型 → 解析结果 → 写回」阶段，可随时取消；结论 stale（报告或文件分析在结论之后又更新）时提示变化文件，主按钮变成「重新生成结论」（数量由提示行展示）；可选 `autoReconclude` 自动重生成。结论条目带 PR head 行号，点击文件名可直接定位到对应 diff 行。
-- **发布前预览与选择**：发布审查评论前可预览 Markdown，并可勾选本次要纳入评论的条目（默认全选，支持全选/全不选——全不选时「确认发布」被禁用）；勾选只作用于阻塞项与修改建议，「下一步」始终发布；部分勾选会在评论里注明「本次评论仅纳入 X/Y 条审查意见」，对应小节注明「本次评论未纳入 N 条…」，不会把漏发读成「无阻塞项」。每条评论可见「已发布」状态；每轮追加一条新评论、不覆盖历史；同一轮同一版本重复发布会被拦截，可显式「仍然追加」；浏览旧版本结论时发布按钮禁用（避免发出屏幕上那份之外的最新版）。
-- **评论信息完整**：评论头写明被审 `commit`、轮次与结论版本（可追溯到具体提交）；覆盖行给出「已分析 X/Y」并注明未分析文件数（清单在附录）；正文后附可折叠的 `<details>` 审查附录——总体初筛风险、逐文件审查发现（意见含行号、改进建议）、审查顺序、复审对比（已修复/仍未解决）、未分析文件清单。附录里的严重度标签为「阻塞 / 提示」：「提示」表示 suggestion 级意见或风险，与真正的「建议」条目（`- 建议：…`）区分开，避免「结论通过却满屏建议」的误读。附录按平台长度上限（60000 字符）自动收缩→省略→截断，并在截断处指向审查面板。
+## Features
 
-- **实现者反馈与复审对比**：第 1 轮不显示；从第 2 轮起显示在该轮详情最前面（先实现者反馈、再复审对比）。反馈取自**上一轮审查评论之后**实现者留下的回复——本轮不必先发布评论就能读取；只有从未发布过任何审查评论时才提示无可参照。按轮次保留反馈状态与「已修复 / 仍未解决」对比。
-- 单文件分析：代码逻辑、具体改动、审查意见、改进建议；diff 里点 hunk 查看逐段分析浮层，浮层内「展开完整函数/类」可在 diff 就地展开该段所属函数/类（范围由模型基于完整文件给出，跨语言；识别不到时退化为 ±40 行上下文）；可切换「完整文件」查看 PR head 版本全文（新增行高亮）。
-- 讨论入口：v2 方向是**主对话**（agent 通过 `review_*` 工具读写审查数据、面板实时刷新）；空态浮层里仍保留旧的讨论输入框作为过渡。
-- **主对话工具（部分实现）**：右栏面板会把当前 PR 绑定到会话；主对话可调用只读工具 `review_list_prs` / `review_get` / `review_get_report` / `review_list_files` / `review_get_analysis` / `review_get_diff` / `review_get_file` / `review_list_rounds` / `review_get_round` / `review_get_comments` 读取审查数据；写入工具 `review_update_analysis` / `review_update_report` / `review_update_conclusion` 用 `revision` 乐观锁改写分析/报告/当前轮结论（结论 = 下一份发布评论的正文，人工修改会追加 human 版本并锁定条目 id）并写入审计（`record.audit`，保留最近 100 条）。总览级改动用 `review_update_overview` 一次完成（总体评价/摘要/风险/顺序 + 当前轮结论 + 可选 `clearFindings` 清理逐文件意见与建议；会刷新结论时间戳、清除 stale，保证面板总览、发布评论与后续重新生成一致）。面板的四个动作也可通过对话触发：`review_conclude`（生成/重新生成结论）、`review_publish`（发布评论，默认全量；`includeIds` 只发勾选条目，id 见 `review_get_round`；同一轮同版本重复发布需 `force`）、`review_get_links`（代码平台链接 / 最新评论链接，对应「查看评论 / 在代码平台打开」）。提示词段落会要求 agent 改本地数据后再发布，不要直接编辑平台已发布评论。面板打开/切换 PR 时向会话注入一条紧凑的审查快照（`runtime-context`），切换文件/视图每分钟最多刷新一次；面板可见时每 5s 拉取数据，工具改写后自动更新。turn-tail 入口与审计展示待做。
-- 面板提示与按钮统一由 `ReviewDock` 渲染：右栏放在面板底部常驻，空态浮层放在输入行上方（过渡）。「结论之后有更新的文件」提示是可展开的折叠面板：默认收起成一行摘要，点开展示文件清单、覆盖提示与自动重生成说明；「还有文件未分析」在同时成立时并入同一块面板；切到历史轮次/报告未生成/无提示时自动隐藏。
-- **实现者反馈闭环**：自动读取上一轮审查评论之后 PR 作者/其他人的回复，交给模型解析为「称已修复 / 不认可 / 已认可 / 有疑问」，状态与理由直接标注到对应意见上；按轮次对比新旧结论，展示「已修复 / 仍未解决」。评论正文按 Markdown 渲染（标题 / 列表 / 引用 / 代码块 / 加粗 / 行内代码 / http(s) 链接），平台原文里的 HTML 只作为文字显示，不会注入。
+- **Workspace aware**: each session's workspace `git origin` selects the repository and platform (Forgejo or GitHub); the panel only shows pull requests from that repository, and switching workspaces switches reviews with it.
+- **Automatic rounds**: the plugin polls for open pull requests and starts a new review round whenever new commits land (`autoReview` can be turned off).
+- **Review panel**: a right-sidebar panel inside the session — changed files, diff, and per-file analysis in three resizable columns; click any hunk in the diff for its per-segment analysis, or switch to the full file (with added lines highlighted).
+- **Final conclusion**: generated in the background with visible stages and cancel support; carries review coverage (X of Y files analyzed) and a version number. When the report or file analysis changes afterwards, the panel flags the outdated conclusion and offers regeneration (automatic with `autoReconclude`).
+- **Version history**: every conclusion version is kept, and each review round gets its own tab, so older rounds and versions stay readable.
+- **Reviewer feedback loop**: replies left by the implementer after the previous review comment are parsed into fixed / rejected / acknowledged states, marked on individual findings, and compared across rounds (resolved vs. still open).
+- **Publishing**: preview the Markdown before posting, and choose which findings to include; comments are appended (never overwritten), tagged with the reviewed commit, round, conclusion version, and coverage.
+- **Chat integration**: the main conversation can read and update review data through the `review_*` tools, and the panel refreshes live — ask "risk 1 doesn't hold" or "rewrite suggestion 2" and the review updates in place.
 
-## 配置
+### Chat tools
 
-插件配置写在 profile 的 `cordis.patch.yml` 里（安装时已插入默认行）。`baseUrl` 与 `repo` 默认留空，打开工作区会话时自动从 git `origin` 识别；需要固定到一个仓库时再显式填写：
+Read: `review_list_prs`, `review_get`, `review_get_report`, `review_list_files`, `review_get_analysis`, `review_get_diff`, `review_get_file`, `review_list_rounds`, `review_get_round`, `review_get_comments`
 
-| 字段 | 默认 | 说明 |
+Write: `review_update_analysis`, `review_update_report`, `review_update_overview`, `review_update_conclusion` (optimistic-lock guarded), plus the panel actions `review_conclude`, `review_publish`, `review_get_links`.
+
+## Requirements
+
+- A DeepSeek Harness (DSH) installation with the Web UI, 0.2.2-rc.1 or later in the 0.2 line (declared as `engines.dsh`; incompatible versions are rejected at install/start). The plugin runs as a Cordis function plugin and uses the Harness `llm` service for model calls (no separate API key — it uses your Harness model, or the `provider` / `model` you configure).
+- The `git` CLI, so the plugin can resolve a workspace's `origin` remote.
+- A code host token with permission to read pull requests and post comments (see below).
+
+## Install
+
+The plugin is a DSH bundle. Install it into a profile with the official CLI:
+
+```sh
+dsh plugin --profile <name> add github:modouai/dsh-pr-review-plugin
+```
+
+Point the install at a tag or commit (`…#<tag-or-sha>`) to pin what actually runs. To install a local checkout instead, pass its path: `dsh plugin --profile <name> add ./dsh-pr-review-plugin` (run `pnpm install` inside the checkout first — a linked checkout keeps its own `node_modules`).
+
+Verify the layer before starting, then restart Harness:
+
+```sh
+dsh --profile <name> --dump-config   # shows a "# == @local/dsh-pr-review" layer
+dsh --profile <name>
+```
+
+The bundle ships its default configuration in [`cordis.patch.yml`](cordis.patch.yml). Defaults are also declared in the plugin's `Config` schema, so the loader validates values and fills anything omitted. To change values, override the row in your profile's `cordis.patch.yml` — a patch replaces the **whole** `config` object for that row, so restate every key you need, not just the changed one.
+
+## Configuration
+
+| Key | Default | Description |
 |---|---|---|
-| `platform` | `forgejo` | `forgejo` 或 `github` |
-| `baseUrl` | 空 | Forgejo 站点根；留空时按会话工作区 git `origin` 自动识别，GitHub 填 `https://api.github.com` |
-| `repo` | 空 | `owner/name`；留空时按会话工作区 git `origin` 自动识别 |
-| `token` | 空 | 留空时依次回退：环境变量、CLI 登录（tea / gh）；写 PR 评论需要该 token 有评论权限 |
-| `pollSeconds` | `60` | 轮询间隔，最小 15 秒 |
-| `autoReview` | `true` | 新提交自动审查（新一轮） |
-| `autoReconclude` | `false` | 报告/文件分析在结论之后更新时，自动重新生成结论（5 分钟内最多一次） |
-| `commentLanguage` | `zh` | PR 评论语言：`zh` / `en` |
-| `provider` / `model` | 空 | 留空用当前默认模型 |
-| `reasoningEffort` | `off` | 审查任务默认关闭思考，可改 `low` / `high` / `max` |
-| `maxDiffCharsPerFile` | `14000` | 单个文件送入模型的最大 diff 字符数 |
-| `maxFilesPerReview` | `60` | 每次审查纳入的文件上限 |
+| `platform` | `forgejo` | `forgejo` or `github` |
+| `baseUrl` | empty | Forgejo site root; leave empty to resolve from the workspace `origin`. For GitHub use `https://api.github.com` |
+| `repo` | empty | `owner/name`; leave empty to resolve from the workspace `origin` |
+| `token` | empty | Leave empty to fall back to environment variables, then the platform CLI login. Posting comments requires a token with comment permission |
+| `pollSeconds` | `60` | Polling interval, minimum 15 seconds |
+| `autoReview` | `true` | Start a new review round automatically on new commits |
+| `autoReconclude` | `false` | Regenerate the conclusion automatically when the report or file analysis changes after it (at most once per 5 minutes) |
+| `commentLanguage` | `zh` | Pull request comment language: `zh` / `en` |
+| `provider` / `model` | empty | Use the current Harness default model when empty |
+| `reasoningEffort` | `off` | Reasoning effort for review tasks: `off` / `low` / `high` / `max` |
+| `maxDiffCharsPerFile` | `14000` | Maximum diff characters sent to the model per file |
+| `maxFilesPerReview` | `60` | Maximum number of files included per review |
 
-token 回退顺序：`platform=forgejo` → `FORGEJO_TOKEN` / `PR_REVIEW_TOKEN` / tea 登录；`platform=github` → `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth login`。
+Token resolution order: `platform=forgejo` → `FORGEJO_TOKEN` / `PR_REVIEW_TOKEN` / `tea` login; `platform=github` → `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth login`.
 
-## 使用
+## Usage
 
-1. 在会话里点头部「审查 PR」药丸（空会话则点输入框下方的「审查 PR」卡片）。
-2. 顶部选 PR；首次等报告生成（后台轮询会自动触发，也可点「立即审查」）。顶栏常驻显示当前第几轮与状态。
-3. 左栏顶部「总览」回到整体视图；左栏点文件：中间看 diff（可切完整文件），右侧看该文件分析与审查意见；点 hunk 看逐段分析。
-4. 在底部输入框继续讨论：例如「第 1 条风险不成立」「把第 2 条建议改成…」，会直接修改审查数据。
-5. 点「生成最终结论」；有报告/分析更新时会提示「重新生成结论」（底栏折叠行显示新改动数量，点开看明细）。生成中可取消。
-6. 点「发布」先预览 Markdown 再发布；每轮发布会追加一条新评论（不覆盖历史）。
-7. 顶栏的轮次页签（药丸样式，带状态与时间，例如「第 3 轮 · 已审查 10:47」）可点击切换历史轮次：第 1 轮不含复审对比/实现者反馈；第 2 轮起这两块显示在该轮最前面（先反馈、后对比）。轮内版本下拉可回看同轮的旧结论版本。
-8. 实现者在上一轮 PR 评论下回复后，点「检查实现者反馈」（打开审查页签时每 2 分钟自动检查一次），意见上会出现状态徽标与作者原话摘要；新提交会触发新一轮复审并追加新评论。
+1. In a session, click the **Review PR** pill in the session header (or the card under the composer in an empty session).
+2. Pick a pull request at the top; the first review starts automatically in the background (or click **Review now**).
+3. Click a file in the left column to read its diff and analysis; click a hunk for the per-segment walkthrough; switch to the full file when needed.
+4. Discuss in the main conversation — for example "risk 1 doesn't hold" or "turn suggestion 2 into a blocker" — and the review data updates directly.
+5. Click **Generate conclusion**; if the report changes afterwards, the panel offers **Regenerate conclusion**.
+6. Click **Publish** to preview the Markdown, select the findings to include, and append the comment. Each round appends a new comment; history is never overwritten.
+7. Use the round tabs at the top to revisit earlier rounds and conclusion versions (read-only).
+8. After the implementer replies under the previous review comment, click **Check reviewer feedback** (the panel also checks automatically every 2 minutes) to see per-finding states and the resolved-vs-still-open comparison. New commits start the next round.
 
-## 数据位置
+## Data
 
-审查结果按仓库缓存在 `~/.dsh/pr-review/<platform>-<repo>.json`；所有结论版本与历史轮次都在缓存里（重启后仍可查看）。diff 与文件全文按需重新拉取。工作区切换时旧仓库缓存先落盘、再加载新仓库缓存。
+Review results are cached per repository under `~/.dsh/pr-review/<platform>-<repo>.json`. All conclusion versions and round history live in that cache and survive restarts; diffs and file contents are re-fetched on demand.
 
-## 说明
+## Notes
 
-- 文件级 LLM 深度处理统一叫「分析」（`分析这个文件` / `重新分析`）；对整份 PR 下判断叫「审查」（`立即审查` / `开始第 N 轮审查` / `生成最终结论`）。
-- 顶栏内嵌轮次药丸页签：默认最新轮；历史轮只读；点击即切换并回到总览。页签底色保留状态语义（审查中蓝 / 已审查绿 / 待结论或中断橙 / 失败红 / 无结论灰），选中用同色系描边 + 加深底色 + 700 字重与轻阴影（不用品牌色描边/内描边，浅色主题下品牌色接近纯黑会变成大黑框），不覆盖状态色；结论已生成但尚未发布到 PR 评论的轮次带「未发布」小标记。每个结论版本记录来源（模型生成 / 人工修改）与覆盖率。结论条目带 `文件:行号`，点击可跳到 diff 对应行。
-- PR 评论语言由 `commentLanguage` 控制；评论 footer 为「由 DeepSeek harness PR 审查插件生成」。
-- 发布语义为**追加**：每轮一条新评论，不覆盖、不原地更新；同轮同版本重复发布会提示，可强制追加。发布前可勾选要纳入的条目，未勾选的条目不会写进该条评论。
-- 更新插件后：浏览器侧（`client.js`）热加载；host 侧（`index.js` / `providers.js` / `llm.js`）需重启 Harness 应用生效。
-- 下一版方向（见 [`docs/specs/review-agent-integration.md`](docs/specs/review-agent-integration.md)，待实现）：主对话保持连续，审查面板移到**右侧边栏**；agent 通过新注册的 `review_*` 工具读写分析/报告，面板实时刷新；发布与生成结论仍是人工动作。
-- 工作区仓库识别依赖本机 `git` 命令与工作区目录的 `origin` remote；GitHub 仓库需要 `GITHUB_TOKEN` / `gh auth login` 才能写评论。
+- Upgrading the plugin: the browser side (`client.js`) hot-reloads; the host side (`index.js` / `providers.js` / `llm.js`) requires restarting Harness.
+- The pull request list shows the 20 most recently updated open pull requests; the panel says so when older ones exist.
+- Cache writes are atomic (temp file + rename). If the cache cannot be read, the plugin moves it aside as `<name>.corrupt-<timestamp>` instead of overwriting it, and shows a warning in the panel.
+- Published comments carry a footer identifying the plugin; the language follows `commentLanguage`.
+- Comments are truncated gracefully if they exceed the platform's 60,000-character limit: the appendix shrinks first, then entries are omitted, and the truncation points to the review panel for details.
 
 ## License
 
-MIT，见 [LICENSE](LICENSE)。
+[MIT](LICENSE)
