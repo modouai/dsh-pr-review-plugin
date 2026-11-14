@@ -2,7 +2,8 @@
  * Host half of the PR review plugin.
  *
  * Responsibilities:
- * - poll one code host (Forgejo or GitHub) for open pull requests and review
+ * - poll one code host (GitHub, or a Gitea-compatible host such as Gitea /
+ *   Forgejo / Codeberg) for open pull requests and review
  *   new heads automatically when `autoReview` is on;
  * - answer the browser half over same-origin `/pr-review-api/*` routes behind
  *   the connection trust fence;
@@ -88,7 +89,7 @@ const MAX_REVIEWS = 50;
  * Field defaults live in DEFAULTS and are referenced here, so the values have one source.
  */
 export const Config = Schema.object({
-  platform: Schema.union(['forgejo', 'github']).default(DEFAULTS.platform),
+  platform: Schema.union(['github', 'gitea', 'forgejo']).default(DEFAULTS.platform),
   baseUrl: Schema.string().default(DEFAULTS.baseUrl),
   repo: Schema.string().default(DEFAULTS.repo),
   token: Schema.string().default(DEFAULTS.token),
@@ -929,7 +930,7 @@ export function apply(ctx, config) {
       throw new HarnessError(
         provider.platform === 'github'
           ? '缺少 GitHub token：请在插件配置填写 token，或设置 GITHUB_TOKEN / GH_TOKEN，或先 `gh auth login`。'
-          : '缺少 Forgejo token：请在插件配置填写 token，或设置 FORGEJO_TOKEN，或先 `tea login`。',
+          : '缺少 Gitea / Forgejo token：请在插件配置填写 token，或设置 GITEA_TOKEN / FORGEJO_TOKEN，或先 `tea login`。',
         'MISSING_CREDENTIAL',
       );
     }

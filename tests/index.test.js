@@ -1779,6 +1779,8 @@ test('Config schema fills defaults and rejects invalid values', async () => {
   assert.equal(filled.commentLanguage, 'zh');
   assert.equal(filled.autoReview, true);
   assert.equal(filled.reasoningEffort, 'off');
+  assert.equal(Config({ platform: 'gitea' }).platform, 'gitea');
+  assert.equal(Config({ platform: 'forgejo' }).platform, 'forgejo');
   assert.throws(() => Config({ platform: 'gitlab' }), /platform/);
   assert.throws(() => Config({ pollSeconds: 5 }), /pollSeconds/);
   assert.throws(() => Config({ reasoningEffort: 'ultra' }), /reasoningEffort/);
@@ -1803,5 +1805,30 @@ test('tool failures carry stable HarnessError codes', async () => {
     );
   } finally {
     await plugin.dispose();
+  }
+});
+
+test('gitea is an alias for the Forgejo adapter and keeps the same cache slug', async () => {
+  const { resolveProviderConfig, resolveToken } = await import('../providers.js');
+  const gitea = resolveProviderConfig({ platform: 'gitea', baseUrl: 'https://codeberg.org', repo: 'forgejo/forgejo' });
+  const forgejo = resolveProviderConfig({ platform: 'forgejo', baseUrl: 'https://codeberg.org', repo: 'forgejo/forgejo' });
+  assert.equal(gitea.platform, 'forgejo', 'cache slug stays forgejo, so old caches keep loading');
+  assert.equal(gitea.label, 'Gitea/Forgejo forgejo/forgejo');
+  assert.deepEqual(gitea, forgejo);
+  const github = resolveProviderConfig({ platform: 'github', repo: 'acme/demo' });
+  assert.equal(github.platform, 'github');
+  assert.equal(github.baseUrl, 'https://api.github.com');
+
+  const previous = { gitea: process.env.GITEA_TOKEN, forgejo: process.env.FORGEJO_TOKEN };
+  process.env.GITEA_TOKEN = 'gitea-token';
+  process.env.FORGEJO_TOKEN = 'forgejo-token';
+  try {
+    const token = await resolveToken({}, { platform: 'forgejo', baseUrl: 'https://git.example', repo: 'acme/demo' });
+    assert.equal(token, 'gitea-token', 'GITEA_TOKEN wins over FORGEJO_TOKEN');
+  } finally {
+    if (previous.gitea === undefined) delete process.env.GITEA_TOKEN;
+    else process.env.GITEA_TOKEN = previous.gitea;
+    if (previous.forgejo === undefined) delete process.env.FORGEJO_TOKEN;
+    else process.env.FORGEJO_TOKEN = previous.forgejo;
   }
 });

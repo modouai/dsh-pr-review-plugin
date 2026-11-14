@@ -149,7 +149,7 @@ export function buildReportPrompt(pull, files, diffFiles, config) {
     .join('\n');
   const excerpts = diffExcerpts(diffFiles, order, reportChars, 120_000);
   const user = [
-    `平台：${pull.platform === 'github' ? 'GitHub' : 'Forgejo'}；仓库：${pull.repo}`,
+    `平台：${pull.platform === 'github' ? 'GitHub' : 'Gitea/Forgejo'}；仓库：${pull.repo}`,
     `PR #${pull.number}：${pull.title}`,
     `作者：${pull.author}；分支：${pull.headRef} → ${pull.baseRef}`,
     `规模：${pull.changedFiles} 个文件，+${pull.additions} / -${pull.deletions}`,
@@ -196,7 +196,7 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
     ? ''
     : `\nPR 总体结论：${report.verdict ?? ''}；${report.summary ?? ''}`;
   const user = [
-    `平台：${pull.platform === 'github' ? 'GitHub' : 'Forgejo'}；仓库：${pull.repo}`,
+    `平台：${pull.platform === 'github' ? 'GitHub' : 'Gitea/Forgejo'}；仓库：${pull.repo}`,
     `PR #${pull.number}：${pull.title}（${pull.headRef} → ${pull.baseRef}）`,
     `正在审查文件：${file.path}（${file.status}，+${file.additions} / -${file.deletions}）${focus}`,
     reportLine,
@@ -229,7 +229,7 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
 /** Follow-up conversation about one file (or the whole PR when file is null). */
 export function buildChatPrompt(pull, file, explanation, report, history, question, conclusion) {
   const contextLines = [
-    `平台：${pull.platform === 'github' ? 'GitHub' : 'Forgejo'}；仓库：${pull.repo}`,
+    `平台：${pull.platform === 'github' ? 'GitHub' : 'Gitea/Forgejo'}；仓库：${pull.repo}`,
     `PR #${pull.number}：${pull.title}`,
     file === null ? '讨论范围：整个 PR（总览）' : `讨论文件：${file.path}`,
     report === null || report === undefined ? '' : `PR 总体结论：${report.verdict ?? ''}；${report.summary ?? ''}`,
@@ -351,7 +351,7 @@ export function buildConcludePrompt(pull, report, explanations, currentConclusio
   const feedback = options.feedback === null || options.feedback === undefined ? null : options.feedback;
   const pullChat = Array.isArray(options.pullChat) ? options.pullChat : [];
   const lines = [
-    `平台：${pull.platform === 'github' ? 'GitHub' : 'Forgejo'}；仓库：${pull.repo}`,
+    `平台：${pull.platform === 'github' ? 'GitHub' : 'Gitea/Forgejo'}；仓库：${pull.repo}`,
     `PR #${pull.number}：${pull.title}（${pull.headRef} → ${pull.baseRef}）`,
     `规模：${pull.changedFiles} 个文件，+${pull.additions} / -${pull.deletions}`,
     report === null || report === undefined ? '' : `总体报告：${truncateWithMarker(JSON.stringify(report), 5000)}`,
@@ -964,7 +964,7 @@ const COMMENT_APPENDIX = {
   },
 };
 
-/** Comment bodies are capped well below the Forgejo/GitHub 65536-char limit. */
+/** Comment bodies are capped well below the Gitea/Forgejo/GitHub 65536-char limit. */
 const MAX_COMMENT_CHARS = 60000;
 
 /** Fill `{count}` in the appendix labels. */

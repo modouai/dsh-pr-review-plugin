@@ -2,11 +2,11 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-面向 DeepSeek Harness Web UI 的 AI 拉取请求审查插件。插件监视 Forgejo 或 GitHub 仓库的 open PR，用当前 Harness 会话背后的模型审查新提交，并在主对话旁边的面板里呈现完整审查结果：报告、逐文件分析、多轮审查与最终结论。审查结论以普通 PR 评论发布，后续讨论在主对话里进行。
+面向 DeepSeek Harness Web UI 的 AI 拉取请求审查插件。插件监视 GitHub 或 Gitea 系（Gitea / Forgejo / Codeberg）仓库的 open PR，用当前 Harness 会话背后的模型审查新提交，并在主对话旁边的面板里呈现完整审查结果：报告、逐文件分析、多轮审查与最终结论。审查结论以普通 PR 评论发布，后续讨论在主对话里进行。
 
 ## 功能
 
-- **按工作区识别仓库**：每个会话工作区的 git `origin` 决定仓库与平台（Forgejo / GitHub）；面板只显示该仓库的 PR，切换工作区即切换对应的审查数据。
+- **按工作区识别仓库**：每个会话工作区的 git `origin` 决定仓库与平台（GitHub，或 Gitea 系：Gitea / Forgejo / Codeberg）；面板只显示该仓库的 PR，切换工作区即切换对应的审查数据。
 - **自动轮次**：插件后台轮询 open PR，出现新提交（head sha 变化）即自动开始新一轮审查（可用 `autoReview` 关闭）。
 - **审查面板**：会话内右侧边栏面板——变更文件、diff、逐文件分析三列布局，列宽可拖动；点击 diff 中的 hunk 查看逐段分析，也可切换到完整文件视图（新增行高亮）。
 - **最终结论**：后台生成，展示阶段进度、可随时取消；结论带审查覆盖率（已分析 X/Y 文件）与版本号。报告或文件分析在结论之后又更新时，面板提示结论已过期并可重新生成（`autoReconclude` 可改为自动）。
@@ -25,6 +25,7 @@
 
 - 已安装 DeepSeek Harness（DSH）Web UI，版本 0.2.2-rc.1 起、0.2 线内（见 `engines.dsh`；不满足时安装/启动会拒绝）。插件以 Cordis function-plugin 形式运行，模型调用走 Harness 的 `llm` 服务（无需单独 API key，默认用 Harness 当前模型，也可通过 `provider` / `model` 指定）。
 - 本机装有 `git` 命令行，用于解析工作区的 `origin` remote。
+- 受支持的代码平台：GitHub 走 REST API v3；Gitea、Forgejo、Codeberg 共用 Gitea API（`/api/v1`），一个适配器即可覆盖（Forgejo 是 Gitea 的硬分叉，保持 API 兼容）。Gogs 与 GitLab 的 API 不同，**不支持**。
 - 代码平台的 token，需有读取 PR 与发布评论的权限（见下）。
 
 ## 安装
@@ -50,8 +51,8 @@ dsh --profile <name>
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `platform` | `forgejo` | `forgejo` 或 `github` |
-| `baseUrl` | 空 | Forgejo 站点根；留空按工作区 `origin` 自动识别。GitHub 填 `https://api.github.com` |
+| `platform` | `forgejo` | `github`；或 `gitea` / `forgejo`（同属 Gitea API，两个值等价，`gitea` 更贴近上游叫法） |
+| `baseUrl` | 空 | Gitea/Forgejo 站点根；留空按工作区 `origin` 自动识别。GitHub 填 `https://api.github.com` |
 | `repo` | 空 | `owner/name`；留空按工作区 `origin` 自动识别 |
 | `token` | 空 | 留空依次回退：环境变量、平台 CLI 登录。写 PR 评论需要该 token 有评论权限 |
 | `pollSeconds` | `60` | 轮询间隔，最小 15 秒 |
@@ -63,7 +64,7 @@ dsh --profile <name>
 | `maxDiffCharsPerFile` | `14000` | 单个文件送入模型的最大 diff 字符数 |
 | `maxFilesPerReview` | `60` | 每次审查纳入的文件上限 |
 
-token 回退顺序：`platform=forgejo` → `FORGEJO_TOKEN` / `PR_REVIEW_TOKEN` / `tea` 登录；`platform=github` → `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth login`。
+token 回退顺序：`platform=github` → `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth login`；`platform=gitea` 或 `forgejo` → `GITEA_TOKEN` / `FORGEJO_TOKEN` / `PR_REVIEW_TOKEN` / `tea` 登录。
 
 ## 使用
 
@@ -78,7 +79,7 @@ token 回退顺序：`platform=forgejo` → `FORGEJO_TOKEN` / `PR_REVIEW_TOKEN` 
 
 ## 数据位置
 
-审查结果按仓库缓存在 `~/.dsh/pr-review/<platform>-<repo>.json`。所有结论版本与轮次历史都在缓存里，重启后仍可查看；diff 与文件内容按需重新拉取。
+审查结果按仓库缓存在 `~/.dsh/pr-review/<platform>-<repo>.json`（`gitea` 与 `forgejo` 共用 `forgejo` 前缀，两个名字读同一份缓存）。所有结论版本与轮次历史都在缓存里，重启后仍可查看；diff 与文件内容按需重新拉取。
 
 ## 说明
 

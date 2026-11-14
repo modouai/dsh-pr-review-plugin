@@ -1,9 +1,11 @@
 /**
  * Platform adapters for the PR review plugin.
  *
- * Two hosts are supported behind one shape:
- * - Forgejo (self-hosted, REST under /api/v1, tea CLI login as token fallback)
+ * Two API families are supported behind one shape:
  * - GitHub (API v3, gh CLI login as token fallback)
+ * - Gitea-compatible hosts (Gitea / Forgejo / Codeberg): REST under /api/v1,
+ *   tea CLI login as token fallback. Forgejo is a hard fork of Gitea and keeps
+ *   the same API, so one adapter covers both names.
  *
  * Callers only see the normalized pull records produced here.
  */
@@ -16,11 +18,15 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
-const PLATFORMS = new Set(['forgejo', 'github']);
+/** Accepted `platform` values; `gitea` and `forgejo` share one API family. */
+const PLATFORMS = new Set(['github', 'gitea', 'forgejo']);
 
 /** Normalize user config into one effective provider description. */
 export function resolveProviderConfig(config) {
-  const platform = PLATFORMS.has(config.platform) ? config.platform : 'forgejo';
+  const configured = PLATFORMS.has(config.platform) ? config.platform : 'forgejo';
+  // `gitea` is an alias: keep the historical `forgejo` slug so per-platform
+  // caches written before the alias existed stay readable.
+  const platform = configured === 'gitea' ? 'forgejo' : configured;
   const rawBase = typeof config.baseUrl === 'string' && config.baseUrl.trim() !== ''
     ? config.baseUrl.trim().replace(/\/+$/, '')
     : platform === 'github'
@@ -31,7 +37,7 @@ export function resolveProviderConfig(config) {
     platform,
     baseUrl: rawBase,
     repo,
-    label: platform === 'github' ? `GitHub ${repo}` : `Forgejo ${repo}`,
+    label: platform === 'github' ? `GitHub ${repo}` : `Gitea/Forgejo ${repo}`,
   };
 }
 
@@ -100,7 +106,7 @@ export async function resolveToken(config, provider) {
   if (typeof config.token === 'string' && config.token.trim() !== '') return config.token.trim();
   const envNames = provider.platform === 'github'
     ? ['GITHUB_TOKEN', 'GH_TOKEN']
-    : ['FORGEJO_TOKEN', 'PR_REVIEW_TOKEN'];
+    : ['GITEA_TOKEN', 'FORGEJO_TOKEN', 'PR_REVIEW_TOKEN'];
   for (const name of envNames) {
     const value = process.env[name];
     if (typeof value === 'string' && value.trim() !== '') return value.trim();

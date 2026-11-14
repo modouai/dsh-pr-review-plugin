@@ -4,13 +4,14 @@
   "private": true,
   "type": "module",
   "main": "index.js",
-  "description": "Review Forgejo and GitHub pull requests from the DeepSeek Harness Web UI: automatic rounds, per-file analysis, conclusion history, and chat-integrated review tools.",
+  "description": "Review GitHub and Gitea/Forgejo pull requests from the DeepSeek Harness Web UI: automatic rounds, per-file analysis, conclusion history, and chat-integrated review tools.",
   "keywords": [
     "dsh",
     "deepseek-harness",
     "cordis",
     "pull-request",
     "code-review",
+    "gitea",
     "forgejo",
     "github"
   ],

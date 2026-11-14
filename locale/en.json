@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "PR review",
-    "description": "Reviews Forgejo and GitHub pull requests: automatic report, entry-first file order, per-file explanation, and follow-up conversation."
+    "description": "Reviews GitHub and Gitea/Forgejo pull requests: automatic report, entry-first file order, per-file explanation, and follow-up conversation."
   },
   "panel": {
     "title": "PR review",
@@ -23,7 +23,7 @@
     "conclude": "Final conclusion",
     "concluding": "Concluding…",
     "empty": "No pull requests loaded yet.",
-    "noToken": "Forgejo token missing. Add a token to the plugin config.",
+    "noToken": "Gitea/Forgejo token missing. Add a token to the plugin config.",
     "orderHint": "Entry files come first: review in this order.",
     "changed": "changed",
     "added": "added",

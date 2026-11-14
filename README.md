@@ -2,11 +2,11 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-AI-assisted pull request review for the DeepSeek Harness Web UI. The plugin watches a Forgejo or GitHub repository for open pull requests, reviews new commits with the model behind your Harness session, and shows the whole review — report, per-file analysis, rounds, and final conclusion — in a panel docked next to the chat. Finished reviews are published as regular pull request comments, and follow-up discussion happens in the main conversation.
+AI-assisted pull request review for the DeepSeek Harness Web UI. The plugin watches a GitHub or Gitea-compatible repository for open pull requests, reviews new commits with the model behind your Harness session, and shows the whole review — report, per-file analysis, rounds, and final conclusion — in a panel docked next to the chat. Finished reviews are published as regular pull request comments, and follow-up discussion happens in the main conversation.
 
 ## Features
 
-- **Workspace aware**: each session's workspace `git origin` selects the repository and platform (Forgejo or GitHub); the panel only shows pull requests from that repository, and switching workspaces switches reviews with it.
+- **Workspace aware**: each session's workspace `git origin` selects the repository and platform (GitHub, or Gitea-compatible hosts: Gitea / Forgejo / Codeberg); the panel only shows pull requests from that repository, and switching workspaces switches reviews with it.
 - **Automatic rounds**: the plugin polls for open pull requests and starts a new review round whenever new commits land (`autoReview` can be turned off).
 - **Review panel**: a right-sidebar panel inside the session — changed files, diff, and per-file analysis in three resizable columns; click any hunk in the diff for its per-segment analysis, or switch to the full file (with added lines highlighted).
 - **Final conclusion**: generated in the background with visible stages and cancel support; carries review coverage (X of Y files analyzed) and a version number. When the report or file analysis changes afterwards, the panel flags the outdated conclusion and offers regeneration (automatic with `autoReconclude`).
@@ -25,6 +25,7 @@ Write: `review_update_analysis`, `review_update_report`, `review_update_overview
 
 - A DeepSeek Harness (DSH) installation with the Web UI, 0.2.2-rc.1 or later in the 0.2 line (declared as `engines.dsh`; incompatible versions are rejected at install/start). The plugin runs as a Cordis function plugin and uses the Harness `llm` service for model calls (no separate API key — it uses your Harness model, or the `provider` / `model` you configure).
 - The `git` CLI, so the plugin can resolve a workspace's `origin` remote.
+- A supported code host. GitHub uses the REST API v3. Gitea, Forgejo and Codeberg share the Gitea API (`/api/v1`), so one adapter covers them; Forgejo is a hard fork of Gitea and keeps that API. Gogs and GitLab expose different APIs and are **not** supported.
 - A code host token with permission to read pull requests and post comments (see below).
 
 ## Install
@@ -50,8 +51,8 @@ The bundle ships its default configuration in [`cordis.patch.yml`](cordis.patch.
 
 | Key | Default | Description |
 |---|---|---|
-| `platform` | `forgejo` | `forgejo` or `github` |
-| `baseUrl` | empty | Forgejo site root; leave empty to resolve from the workspace `origin`. For GitHub use `https://api.github.com` |
+| `platform` | `forgejo` | `github`, or `gitea` / `forgejo` (the two are aliases for the same Gitea API; `gitea` is accepted for readers coming from upstream) |
+| `baseUrl` | empty | Gitea/Forgejo site root; leave empty to resolve from the workspace `origin`. For GitHub use `https://api.github.com` |
 | `repo` | empty | `owner/name`; leave empty to resolve from the workspace `origin` |
 | `token` | empty | Leave empty to fall back to environment variables, then the platform CLI login. Posting comments requires a token with comment permission |
 | `pollSeconds` | `60` | Polling interval, minimum 15 seconds |
@@ -63,7 +64,7 @@ The bundle ships its default configuration in [`cordis.patch.yml`](cordis.patch.
 | `maxDiffCharsPerFile` | `14000` | Maximum diff characters sent to the model per file |
 | `maxFilesPerReview` | `60` | Maximum number of files included per review |
 
-Token resolution order: `platform=forgejo` → `FORGEJO_TOKEN` / `PR_REVIEW_TOKEN` / `tea` login; `platform=github` → `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth login`.
+Token resolution order: `platform=github` → `GITHUB_TOKEN` / `GH_TOKEN` / `gh auth login`; `platform=gitea` or `forgejo` → `GITEA_TOKEN` / `FORGEJO_TOKEN` / `PR_REVIEW_TOKEN` / `tea` login.
 
 ## Usage
 
@@ -78,7 +79,7 @@ Token resolution order: `platform=forgejo` → `FORGEJO_TOKEN` / `PR_REVIEW_TOKE
 
 ## Data
 
-Review results are cached per repository under `~/.dsh/pr-review/<platform>-<repo>.json`. All conclusion versions and round history live in that cache and survive restarts; diffs and file contents are re-fetched on demand.
+Review results are cached per repository under `~/.dsh/pr-review/<platform>-<repo>.json` (`gitea` uses the `forgejo` slug, so both names read the same cache). All conclusion versions and round history live in that cache and survive restarts; diffs and file contents are re-fetched on demand.
 
 ## Notes
 
