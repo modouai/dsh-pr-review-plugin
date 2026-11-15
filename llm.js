@@ -167,7 +167,7 @@ const REVIEW_FRAMEWORK = [
   '5. 性能：循环内同步 IO 或逐条查询；N+1；列表是否缺分页或无界加载。',
   '6. 跨平台：路径分隔符与大小写、换行符与编码、平台分支是否三态齐全且有兜底。',
   '常见缺陷专项：静默吞错（空 catch 或丢掉错误）必须指出；多布尔位状态堆积；格式变更未迁移；无分页/无界加载。',
-  '证据要求：报阻塞前先自问是否已有证据（调用方、基类或 wrapper、常量、schema 与数据库约束、测试）；只依据给出的 diff 与上下文，不臆测未提供的文件；无法验证的怀疑降级为建议，并说明不确定在哪里。',
+  '证据要求：报阻塞前先自问是否已有证据（调用方、基类或 wrapper、常量、schema 与数据库约束、测试）；只依据给出的 diff 与上下文，不臆测未提供的文件；无法验证的怀疑降级为建议，并在 point 末尾用「（不确定：……」写明不确定在哪里。',
   '每条问题写清「问题 + 影响 + 修法」，一条只写一个核心问题；不要凑数，也不要只写「建议检查 X」。',
   '先做一轮化简审查：重复分支、兼容回退、单次使用的包装层、过早抽象是否可删；规模超标时提出拆分（软阈值：单函数 > 80 行、组件 > 300 行、文件 > 500 行、嵌套 > 3 层）。不理解旧代码为何存在前不要建议删除。',
 ];
@@ -185,9 +185,34 @@ function reviewerSystem(language) {
   ].join('\n');
 }
 
+/**
+ * The subset a short structured task needs. The feedback pass only maps replies onto four
+ * states; the six axes and the simplification pass would add tokens without changing the answer.
+ */
+function compactSystem(language) {
+  return [
+    '你是一名资深代码审查员，只做结构化判定，不重新审查代码。',
+    '严重度只有两档：block（必须修复才能合并）与 suggest（可以不修）。',
+    '只依据给出的审查意见与评论回复判断，不臆测未提供的信息；不确定时选最保守的状态并写明依据。',
+    language === 'en'
+      ? 'Write every human-readable field in English; keep code identifiers and quoted text verbatim.'
+      : '所有输出（代码标识符与原文引用除外）使用简体中文。',
+  ].join('\n');
+}
+
+/**
+ * `zh`/`en` from any case or region form ('EN', 'en-US', 'en_us'); anything else — including a
+ * missing or malformed value — reads as the Chinese default. One normalizer for the prompt
+ * builders and the published comment, so the two can never disagree about the language.
+ */
+function normalizeLanguage(value) {
+  const tag = typeof value === 'string' ? value.trim().toLowerCase().split(/[-_]/)[0] : '';
+  return tag === 'en' ? 'en' : 'zh';
+}
+
 /** Builder options carry the comment language; anything else keeps the Chinese default. */
 function languageOf(options) {
-  return options !== null && typeof options === 'object' && options.language === 'en' ? 'en' : 'zh';
+  return normalizeLanguage(options !== null && typeof options === 'object' ? options.language : undefined);
 }
 
 
@@ -197,7 +222,7 @@ const FILE_LIST_LIMIT = 80;
 export function buildReportPrompt(pull, files, diffFiles, config) {
   // The report prompt is the only one that receives the settings object, so the language
   // arrives as `commentLanguage` rather than through the builder options.
-  const language = languageOf({ language: config?.commentLanguage });
+  const language = normalizeLanguage(config?.commentLanguage);
   const maxChars = config.maxDiffCharsPerFile ?? 14000;
   const reportChars = Math.min(maxChars, 2200);
   const order = heuristicOrder(diffFiles, files);
@@ -275,7 +300,7 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
     '  "logic": "整体逻辑分析（只写全局）：这个文件原来做什么 → 现在整体变成怎样 → 函数/模块的上下游调用关系 → 数据与状态怎么流动 → 关键边界条件与错误路径。不要复述 walkthrough 中各段落的具体改动细节。篇幅随改动规模自适应：大改动 400-800 字，小改动 200-400 字即可，不要为凑字数填充。",',
     '  "walkthrough": [{ "title": "段落/函数名 + 一句话作用（如「cleanupInterruptedMacInstall：启动时清理中断残留」），不要写 hunk 编号", "detail": "用人话讲清：这段做了什么、为什么需要它、影响谁、有什么风险；2-5 句；不要复述 logic 的整体链路，不要把审查意见写进来", "hunk": 1, "context": { "label": "所属函数/类名", "startLine": 230, "endLine": 275 } }],',
     '  "changes": "逐类说明具体变化：新增了什么、删除了什么、重命名/移动了什么",',
-    '  "issues": [{ "severity": "block | suggest", "point": "问题 + 影响 + 修法（一条只写一个核心问题；无法验证时降级为 suggest 并说明依据）", "line": 0 }],',
+    '  "issues": [{ "severity": "block | suggest", "point": "问题 + 影响 + 修法（一条只写一个核心问题；无法验证时降级为 suggest，并在末尾用「（不确定：……」说明）", "line": 0 }],',
     '  "suggestions": ["可执行的修改建议"],',
     '  "verdict": "block | suggest | pass"',
     '}',
@@ -646,7 +671,7 @@ export function buildFeedbackPrompt(pull, items, comments, options = {}) {
     '}',
     'status 含义：fixed-claimed=作者表示已修复或已改；disputed=作者认为不成立/误报；accepted=作者认可但尚未修复；question=作者在询问澄清。只输出回复中确实提到的条目；没有提到的条目不要出现在 items 里。',
   ].join('\n');
-  return { system: reviewerSystem(languageOf(options)), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 3000, timeoutMs: 300_000, temperature: 0.1 };
+  return { system: compactSystem(languageOf(options)), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 3000, timeoutMs: 300_000, temperature: 0.1 };
 }
 
 /** Parse the feedback model reply into per-item states. */
@@ -1129,7 +1154,7 @@ export function buildCommentAppendix(appendix, language = 'zh', compact = false)
  * guard that shrinks the appendix before touching the conclusion.
  */
 export function buildCommentMarkdown(conclusion, pull, round, options = {}) {
-  const language = options.language === 'en' ? 'en' : 'zh';
+  const language = normalizeLanguage(options.language);
   const zh = language === 'zh';
   const labels = COMMENT_VERDICT_LABELS[language];
   const verdict = labels[conclusion?.verdict] ?? labels.suggest;

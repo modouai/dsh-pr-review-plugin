@@ -12,6 +12,7 @@ import {
   buildCommentMarkdown,
   buildConcludePrompt,
   buildExplainPrompt,
+  buildFeedbackPrompt,
   buildReportPrompt,
   calibrateVerdict,
   callModel,
@@ -529,6 +530,53 @@ test('explain prompt: test gaps, adaptive length and the issue shape', () => {
   assert.match(text, /问题 \+ 影响 \+ 修法/);
 });
 
+test('prompt language normalizes case and region tags and falls back to Chinese', () => {
+  const pull = {
+    repo: 'group/project', number: 1, title: 't', author: 'a',
+    headRef: 'h', baseRef: 'b', changedFiles: 1, additions: 1, deletions: 0, body: '',
+  };
+  const file = { path: 'a.js', status: 'modified', additions: 1, deletions: 0 };
+  const reportSystem = (commentLanguage) => buildReportPrompt(
+    pull, [file], new Map(), { maxDiffCharsPerFile: 1000, commentLanguage },
+  ).system;
+
+  for (const value of ['en', 'EN', 'en-US', 'en_us', ' en ']) {
+    assert.match(reportSystem(value), /Write every human-readable field in English/, String(value));
+  }
+  for (const value of ['zh', 'fr', '', '  ', undefined, null, 42]) {
+    assert.doesNotMatch(reportSystem(value), /Write every human-readable field in English/, String(value));
+    assert.match(reportSystem(value), /使用简体中文/, String(value));
+  }
+
+  // The builder-options path normalizes exactly the same way.
+  assert.match(buildExplainPrompt(pull, file, '', null, '', '', { language: 'EN-us' }).system, /in English/);
+  assert.doesNotMatch(buildExplainPrompt(pull, file, '', null, '', '').system, /in English/);
+});
+
+test('the report prompt keeps the output contract even though its wording changed', () => {
+  const prompt = buildReportPrompt(
+    {
+      repo: 'group/project', number: 1, title: 't', author: 'a',
+      headRef: 'h', baseRef: 'b', changedFiles: 0, additions: 0, deletions: 0, body: '',
+    },
+    [], new Map(), { maxDiffCharsPerFile: 1000 },
+  );
+  const text = prompt.messages[0].content[0].text;
+  for (const field of ['"verdict"', '"summary"', '"risks"', '"order"', '"focus"']) {
+    assert.ok(text.includes(field), `missing ${field}`);
+  }
+  assert.match(text, /block \| suggest \| pass/);
+});
+
+test('the feedback prompt uses the compact system, not the full framework', () => {
+  const pull = { repo: 'group/project', number: 1, title: 't' };
+  const compact = buildFeedbackPrompt(pull, [], [], { language: 'zh' }).system;
+  assert.match(compact, /严重度/);
+  assert.doesNotMatch(compact, /化简审查/);
+  assert.doesNotMatch(compact, /六个维度/);
+  assert.doesNotMatch(buildFeedbackPrompt(pull, [], [], { language: 'en' }).system, /使用简体中文/);
+});
+
 test('conclude prompt: names residual risks and follows the comment language', () => {
   const prompt = buildConcludePrompt(
     {
@@ -544,6 +592,20 @@ test('conclude prompt: names residual risks and follows the comment language', (
   assert.match(text, /未发现阻塞项/);
   assert.match(text, /未验证项与需要补的测试/);
   assert.match(prompt.system, /Write every human-readable field in English/);
+
+  // The Chinese default carries the same contract, just in the other language.
+  const zh = buildConcludePrompt(
+    {
+      repo: 'group/project', number: 1, title: 't', author: 'a',
+      headRef: 'h', baseRef: 'b', changedFiles: 0, additions: 0, deletions: 0, body: '',
+    },
+    null,
+    new Map(),
+    null,
+  );
+  assert.match(zh.messages[0].content[0].text, /未发现阻塞项/);
+  assert.match(zh.messages[0].content[0].text, /问题 \+ 影响 \+ 修法/);
+  assert.match(zh.system, /使用简体中文/);
 });
 
 test('parseFeedbackReply: regression', () => {
