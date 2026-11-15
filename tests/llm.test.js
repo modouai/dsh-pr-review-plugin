@@ -491,6 +491,61 @@ test('prompts: name the real platform and keep unknown values neutral', () => {
   assert.ok(explain.messages[0].content[0].text.includes('平台：GitLab；'));
 });
 
+test('prompts: one stack-agnostic review framework, language follows the comment setting', () => {
+  const pull = {
+    repo: 'group/project', number: 1, title: 't', author: 'a',
+    headRef: 'h', baseRef: 'b', changedFiles: 1, additions: 1, deletions: 0, body: '',
+  };
+  const files = [{ path: 'a.js', status: 'modified', additions: 1, deletions: 0 }];
+  const zh = buildReportPrompt(pull, files, new Map(), { maxDiffCharsPerFile: 14000, commentLanguage: 'zh' });
+  const system = zh.system;
+
+  // The project shape is inferred from the PR, not hard-coded to one tech stack.
+  assert.doesNotMatch(system, /Electron \+ React \+ TypeScript/);
+  for (const axis of ['正确性', '可读性', '架构与一致性', '安全', '性能', '跨平台']) {
+    assert.match(system, new RegExp(axis));
+  }
+  assert.match(system, /证据要求/);
+  assert.match(system, /化简审查/);
+  assert.match(system, /使用简体中文/);
+
+  const en = buildReportPrompt(pull, files, new Map(), { maxDiffCharsPerFile: 14000, commentLanguage: 'en' });
+  assert.match(en.system, /Write every human-readable field in English/);
+  assert.doesNotMatch(en.system, /使用简体中文/);
+});
+
+test('explain prompt: test gaps, adaptive length and the issue shape', () => {
+  const prompt = buildExplainPrompt(
+    {
+      repo: 'group/project', number: 1, title: 't', author: 'a',
+      headRef: 'h', baseRef: 'b', changedFiles: 1, additions: 1, deletions: 0, body: '',
+    },
+    { path: 'a.js', status: 'modified', additions: 1, deletions: 0 },
+    '', null, '', '', { language: 'zh' },
+  );
+  const text = prompt.messages[0].content[0].text;
+  assert.match(text, /同时看测试/);
+  assert.match(text, /篇幅随改动规模自适应/);
+  assert.match(text, /问题 \+ 影响 \+ 修法/);
+});
+
+test('conclude prompt: names residual risks and follows the comment language', () => {
+  const prompt = buildConcludePrompt(
+    {
+      repo: 'group/project', number: 1, title: 't', author: 'a',
+      headRef: 'h', baseRef: 'b', changedFiles: 0, additions: 0, deletions: 0, body: '',
+    },
+    null,
+    new Map(),
+    null,
+    { language: 'en' },
+  );
+  const text = prompt.messages[0].content[0].text;
+  assert.match(text, /未发现阻塞项/);
+  assert.match(text, /未验证项与需要补的测试/);
+  assert.match(prompt.system, /Write every human-readable field in English/);
+});
+
 test('parseFeedbackReply: regression', () => {
   const parsed = parseFeedbackReply(JSON.stringify({
     items: [

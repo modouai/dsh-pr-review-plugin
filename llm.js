@@ -150,20 +150,54 @@ export async function callModel(ctx, config, request) {
   }
 }
 
-const REVIEWER_SYSTEM = [
-  '你是一名资深代码审查员与代码分析者，为桌面应用（Electron + React + TypeScript）做拉取请求审查。',
-  '审查口径只有两档严重度：',
-  '- block（阻塞）：必须修复才能合并，例如安全漏洞、数据丢失、功能损坏、明显逻辑错误。',
+/**
+ * Review framework shared by every prompt: severity, the six axes, evidence rules and the
+ * simplification pass. Wording is stack-agnostic on purpose — the plugin reviews any repository,
+ * so the project shape is inferred from the PR's file list and diff.
+ */
+const REVIEW_FRAMEWORK = [
+  '严重度只有两档：',
+  '- block（阻塞）：必须修复才能合并，例如安全漏洞、数据丢失、功能损坏、明确的逻辑错误。',
   '- suggest（建议）：可以不修，例如缺失测试、抽象不当、错误处理薄弱、命名或风格问题。',
-  '分析代码逻辑时要说清来龙去脉：这段代码原来做什么、现在改成怎样、被谁调用、影响哪些数据与状态。',
-  '只依据提供的 diff 与上下文判断，不要臆测未给出的文件内容；不确定就说不确定。',
-  '用户用简体中文，所有输出必须使用简体中文。',
-].join('\n');
+  '从六个维度看代码（按 PR 的文件清单与 diff 推断技术栈，不要预设框架）：',
+  '1. 正确性：是否匹配 PR 描述与需求；空值与边界、错误路径、状态流转是否完整（多个布尔位拼一个逻辑状态时应改为显式状态机）；用户数据/配置格式变更是否走迁移。',
+  '2. 可读性：命名与控制流是否直接；嵌套是否过深；注释解释 WHY 而不是复述 WHAT。',
+  '3. 架构与一致性：是否遵循仓库既有模式；跨层契约（类型、协议、注册表、配置）是否同步；是否有单次使用的包装层或过早抽象。',
+  '4. 安全：外部输入是否校验；是否引入注入/XSS 面；密钥与令牌是否硬编码；权限与沙箱边界是否被绕过。',
+  '5. 性能：循环内同步 IO 或逐条查询；N+1；列表是否缺分页或无界加载。',
+  '6. 跨平台：路径分隔符与大小写、换行符与编码、平台分支是否三态齐全且有兜底。',
+  '常见缺陷专项：静默吞错（空 catch 或丢掉错误）必须指出；多布尔位状态堆积；格式变更未迁移；无分页/无界加载。',
+  '证据要求：报阻塞前先自问是否已有证据（调用方、基类或 wrapper、常量、schema 与数据库约束、测试）；只依据给出的 diff 与上下文，不臆测未提供的文件；无法验证的怀疑降级为建议，并说明不确定在哪里。',
+  '每条问题写清「问题 + 影响 + 修法」，一条只写一个核心问题；不要凑数，也不要只写「建议检查 X」。',
+  '先做一轮化简审查：重复分支、兼容回退、单次使用的包装层、过早抽象是否可删；规模超标时提出拆分（软阈值：单函数 > 80 行、组件 > 300 行、文件 > 500 行、嵌套 > 3 层）。不理解旧代码为何存在前不要建议删除。',
+];
+
+/** The shared system prompt, with the output language the comment language asks for. */
+function reviewerSystem(language) {
+  return [
+    '你是一名资深代码审查员与代码分析者，负责审查拉取请求；技术栈以 PR 的实际文件与 diff 为准。',
+    ...REVIEW_FRAMEWORK,
+    '分析代码逻辑时要说清来龙去脉：这段代码原来做什么、现在改成怎样、被谁调用、影响哪些数据与状态。',
+    '不要讨论与本次改动无关的既有问题，除非这次改动会触发或放大它。',
+    language === 'en'
+      ? 'Write every human-readable field in English; keep code identifiers, paths and quoted code verbatim.'
+      : '所有输出（代码标识符、路径与原文引用除外）使用简体中文。',
+  ].join('\n');
+}
+
+/** Builder options carry the comment language; anything else keeps the Chinese default. */
+function languageOf(options) {
+  return options !== null && typeof options === 'object' && options.language === 'en' ? 'en' : 'zh';
+}
+
 
 const FILE_LIST_LIMIT = 80;
 
 /** Report prompt: one call over the whole pull request, with per-file truncation. */
 export function buildReportPrompt(pull, files, diffFiles, config) {
+  // The report prompt is the only one that receives the settings object, so the language
+  // arrives as `commentLanguage` rather than through the builder options.
+  const language = languageOf({ language: config?.commentLanguage });
   const maxChars = config.maxDiffCharsPerFile ?? 14000;
   const reportChars = Math.min(maxChars, 2200);
   const order = heuristicOrder(diffFiles, files);
@@ -191,16 +225,17 @@ export function buildReportPrompt(pull, files, diffFiles, config) {
     '请输出严格 JSON（不要输出 JSON 以外的解释）：',
     '{',
     '  "verdict": "block | suggest | pass",',
-    '  "summary": "2-4 句总体评价：这个 PR 做了什么、风险在哪、能否合并",',
-    '  "risks": [{ "severity": "block | suggest", "file": "路径", "point": "问题与建议" }],',
+    '  "summary": "2-4 句总体评价：这个 PR 做了什么、实现是否匹配 PR 描述、风险在哪、能否合并；没有阻塞项时明确写「未发现阻塞项」",',
+    '  "risks": [{ "severity": "block | suggest", "file": "路径", "point": "问题 + 影响 + 修法（一条只写一个核心问题）" }],',
     '  "order": [{ "file": "路径", "reason": "为什么先看它（它是什么入口、被谁调用、为什么值得先读）" }],',
     '  "focus": [{ "file": "路径", "point": "审查这个文件时重点看什么" }]',
     '}',
+    '先核对改动是否匹配 PR 描述与验收标准；描述与实现不一致时写进 risks。',
     'order 必须覆盖大部分变更文件，按「入口/协议层 → 核心逻辑 → 数据与存储 → UI → 测试 → 文档」排列；文件路径必须与清单完全一致。',
   ]
     .filter((line) => line !== '')
     .join('\n');
-  return { system: REVIEWER_SYSTEM, messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 16000, timeoutMs: 600_000 };
+  return { system: reviewerSystem(language), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 16000, timeoutMs: 600_000 };
 }
 
 
@@ -214,7 +249,8 @@ function numberLines(content, maxLines) {
 }
 
 /** Deep one-file explanation: the point is the logic walkthrough, not only findings. */
-export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fileContent) {
+export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fileContent, options = {}) {
+  const language = languageOf(options);
   const focus = typeof focusPoint === 'string' && focusPoint !== '' ? `\n审查提示：${focusPoint}` : '';
   const reportLine = report === null || report === undefined
     ? ''
@@ -236,22 +272,24 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
     '请输出严格 JSON。分析要详细、可读、面向要理解这次改动的人：',
     '{',
     '  "summary": "一句话概括这个文件的改动",',
-    '  "logic": "整体逻辑分析（只写全局）：这个文件原来做什么 → 现在整体变成怎样 → 函数/模块的上下游调用关系 → 数据与状态怎么流动 → 关键边界条件与错误路径。不要复述 walkthrough 中各段落的具体改动细节。400-800 字。",',
+    '  "logic": "整体逻辑分析（只写全局）：这个文件原来做什么 → 现在整体变成怎样 → 函数/模块的上下游调用关系 → 数据与状态怎么流动 → 关键边界条件与错误路径。不要复述 walkthrough 中各段落的具体改动细节。篇幅随改动规模自适应：大改动 400-800 字，小改动 200-400 字即可，不要为凑字数填充。",',
     '  "walkthrough": [{ "title": "段落/函数名 + 一句话作用（如「cleanupInterruptedMacInstall：启动时清理中断残留」），不要写 hunk 编号", "detail": "用人话讲清：这段做了什么、为什么需要它、影响谁、有什么风险；2-5 句；不要复述 logic 的整体链路，不要把审查意见写进来", "hunk": 1, "context": { "label": "所属函数/类名", "startLine": 230, "endLine": 275 } }],',
     '  "changes": "逐类说明具体变化：新增了什么、删除了什么、重命名/移动了什么",',
-    '  "issues": [{ "severity": "block | suggest", "point": "问题", "line": 0 }],',
+    '  "issues": [{ "severity": "block | suggest", "point": "问题 + 影响 + 修法（一条只写一个核心问题；无法验证时降级为 suggest 并说明依据）", "line": 0 }],',
     '  "suggestions": ["可执行的修改建议"],',
     '  "verdict": "block | suggest | pass"',
     '}',
-    'logic 只写全局、walkthrough 只写局部，两者不得互相复述；walkthrough 至少 2 条、按 diff 的 hunk 顺序覆盖主要改动；hunk 是该条分析对应的 diff hunk 序号（从 1 开始，按 @@ 出现顺序计数），不确定写 0；title 禁止出现「hunk」「第 N 段」这类编号；detail 面向第一次读这段代码的人，术语首次出现要顺带解释，问题与建议写到 issues/suggestions，不要写进 walkthrough；',
+    'logic 只写全局、walkthrough 只写局部，两者不得互相复述；walkthrough 按 diff 规模 1-3 条（改动很小时 1 条即可）、按 diff 的 hunk 顺序覆盖主要改动；hunk 是该条分析对应的 diff hunk 序号（从 1 开始，按 @@ 出现顺序计数），不确定写 0；title 禁止出现「hunk」「第 N 段」这类编号；detail 面向第一次读这段代码的人，术语首次出现要顺带解释，问题与建议写到 issues/suggestions，不要写进 walkthrough；',
     'context 用于在 diff 里展开这段改动所属的完整函数/类：label 写函数/类名，startLine/endLine 是它在上面「完整内容」里的起止行号（用给出的行号，1-based，跨语言通用）；该段改动不在任何函数/类内（如 Markdown、配置文件）或你不确定时，context 写 null。',
+    '同时看测试：这次改动需要补充或更新哪些测试；如果只给了实现、没有相关测试，在 summary 里点明这个测试空白。',
+    '如果这次改动引入重复分支、兼容回退或单次使用的包装层，用 suggest 指出可化简之处。',
     'issues 为空数组表示没有发现问题；line 用 diff 中的新文件行号，不确定写 0。',
   ].join('\n');
-  return { system: REVIEWER_SYSTEM, messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 12000, timeoutMs: 600_000 };
+  return { system: reviewerSystem(language), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 12000, timeoutMs: 600_000 };
 }
 
 /** Follow-up conversation about one file (or the whole PR when file is null). */
-export function buildChatPrompt(pull, file, explanation, report, history, question, conclusion) {
+export function buildChatPrompt(pull, file, explanation, report, history, question, conclusion, options = {}) {
   const contextLines = [
     `平台：${platformLabel(pull.platform)}；仓库：${pull.repo}`,
     `PR #${pull.number}：${pull.title}`,
@@ -327,7 +365,7 @@ export function buildChatPrompt(pull, file, explanation, report, history, questi
     '## 新问题',
     question,
     '',
-    '不要重复整个报告；需要时引用文件、函数与行号。使用简体中文。',
+    '不要重复整个报告；需要时引用文件、函数与行号。',
     '',
     '严格输出 JSON（不要 JSON 之外的文字）：',
     '{',
@@ -338,7 +376,7 @@ export function buildChatPrompt(pull, file, explanation, report, history, questi
     .filter((line) => line !== '')
     .join('\n');
   return {
-    system: REVIEWER_SYSTEM,
+    system: reviewerSystem(languageOf(options)),
     messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
     maxTokens: 4000,
     timeoutMs: 300_000,
@@ -437,14 +475,14 @@ export function buildConcludePrompt(pull, report, explanations, currentConclusio
     '请输出严格 JSON，作为合并前的最终审查结论：',
     '{',
     '  "verdict": "block | suggest | pass",',
-    '  "summary": "3-5 句最终结论：改动的价值、遗留风险、是否可合并",',
-    '  "blockers": [{ "id": "可选：沿用上一轮条目的 id", "file": "路径", "line": 0, "point": "必须修的问题" }],',
-    '  "suggestions": [{ "id": "可选：沿用上一轮条目的 id", "file": "路径", "line": 0, "point": "建议修改" }],',
-    '  "nextSteps": ["合并前要做的事，按顺序"]',
+    '  "summary": "3-5 句最终结论：改动的价值、实现是否匹配 PR 描述、遗留风险与测试空白、是否可合并；没有阻塞项时明确写「未发现阻塞项」",',
+    '  "blockers": [{ "id": "可选：沿用上一轮条目的 id", "file": "路径", "line": 0, "point": "问题 + 影响 + 修法（一条只写一个核心问题）" }],',
+    '  "suggestions": [{ "id": "可选：沿用上一轮条目的 id", "file": "路径", "line": 0, "point": "问题 + 影响 + 修法（一条只写一个核心问题）" }],',
+    '  "nextSteps": ["合并前要做的事，按顺序；未验证项与需要补的测试写进来"]',
     '}',
   );
   const user = lines.filter((line) => line !== '').join('\n');
-  return { system: REVIEWER_SYSTEM, messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 8000, timeoutMs: 300_000 };
+  return { system: reviewerSystem(languageOf(options)), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 8000, timeoutMs: 300_000 };
 }
 
 /** Normalize a report object so the browser half can trust the fields. */
@@ -585,7 +623,7 @@ export function compareComments(previousItems, currentItems) {
 }
 
 /** Prompt for parsing the developers' replies to our published review comment. */
-export function buildFeedbackPrompt(pull, items, comments) {
+export function buildFeedbackPrompt(pull, items, comments, options = {}) {
   const itemLines = (Array.isArray(items) ? items : [])
     .map((item) => `${item.index}. [${item.kind === 'blocker' ? '阻塞' : '建议'}] ${item.file === '' ? '' : `${item.file} — `}${item.point}`)
     .join('\n');
@@ -608,7 +646,7 @@ export function buildFeedbackPrompt(pull, items, comments) {
     '}',
     'status 含义：fixed-claimed=作者表示已修复或已改；disputed=作者认为不成立/误报；accepted=作者认可但尚未修复；question=作者在询问澄清。只输出回复中确实提到的条目；没有提到的条目不要出现在 items 里。',
   ].join('\n');
-  return { system: REVIEWER_SYSTEM, messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 3000, timeoutMs: 300_000, temperature: 0.1 };
+  return { system: reviewerSystem(languageOf(options)), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 3000, timeoutMs: 300_000, temperature: 0.1 };
 }
 
 /** Parse the feedback model reply into per-item states. */
