@@ -54,6 +54,7 @@ const EXPOSED = [
   'PublishPreviewModal',
   'DetailHeader',
   'FilesPane',
+  'isAnalyzing',
   'fileContentKey',
   'ConclusionBlock',
   'DiffView',
@@ -1028,6 +1029,16 @@ test('the full-file cache key changes with the reviewed head', () => {
   assert.notEqual(base, key(3, 'sha-a', 'src/b.js'));
 });
 
+test('isAnalyzing only accepts a usable progress total', () => {
+  const { parts } = loadClient();
+  assert.equal(parts.isAnalyzing({ total: 2, done: 0 }), true);
+  assert.equal(parts.isAnalyzing({ total: 0 }), false);
+  assert.equal(parts.isAnalyzing({ total: '3' }), false);
+  assert.equal(parts.isAnalyzing({ done: 1 }), false);
+  assert.equal(parts.isAnalyzing(null), false);
+  assert.equal(parts.isAnalyzing(undefined), false);
+});
+
 test('the file column shows batch progress and the manual analyze-all button', () => {
   const client = loadClient();
   const { parts, fake } = client;
@@ -1072,6 +1083,13 @@ test('the file column shows batch progress and the manual analyze-all button', (
   const degenerate = render({ analyzing: { total: 0, done: 0, failed: 0 } });
   assert.ok(degenerate.textOnly.includes(dict.fileUnit));
   assert.equal(degenerate.textOnly.includes(fill(dict.analyzingFiles, { done: 0, total: 0 })), false);
+  const noTotal = render({ analyzing: { done: 1, failed: 0 } });
+  assert.ok(noTotal.textOnly.includes(dict.fileUnit));
+
+  // Counts are clamped to the total: a bad payload never renders "5/3".
+  const clamped = render({ analyzing: { total: 2, done: 5, failed: 9 } });
+  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 2 })));
+  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFailed, { failed: 2 })));
 
   // The last file of a batch still reports progress until the host clears `analyzing`.
   const finishing = render({ analyzing: { total: 2, done: 2, failed: 0, current: '' } });

@@ -1116,19 +1116,31 @@ window.__ModuleLoader__.load({
      * detail area switches between the overview and a file; that entry lives here so it stays
      * in one place instead of moving with the pane headers.
      */
+    /**
+     * A usable batch progress: the host always sends a positive total while a batch runs.
+     * The file column and the poll loop share this so one cannot call it a batch while the
+     * other treats it as no batch.
+     */
+    function isAnalyzing(analyzing) {
+      return analyzing !== null
+        && analyzing !== undefined
+        && typeof analyzing.total === 'number'
+        && analyzing.total > 0;
+    }
+
     function FilesPane(props) {
       const { t, overviewMode, onSelectOverview, files, filePath, review, onOpenFile } = props;
       const width = typeof props.width === 'number' && props.width > 0 ? props.width : 0;
       const style = width === 0 ? undefined : { flex: `0 0 ${width}px`, minWidth: `${width}px` };
       // A batch always reports a positive total; anything else is not usable progress and
       // falls back to the plain file count instead of showing "0/0".
-      const analyzing = typeof props.analyzing?.total === 'number' && props.analyzing.total > 0
-        ? props.analyzing
-        : null;
+      const analyzing = isAnalyzing(props.analyzing) ? props.analyzing : null;
+      const done = analyzing === null ? 0 : Math.min(Math.max(analyzing.done ?? 0, 0), analyzing.total);
+      const failed = analyzing === null ? 0 : Math.min(Math.max(analyzing.failed ?? 0, 0), analyzing.total);
       const countLabel = analyzing === null
         ? `${files.length} ${t('fileUnit')}`
-        : fill(t('analyzingFiles'), { done: analyzing.done ?? 0, total: analyzing.total })
-          + ((analyzing.failed ?? 0) > 0 ? fill(t('analyzingFailed'), { failed: analyzing.failed }) : '');
+        : fill(t('analyzingFiles'), { done, total: analyzing.total })
+          + (failed > 0 ? fill(t('analyzingFailed'), { failed }) : '');
       return h(
         'aside',
         { className: 'prr-files', style },
@@ -3908,7 +3920,7 @@ window.__ModuleLoader__.load({
           const current = stateRef.current;
           if (current.prNumber === null) return;
           const analyzing = current.review?.analyzing ?? null;
-          if (current.review !== null && current.review.status !== 'reviewing' && analyzing === null) return;
+          if (current.review !== null && current.review.status !== 'reviewing' && !isAnalyzing(analyzing)) return;
           void loadReview(current.prNumber);
         }, 4000);
         const listTimer = setInterval(() => {
