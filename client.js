@@ -190,9 +190,6 @@ window.__ModuleLoader__.load({
         previewTitle: '发布预览',
         previewRound: '第 {round} 轮',
         previewRoundMeta: '第 {round} 轮 · v{version}',
-        previewLanguageZh: '语言：中文（zh）',
-        previewLanguageEn: '语言：English（en）',
-        previewLanguageNote: '语言由插件配置 commentLanguage 决定；发布会在该 PR 追加一条新评论。',
         previewLoading: '正在生成预览…',
         previewConfirm: '确认发布',
         previewSelectNoneHint: '没有勾选任何条目：请至少选中一条再发布。',
@@ -393,9 +390,6 @@ window.__ModuleLoader__.load({
         previewTitle: 'Publish preview',
         previewRound: 'Round {round}',
         previewRoundMeta: 'Round {round} · v{version}',
-        previewLanguageZh: 'Language: Chinese (zh)',
-        previewLanguageEn: 'Language: English (en)',
-        previewLanguageNote: 'The language comes from the commentLanguage setting; publishing appends a new comment to this pull request.',
         previewLoading: 'Building preview…',
         previewConfirm: 'Publish',
         previewSelectNoneHint: 'Nothing is selected: pick at least one item before publishing.',
@@ -2158,10 +2152,9 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** Publish preview dialog: exact markdown, language note, per-item selection, confirm/cancel. */
+    /** Publish preview dialog: exact markdown, per-item selection, confirm/cancel. */
     function PublishPreviewModal(props) {
       const { preview, t, busy, error, onConfirm, onCancel } = props;
-      const language = preview?.language === 'en' ? 'en' : 'zh';
       const conflict = typeof preview?.conflict === 'string' ? preview.conflict : '';
       const items = Array.isArray(preview?.items) ? preview.items : [];
       const selectionSupported = preview?.selectionSupported === true;
@@ -2266,11 +2259,6 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'prr-modal-body' },
-            h(
-              'div',
-              { className: 'prr-modal-note' },
-              `${language === 'en' ? t('previewLanguageEn') : t('previewLanguageZh')} · ${t('previewLanguageNote')}`,
-            ),
             itemList,
             selectionSupported
               ? h('div', { className: 'prr-modal-note' }, t('previewItemsHint'))

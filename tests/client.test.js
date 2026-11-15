@@ -1445,7 +1445,7 @@ test('already-published preview offers the append-anyway path', () => {
   }));
 
   assert.match(textOnly, /# PR 评论正文/);
-  assert.match(textOnly, /语言：中文/);
+  assert.doesNotMatch(textOnly, /语言：|Language:/);
   assert.match(textOnly, /已经发布过/);
   const append = elements.find(
     (node) => node.type === 'button' && /仍然追加/.test(fake.textOf(node)),
@@ -1473,7 +1473,7 @@ test('publishing conflict preview tells the user to retry later', () => {
     onCancel: () => {},
   }));
   assert.match(textOnly, /另一个发布任务正在进行/);
-  assert.match(textOnly, /语言：English（en）/);
+  assert.doesNotMatch(textOnly, /语言：|Language:/);
 });
 
 test('api surfaces host conflict codes for the publish branch', async () => {
