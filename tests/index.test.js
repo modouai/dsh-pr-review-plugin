@@ -1874,6 +1874,55 @@ async function roundReviewFetch(url) {
   throw new Error(`unexpected fetch in test: ${target}`);
 }
 
+/** Fetch fake for several pull requests at once (analysis slot tests). */
+async function multiPrFetch(url) {
+  const target = String(url);
+  if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
+  if (target.includes('/contents/')) {
+    return jsonResponse(200, {
+      encoding: 'base64',
+      content: Buffer.from('const value = 1;\n', 'utf8').toString('base64'),
+      size: 17,
+    });
+  }
+  if (target.includes('.diff')) return textResponse(200, BATCH_DIFF);
+  if (/\/pulls\/\d+\/files(?:\?.*)?$/.test(target)) {
+    return jsonResponse(200, [
+      { filename: 'src/a.js', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+      { filename: 'src/b.js', status: 'modified', additions: 1, deletions: 1, changes: 2 },
+    ]);
+  }
+  const detail = /\/pulls\/(\d+)(?:\?.*)?$/.exec(target);
+  if (detail !== null) {
+    const number = Number(detail[1]);
+    return jsonResponse(200, {
+      number,
+      title: `PR ${number}`,
+      body: '',
+      user: { login: 'dev' },
+      state: 'open',
+      merged: false,
+      additions: 2,
+      deletions: 1,
+      changed_files: 2,
+      head: { ref: 'feature', sha: `sha${number}` },
+      base: { ref: 'main', sha: 'def456' },
+      html_url: `https://git.example/acme/demo/pulls/${number}`,
+    });
+  }
+  throw new Error(`unexpected fetch in test: ${target}`);
+}
+
+/** A finished, unanalyzed review record for one pull request number. */
+function unanalyzedPr(number) {
+  const review = unanalyzedReview();
+  return {
+    ...review,
+    number,
+    pull: { ...review.pull, number, title: `PR ${number}`, url: `https://git.example/acme/demo/pulls/${number}` },
+  };
+}
+
 test('autoAnalyze explains every file of a finished round, one model call at a time', async () => {
   let active = 0;
   let peak = 0;
@@ -2085,6 +2134,81 @@ test('a restored entry without an explanation is analyzed again', async () => {
       (entry) => entry.file === 'src/a.js' && entry.status === 'done' && entry.explanation !== null,
     ));
     assert.equal(done.analyzing, null);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('failed batches release their analysis slots for later batches', async () => {
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText('{}')(options);
+    if (prompt.includes('PR #1：') || prompt.includes('PR #2：')) {
+      return (async function* () {
+        throw new Error('model exploded');
+      })();
+    }
+    return llmFromText(BATCH_EXPLANATION)(options);
+  };
+  const plugin = await setup({
+    fetch: multiPrFetch,
+    llm,
+    reviews: { 1: unanalyzedPr(1), 2: unanalyzedPr(2), 3: unanalyzedPr(3) },
+  });
+  try {
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 1 });
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 2 });
+    // Both batches only finish if every rejected call gave its slot back; a leak would
+    // starve them (and the third batch below) at the two-slot ceiling.
+    await plugin.waitFor(1, (current) => current.analyzing === null && (current.explanations ?? []).length === 2);
+    await plugin.waitFor(2, (current) => current.analyzing === null && (current.explanations ?? []).length === 2);
+
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 3 });
+    const done = await plugin.waitFor(3, (current) => current.analyzing === null
+      && (current.explanations ?? []).length === 2
+      && (current.explanations ?? []).every((entry) => entry.status === 'done'));
+    assert.equal(done.explanations.length, 2);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('aborted batches release their analysis slots for later batches', async () => {
+  const reportReply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '报告',
+    risks: [],
+    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+    focus: {},
+  });
+  let analyzeThird = false;
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    if (analyzeThird && prompt.includes('PR #3：')) return llmFromText(BATCH_EXPLANATION)(options);
+    return llmSlow(10_000, BATCH_EXPLANATION)(options);
+  };
+  const plugin = await setup({
+    fetch: multiPrFetch,
+    llm,
+    reviews: { 1: unanalyzedPr(1), 2: unanalyzedPr(2), 3: unanalyzedPr(3) },
+  });
+  try {
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 1 });
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 2 });
+    // Both calls are in flight and hold the two slots when the rounds roll.
+    await delay(50);
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    await plugin.call('/pr-review-api/review', 'POST', { number: 2, force: true });
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+    await plugin.waitFor(2, (current) => current.round === 2 && current.status === 'done');
+
+    analyzeThird = true;
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 3 });
+    const done = await plugin.waitFor(3, (current) => current.analyzing === null
+      && (current.explanations ?? []).length === 2
+      && (current.explanations ?? []).every((entry) => entry.status === 'done'));
+    assert.equal(done.explanations.length, 2);
   } finally {
     await plugin.dispose();
   }
