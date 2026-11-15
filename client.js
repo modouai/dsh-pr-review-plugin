@@ -3638,6 +3638,196 @@ window.__ModuleLoader__.load({
 
     // ---------- the review workspace ----------
 
+    /** Measure the panel: a narrow sidebar collapses the analysis column instead of a second screen. */
+    function usePanelResize({ sidebar, rootRef, setSidebarWidth }) {
+      React.useEffect(() => {
+        if (!sidebar) return undefined;
+        const node = rootRef.current;
+        if (node === null || node === undefined || typeof ResizeObserver === 'undefined') return undefined;
+        const observer = new ResizeObserver((entries) => {
+          const width = entries[0]?.contentRect?.width;
+          if (typeof width === 'number' && width > 0) setSidebarWidth(Math.round(width));
+        });
+        observer.observe(node);
+        return () => observer.disconnect();
+      }, [sidebar]);
+    }
+
+    /**
+     * Bind this session to the PR on screen — the main conversation's review_* tools default to
+     * it — and report the panel's focus, which the host turns into the runtime-context snapshot
+     * on the next model step. The report is debounced; an unchanged panel costs nothing.
+     */
+    function usePanelFocusReport({
+      sidebar, sessionId, prNumber, withRepoRef, focusRef,
+      mode, filePath, sidebarPane, selectedRoundNumber,
+    }) {
+      // Binding only ties this session to the PR on screen. The focus fields in its payload are
+      // the snapshot at bind time; later view changes are reported by the debounced /focus below.
+      React.useEffect(() => {
+        if (!sidebar) return undefined;
+        if (sessionId === '' || prNumber === null) return undefined;
+        void postJson(withRepoRef.current('/pr-review-api/active'), {
+          sessionId,
+          number: prNumber,
+          ...focusRef.current,
+        }).catch(() => {});
+        return () => {
+          void postJson(withRepoRef.current('/pr-review-api/active'), { sessionId }).catch(() => {});
+        };
+      }, [sidebar, sessionId, prNumber]);
+
+      React.useEffect(() => {
+        if (!sidebar) return undefined;
+        if (sessionId === '' || prNumber === null) return undefined;
+        const timer = setTimeout(() => {
+          void postJson(withRepoRef.current('/pr-review-api/focus'), {
+            sessionId,
+            number: prNumber,
+            ...focusRef.current,
+          }).catch(() => {});
+        }, 600);
+        return () => clearTimeout(timer);
+      }, [sidebar, sessionId, prNumber, mode, filePath, sidebarPane, selectedRoundNumber]);
+    }
+
+    /**
+     * Keeps the panel's data fresh: the review while a round or its analysis is running, the PR
+     * list slowly, the whole record while the sidebar is visible (tools rewrite it), and the
+     * conclusion stage every two seconds.
+     */
+    function useReviewPolling({ sidebar, stateRef, concludingActive, concludeWait, setConcludeWait, loadReview, loadList }) {
+      React.useEffect(() => {
+        const reviewTimer = setInterval(() => {
+          const current = stateRef.current;
+          if (current.prNumber === null) return;
+          const analyzing = current.review?.analyzing ?? null;
+          if (current.review !== null && current.review.status !== 'reviewing' && !isAnalyzing(analyzing)) return;
+          void loadReview(current.prNumber);
+        }, 4000);
+        const listTimer = setInterval(() => {
+          void loadList(false);
+        }, 20000);
+        return () => {
+          clearInterval(reviewTimer);
+          clearInterval(listTimer);
+        };
+      }, [loadReview, loadList]);
+
+      // The main-conversation tools rewrite the review data, so poll while the panel is visible
+      // and let the render catch up. Cheap read, no local state is overwritten.
+      React.useEffect(() => {
+        if (!sidebar) return undefined;
+        const timer = setInterval(() => {
+          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+          const number = stateRef.current.prNumber;
+          if (typeof number !== 'number') return;
+          void loadReview(number);
+        }, 5000);
+        return () => clearInterval(timer);
+      }, [sidebar, loadReview]);
+
+      React.useEffect(() => {
+        if (concludingActive === false && concludeWait === false) return undefined;
+        const timer = setInterval(() => {
+          const current = stateRef.current;
+          if (current.prNumber === null) return;
+          void loadReview(current.prNumber);
+        }, 2000);
+        return () => clearInterval(timer);
+      }, [concludingActive, concludeWait, loadReview]);
+
+      // The host may need a moment to flip `concluding` on; stop waiting if it never shows up.
+      React.useEffect(() => {
+        if (concludeWait === false || concludingActive === true) return undefined;
+        const timer = setTimeout(() => setConcludeWait(false), 25000);
+        return () => clearTimeout(timer);
+      }, [concludeWait, concludingActive]);
+    }
+
+    /** Pure derivations for the workspace: the ordered file list, findings, and the open file. */
+    function useWorkspaceDerived(review, filePath) {
+      const explanationFor = React.useMemo(() => (target) => {
+        if (review === null || target === '') return null;
+        return (review.explanations ?? []).find((entry) => entry.file === target) ?? null;
+      }, [review]);
+
+      const orderedFiles = React.useMemo(() => {
+        if (review === null) return [];
+        const byPath = new Map((review.files ?? []).map((file) => [file.path, file]));
+        const orderList = review.report?.order ?? [];
+        const orderIndex = new Map(orderList.map((item, index) => [item.file, index]));
+        const reasonMap = new Map(orderList.map((item) => [item.file, item.reason]));
+        const severityMap = new Map();
+        for (const entry of review.explanations ?? []) {
+          severityMap.set(entry.file, fileSeverityOf(entry));
+        }
+        const paths = [];
+        const seen = new Set();
+        for (const item of orderList) {
+          if (!seen.has(item.file)) {
+            paths.push(item.file);
+            seen.add(item.file);
+          }
+        }
+        for (const file of review.files ?? []) {
+          if (!seen.has(file.path)) {
+            paths.push(file.path);
+            seen.add(file.path);
+          }
+        }
+        return paths.map((path) => {
+          const file = byPath.get(path) ?? { path, status: 'changed', additions: 0, deletions: 0 };
+          return {
+            path,
+            status: file.status ?? 'changed',
+            additions: file.additions ?? 0,
+            deletions: file.deletions ?? 0,
+            order: (orderIndex.get(path) ?? orderIndex.size) + 1,
+            reason: reasonMap.get(path) ?? '',
+            severity: severityMap.get(path) ?? '',
+          };
+        });
+      }, [review]);
+
+      const explainedCount = React.useMemo(
+        () => (review?.explanations ?? []).filter((entry) => entry.status === 'done').length,
+        [review],
+      );
+
+      const fileFindings = React.useMemo(() => {
+        const groups = [];
+        const orderIndex = new Map((review?.report?.order ?? []).map((item, index) => [item.file, index]));
+        for (const entry of review?.explanations ?? []) {
+          if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
+          const issues = entry.explanation.issues ?? [];
+          const suggestions = entry.explanation.suggestions ?? [];
+          if (issues.length === 0 && suggestions.length === 0) continue;
+          groups.push({ file: entry.file, issues, suggestions });
+        }
+        groups.sort(
+          (a, b) =>
+            (orderIndex.get(a.file) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(b.file) ?? Number.MAX_SAFE_INTEGER),
+        );
+        return groups;
+      }, [review]);
+
+      const currentExplanation = explanationFor(filePath);
+      const currentLogic =
+        currentExplanation !== null && currentExplanation.status === 'done' && currentExplanation.explanation !== null
+          ? (currentExplanation.explanation.logic ?? '')
+          : '';
+      const currentWalkthrough =
+        currentExplanation !== null && currentExplanation.status === 'done' && currentExplanation.explanation !== null
+          ? (currentExplanation.explanation.walkthrough ?? [])
+          : [];
+
+      return {
+        orderedFiles, explainedCount, fileFindings,
+        currentExplanation, currentLogic, currentWalkthrough,
+      };
+    }
+
     function ReviewWorkspace(props) {
       const ctx = props.ctx;
       const localeId = useLocaleId(ctx);
@@ -3813,11 +4003,6 @@ window.__ModuleLoader__.load({
         }
       }, [loadReview]);
 
-      const explanationFor = (target) => {
-        if (review === null || target === '') return null;
-        return (review.explanations ?? []).find((entry) => entry.file === target) ?? null;
-      };
-
       /** Put a review-scoped question starter into the main composer (the only chat surface). */
       const askInChat = React.useCallback(() => {
         const actions = props.inputActions;
@@ -3964,104 +4149,29 @@ window.__ModuleLoader__.load({
         setSidebarPane('diff');
       }, [prNumber, sidebar]);
 
-      // Bind this session to the PR on screen so the main-conversation review_* tools default
-      // to what the reviewer is reading; clear the binding when the panel goes away.
-      React.useEffect(() => {
-        if (!sidebar) return undefined;
-        const sessionId = typeof props.sessionId === 'string' ? props.sessionId : '';
-        if (sessionId === '' || prNumber === null) return undefined;
-        void postJson(withRepoRef.current('/pr-review-api/active'), {
-          sessionId,
-          number: prNumber,
-          ...focusRef.current,
-        }).catch(() => {});
-        return () => {
-          void postJson(withRepoRef.current('/pr-review-api/active'), { sessionId }).catch(() => {});
-        };
-      }, [sidebar, props.sessionId, prNumber]);
+      usePanelFocusReport({
+        sidebar,
+        sessionId: typeof props.sessionId === 'string' ? props.sessionId : '',
+        prNumber,
+        withRepoRef,
+        focusRef,
+        mode,
+        filePath,
+        sidebarPane,
+        selectedRoundNumber,
+      });
 
-      // Measure the panel so a narrow sidebar can collapse the analysis column instead of
-      // forcing a separate file-list screen.
-      React.useEffect(() => {
-        if (!sidebar) return undefined;
-        const node = rootRef.current;
-        if (node === null || node === undefined || typeof ResizeObserver === 'undefined') return undefined;
-        const observer = new ResizeObserver((entries) => {
-          const width = entries[0]?.contentRect?.width;
-          if (typeof width === 'number' && width > 0) setSidebarWidth(Math.round(width));
-        });
-        observer.observe(node);
-        return () => observer.disconnect();
-      }, [sidebar]);
+      usePanelResize({ sidebar, rootRef, setSidebarWidth });
 
-
-      // Poll the review while it is being generated or its files are being analyzed;
-      // refresh the PR list slowly.
-      React.useEffect(() => {
-        const reviewTimer = setInterval(() => {
-          const current = stateRef.current;
-          if (current.prNumber === null) return;
-          const analyzing = current.review?.analyzing ?? null;
-          if (current.review !== null && current.review.status !== 'reviewing' && !isAnalyzing(analyzing)) return;
-          void loadReview(current.prNumber);
-        }, 4000);
-        const listTimer = setInterval(() => {
-          void loadList(false);
-        }, 20000);
-        return () => {
-          clearInterval(reviewTimer);
-          clearInterval(listTimer);
-        };
-      }, [loadReview, loadList]);
-
-      // Report view changes (overview ↔ file, diff ↔ analysis) so the host's runtime-context
-      // snapshot follows the panel on the next model step. Debounced: bursts of clicks are one
-      // report. The host compares the contributed section text and re-emits the snapshot only
-      // when it changes, so an unchanged panel costs nothing.
-      React.useEffect(() => {
-        if (!sidebar) return undefined;
-        const sessionId = typeof props.sessionId === 'string' ? props.sessionId : '';
-        if (sessionId === '' || prNumber === null) return undefined;
-        const timer = setTimeout(() => {
-          void postJson(withRepoRef.current('/pr-review-api/focus'), {
-            sessionId,
-            number: prNumber,
-            ...focusRef.current,
-          }).catch(() => {});
-        }, 600);
-        return () => clearTimeout(timer);
-      }, [sidebar, props.sessionId, prNumber, mode, filePath, sidebarPane, selectedRoundNumber]);
-
-      // Sidebar refresh: the main-conversation tools rewrite the review data, so poll while the
-      // panel is visible and let the render catch up. Cheap read, no local state is overwritten.
-      React.useEffect(() => {
-        if (!sidebar) return undefined;
-        const timer = setInterval(() => {
-          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-          const number = stateRef.current.prNumber;
-          if (typeof number !== 'number') return;
-          void loadReview(number);
-        }, 5000);
-        return () => clearInterval(timer);
-      }, [sidebar, loadReview]);
-
-      // A background conclusion reports its stage through `review.concluding`: poll every 2s.
-      React.useEffect(() => {
-        if (concludingActive === false && concludeWait === false) return undefined;
-        const timer = setInterval(() => {
-          const current = stateRef.current;
-          if (current.prNumber === null) return;
-          void loadReview(current.prNumber);
-        }, 2000);
-        return () => clearInterval(timer);
-      }, [concludingActive, concludeWait, loadReview]);
-
-      // The host may need a moment to flip `concluding` on; stop waiting if it never shows up.
-      React.useEffect(() => {
-        if (concludeWait === false || concludingActive === true) return undefined;
-        const timer = setTimeout(() => setConcludeWait(false), 25000);
-        return () => clearTimeout(timer);
-      }, [concludeWait, concludingActive]);
+      useReviewPolling({
+        sidebar,
+        stateRef,
+        concludingActive,
+        concludeWait,
+        setConcludeWait,
+        loadReview,
+        loadList,
+      });
 
       // Escape closes the publish preview dialog (same cleanup as its Cancel button).
       React.useEffect(() => {
@@ -4081,75 +4191,10 @@ window.__ModuleLoader__.load({
         return undefined;
       }, [fileDiff, scrollLine]);
 
-      const currentExplanation = explanationFor(filePath);
-      const currentLogic =
-        currentExplanation !== null && currentExplanation.status === 'done' && currentExplanation.explanation !== null
-          ? (currentExplanation.explanation.logic ?? '')
-          : '';
-      const currentWalkthrough =
-        currentExplanation !== null && currentExplanation.status === 'done' && currentExplanation.explanation !== null
-          ? (currentExplanation.explanation.walkthrough ?? [])
-          : [];
-
-      const orderedFiles = React.useMemo(() => {
-        if (review === null) return [];
-        const byPath = new Map((review.files ?? []).map((file) => [file.path, file]));
-        const orderList = review.report?.order ?? [];
-        const orderIndex = new Map(orderList.map((item, index) => [item.file, index]));
-        const reasonMap = new Map(orderList.map((item) => [item.file, item.reason]));
-        const severityMap = new Map();
-        for (const entry of review.explanations ?? []) {
-          severityMap.set(entry.file, fileSeverityOf(entry));
-        }
-        const paths = [];
-        const seen = new Set();
-        for (const item of orderList) {
-          if (!seen.has(item.file)) {
-            paths.push(item.file);
-            seen.add(item.file);
-          }
-        }
-        for (const file of review.files ?? []) {
-          if (!seen.has(file.path)) {
-            paths.push(file.path);
-            seen.add(file.path);
-          }
-        }
-        return paths.map((path) => {
-          const file = byPath.get(path) ?? { path, status: 'changed', additions: 0, deletions: 0 };
-          return {
-            path,
-            status: file.status ?? 'changed',
-            additions: file.additions ?? 0,
-            deletions: file.deletions ?? 0,
-            order: (orderIndex.get(path) ?? orderIndex.size) + 1,
-            reason: reasonMap.get(path) ?? '',
-            severity: severityMap.get(path) ?? '',
-          };
-        });
-      }, [review]);
-
-      const explainedCount = React.useMemo(
-        () => (review?.explanations ?? []).filter((entry) => entry.status === 'done').length,
-        [review],
-      );
-
-      const fileFindings = React.useMemo(() => {
-        const groups = [];
-        const orderIndex = new Map((review?.report?.order ?? []).map((item, index) => [item.file, index]));
-        for (const entry of review?.explanations ?? []) {
-          if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-          const issues = entry.explanation.issues ?? [];
-          const suggestions = entry.explanation.suggestions ?? [];
-          if (issues.length === 0 && suggestions.length === 0) continue;
-          groups.push({ file: entry.file, issues, suggestions });
-        }
-        groups.sort(
-          (a, b) =>
-            (orderIndex.get(a.file) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(b.file) ?? Number.MAX_SAFE_INTEGER),
-        );
-        return groups;
-      }, [review]);
+      const {
+        orderedFiles, explainedCount, fileFindings,
+        currentExplanation, currentLogic, currentWalkthrough,
+      } = useWorkspaceDerived(review, filePath);
 
       const pullChat = review?.pullChat ?? [];
       const fileChat = currentExplanation?.chat ?? [];
