@@ -2171,6 +2171,68 @@ test('a manual explain in flight is discarded when a new round starts', async ()
   }
 });
 
+test('a new round reads the new head instead of the cached file content', async () => {
+  const reportReply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '第二轮报告',
+    risks: [],
+    order: [{ file: 'src/a.js', reason: '' }],
+    focus: {},
+  });
+  const prompts = [];
+  const fetchHandler = async (url) => {
+    const target = String(url);
+    if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
+    if (target.includes('/pulls/1.diff')) return textResponse(200, BATCH_DIFF);
+    if (target.includes('/pulls/1/files')) {
+      return jsonResponse(200, [{ filename: 'src/a.js', status: 'modified', additions: 1, deletions: 1, changes: 2 }]);
+    }
+    if (target.includes('/contents/')) {
+      const ref = /[?&]ref=([^&]+)/.exec(target)?.[1] ?? '';
+      const body = ref === 'sha-two' ? 'const fresh = 2;\n' : 'const old = 1;\n';
+      return jsonResponse(200, { encoding: 'base64', content: Buffer.from(body, 'utf8').toString('base64'), size: body.length });
+    }
+    if (/\/pulls\/1$/.test(target)) {
+      return jsonResponse(200, {
+        number: 1,
+        title: 'PR 标题',
+        body: '',
+        user: { login: 'dev' },
+        state: 'open',
+        merged: false,
+        additions: 1,
+        deletions: 1,
+        changed_files: 1,
+        head: { ref: 'feature', sha: 'sha-two' },
+        base: { ref: 'main', sha: 'def456' },
+        html_url: 'https://git.example/acme/demo/pulls/1',
+      });
+    }
+    throw new Error(`unexpected fetch in test: ${target}`);
+  };
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    prompts.push(prompt);
+    return llmFromText(BATCH_EXPLANATION)(options);
+  };
+  const plugin = await setup({ fetch: fetchHandler, llm, reviews: { 1: unanalyzedReview() } });
+  try {
+    // Round 1 reads the old head and caches its content.
+    await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js' });
+    assert.ok(prompts[0].includes('const old = 1'));
+
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+
+    await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js' });
+    assert.ok(prompts[1].includes('const fresh = 2'), 'the new round read the new head');
+    assert.equal(prompts[1].includes('const old = 1'), false, 'the previous head stayed cached');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 test('the schema default turns batch analysis on without an explicit option', async () => {
   const llm = (options) => (
     JSON.stringify(options.messages).includes('正在审查文件')

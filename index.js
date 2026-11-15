@@ -1189,7 +1189,10 @@ export function apply(ctx, config) {
       record.startedAt = now;
       record.finishedAt = 0;
       record.error = null;
+      // Both caches are keyed by path only; a new head (or a retry after new commits)
+      // must fetch again or the analysis would read the previous head's code.
       record.diffFiles = undefined;
+      record.fileContents = undefined;
     }
     state.reviews.set(number, record);
     void runReview(record).catch((error) => {
