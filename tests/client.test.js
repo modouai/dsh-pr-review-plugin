@@ -54,6 +54,7 @@ const EXPOSED = [
   'PublishPreviewModal',
   'DetailHeader',
   'FilesPane',
+  'FileDetailPanel',
   'isAnalyzing',
   'fileContentKey',
   'ConclusionBlock',
@@ -951,6 +952,71 @@ test('selecting a round follows the latest or pins history and shows the overvie
     roundPick: 1,
     mode: 'overview',
   });
+});
+
+test('per-file suggestions render as text whether stored as a string or an object', () => {
+  const client = loadClient();
+  const version = makeVersion(1, '结论');
+  const review = makeReview({
+    round: 1,
+    conclusionAt: version.createdAt,
+    conclusion: version.conclusion,
+    roundHistory: [makeRound(1, { conclusions: [version] })],
+  });
+  // Model output stores plain strings; a review_update_analysis write stores { point, line }.
+  // Blank and malformed entries must not render an empty suggestion row.
+  const { textOnly, elements } = renderOverview(client, review, {
+    fileFindings: [
+      {
+        file: 'src/a.js',
+        issues: [],
+        suggestions: [
+          '模型写的建议',
+          { point: '工具写的建议', line: 12 },
+          { text: '只有 text 的建议' },
+          { point: '   ', text: 'point 为空时回退 text' },
+          { point: '   ' },
+          {},
+          null,
+          42,
+        ],
+      },
+    ],
+  });
+
+  assert.match(textOnly, /模型写的建议/);
+  assert.match(textOnly, /工具写的建议/);
+  assert.match(textOnly, /只有 text 的建议/);
+  assert.match(textOnly, /point 为空时回退 text/);
+  assert.doesNotMatch(textOnly, /\[object Object\]/);
+  const rows = elements.filter((node) => node.props.className === 'prr-rowmain prr-text');
+  assert.equal(rows.length, 4, 'blank and malformed suggestions render no row');
+});
+
+test('the file detail renders suggestion objects written by review_update_analysis', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const { textOnly, elements } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t: translator(parts),
+    filePath: 'src/a.js',
+    explanation: {
+      status: 'done',
+      explanation: {
+        verdict: 'suggest',
+        summary: '文件摘要',
+        logic: '',
+        changes: '',
+        issues: [],
+        suggestions: ['纯文本建议', { point: '对象建议', line: 3 }, null, { point: '  ' }],
+      },
+    },
+    onExplain: () => {},
+  }));
+
+  assert.match(textOnly, /纯文本建议/);
+  assert.match(textOnly, /对象建议/);
+  const rows = elements.filter((node) => node.props.className === 'prr-rowmain prr-text');
+  assert.equal(rows.length, 2, 'blank suggestions render no row');
 });
 
 test('the detail header keeps only the pane title', () => {

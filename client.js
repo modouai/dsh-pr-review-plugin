@@ -503,6 +503,20 @@ window.__ModuleLoader__.load({
       return output;
     }
 
+    /**
+     * Text of one per-file suggestion. Model output stores plain strings, while a
+     * `review_update_analysis` write stores `{ point, line }`; rendering the object itself is
+     * a React child error, so every suggestion goes through here. A blank `point` falls back to
+     * `text`, and an item with neither returns '' so the caller can drop the empty row.
+     */
+    function suggestionText(item) {
+      if (typeof item === 'string') return item;
+      if (item === null || typeof item !== 'object') return '';
+      if (typeof item.point === 'string' && item.point.trim() !== '') return item.point;
+      if (typeof item.text === 'string' && item.text.trim() !== '') return item.text;
+      return '';
+    }
+
     /** Starter text the review panel inserts into the main composer ("ask in conversation"). */
     function reviewAskContext(t, number, round, filePath) {
       const values = {
@@ -2613,14 +2627,15 @@ window.__ModuleLoader__.load({
                       ),
                     ),
                   ),
-                  (group.suggestions ?? []).map((text, index) =>
-                    h(
+                  (group.suggestions ?? []).map((item, index) => {
+                    const text = suggestionText(item);
+                    return text === '' ? null : h(
                       'div',
                       { className: 'prr-rowitem', key: `suggestion-${index}` },
                       h('span', { className: 'prr-tag' }, t('suggestionTag')),
                       h('div', { className: 'prr-rowmain prr-text' }, text),
-                    ),
-                  ),
+                    );
+                  }),
                 ),
               ),
         ),
@@ -2696,9 +2711,14 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'prr-card' },
-              detail.suggestions.map((item, index) =>
-                h('div', { className: 'prr-rowitem', key: index }, h('div', { className: 'prr-rowmain prr-text' }, item)),
-              ),
+              detail.suggestions.map((item, index) => {
+                const text = suggestionText(item);
+                return text === '' ? null : h(
+                  'div',
+                  { className: 'prr-rowitem', key: index },
+                  h('div', { className: 'prr-rowmain prr-text' }, text),
+                );
+              }),
             ),
           );
       return h(
@@ -4636,6 +4656,12 @@ window.__ModuleLoader__.load({
 
           static getDerivedStateFromError(error) {
             return { error };
+          }
+
+          componentDidCatch(error, info) {
+            // React already logs the throw; add our label so the panel's crash is easy to find
+            // among host errors, with the component stack the fallback cannot show.
+            console.error('[pr-review] 审查面板渲染失败', error, info?.componentStack ?? '');
           }
 
           render() {
