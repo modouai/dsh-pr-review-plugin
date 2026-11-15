@@ -1818,11 +1818,13 @@ async function batchFetch(url) {
   const target = String(url);
   if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
   if (target.includes('/pulls/1.diff')) return textResponse(200, BATCH_DIFF);
+  // b's content is unavailable on purpose: the analysis must fall back to the diff.
+  if (target.includes('/contents/src/b.js')) return jsonResponse(404, { message: 'not found' });
   if (target.includes('/contents/')) {
     return jsonResponse(200, {
       encoding: 'base64',
-      content: Buffer.from('const value = 1;\n', 'utf8').toString('base64'),
-      size: 17,
+      content: Buffer.from('const a = 1;\n', 'utf8').toString('base64'),
+      size: 13,
     });
   }
   throw new Error(`unexpected fetch in test: ${target}`);
@@ -1958,6 +1960,8 @@ test('autoAnalyze explains every file of a finished round, one model call at a t
     assert.equal(peak, 1, 'files are analyzed one at a time');
     assert.ok(prompts[0].includes('src/a.js'), 'the batch follows the file list order');
     assert.ok(prompts[1].includes('src/b.js'));
+    assert.ok(prompts[0].includes('const a = 1'), 'each file gets its own full content');
+    assert.ok(prompts[1].includes('完整内容不可用'), 'unreadable content falls back to the diff only');
   } finally {
     await plugin.dispose();
   }
@@ -2095,6 +2099,78 @@ test('a fresh explain for the new round does not join the stale in-flight call',
   }
 });
 
+test('a cancelled call cannot write into the new round even if the provider ignores the abort', async () => {
+  const reportReply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '第二轮报告',
+    risks: [],
+    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+    focus: {},
+  });
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    // The fake stream never reads options.signal: the cancellation contract inside
+    // callModel (plus the discarded-result check) has to drop this late text.
+    return (async function* () {
+      await delay(150);
+      yield { type: 'text-delta', text: BATCH_EXPLANATION };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })();
+  };
+  const plugin = await setup({ fetch: roundReviewFetch, llm, reviews: { 1: unanalyzedReview() } });
+  try {
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 1 });
+    await delay(30);
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+    // Let the answer the provider still sends arrive after the round was cleared.
+    await delay(300);
+
+    const after = await plugin.review();
+    assert.equal(after.round, 2);
+    assert.deepEqual(after.explanations, [], 'the late answer never reached the new round');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a manual explain in flight is discarded when a new round starts', async () => {
+  const reportReply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '第二轮报告',
+    risks: [],
+    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+    focus: {},
+  });
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    return (async function* () {
+      await delay(150);
+      yield { type: 'text-delta', text: BATCH_EXPLANATION };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })();
+  };
+  const plugin = await setup({ fetch: roundReviewFetch, llm, reviews: { 1: unanalyzedReview() } });
+  try {
+    // A click-driven explain holds no batch job and no signal; only the epoch can stop it.
+    const pending = plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js' });
+    await delay(30);
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const answer = await pending;
+    assert.equal(answer.status, 200);
+    assert.equal(answer.json.explanation, null, 'the stale manual answer was discarded');
+
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+    await delay(200);
+    const after = await plugin.review();
+    assert.deepEqual(after.explanations, [], 'the manual answer did not land in the new round');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 test('the schema default turns batch analysis on without an explicit option', async () => {
   const llm = (options) => (
     JSON.stringify(options.messages).includes('正在审查文件')
@@ -2108,6 +2184,10 @@ test('the schema default turns batch analysis on without an explicit option', as
     useDefaultAutoAnalyze: true,
   });
   try {
+    // The panel is told the effective default too, so manual mode and the button agree.
+    const prs = await plugin.call('/pr-review-api/prs');
+    assert.equal(prs.json.autoAnalyze, true);
+
     const done = await plugin.waitFor(1, (current) => current.analyzing === null
       && (current.explanations ?? []).length === 2
       && (current.explanations ?? []).every((entry) => entry.status === 'done'));

@@ -563,11 +563,16 @@ export function apply(ctx, config) {
     if (abort !== null && abort !== undefined) abort.abort();
   }
 
-  /** Stop a running analysis batch: its in-flight model call is cancelled, not just ignored. */
+  /**
+   * Stop a running analysis batch and invalidate every explain still in flight: a provider
+   * may ignore the abort, so the epoch bump — not the abort alone — is what keeps a late
+   * answer from being written into a record that was cleared, replaced or pruned.
+   */
   function abortAnalysis(record) {
     if (record === undefined || record === null) return;
     const job = record.analyzing;
     record.analyzing = null;
+    record.analysisEpoch = (record.analysisEpoch ?? 0) + 1;
     if (job !== null && job !== undefined && job.abort !== undefined) job.abort.abort();
   }
 
@@ -1146,10 +1151,9 @@ export function apply(ctx, config) {
         : (Array.isArray(record.publishedItems) ? record.publishedItems : []),
     };
     abortConclude(record);
-    // Cancel the running batch: its in-flight call must stop paying tokens, and its answer
-    // must not land in the new round.
+    // Cancels the batch (if any) and invalidates explanations still in flight, including
+    // manual ones that hold no batch job.
     abortAnalysis(record);
-    record.analysisEpoch = (record.analysisEpoch ?? 0) + 1;
     history.push(makeRoundEntry(previousRoundEntry.round + 1, '', now));
     record.round = previousRoundEntry.round + 1;
     record.report = null;
@@ -1353,7 +1357,11 @@ export function apply(ctx, config) {
   let analyzeActive = 0;
   const analyzeWaiters = [];
 
-  /** Run `task` while holding one of the analysis slots. */
+  /**
+   * Run `task` while holding one of the analysis slots. A cancelled batch may still sit in
+   * the waiter queue; when woken it sees the record superseded and returns without calling
+   * the model, so the queue stays bounded by the number of live batches.
+   */
   async function withAnalyzeSlot(task) {
     while (analyzeActive >= ANALYZE_CONCURRENCY) {
       await new Promise((resolve) => analyzeWaiters.push(resolve));
@@ -1442,7 +1450,9 @@ export function apply(ctx, config) {
         scheduleSave();
       }
     } finally {
-      if (analysisBatchCurrent(record, job)) {
+      // Clear the marker by job identity, not by map membership: a record that left the
+      // review map must not keep pointing at a finished job.
+      if (record.analyzing === job) {
         record.analyzing = null;
         scheduleSave();
       }
