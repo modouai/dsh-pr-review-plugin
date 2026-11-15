@@ -41,8 +41,8 @@ The plugin talks to one code host per workspace. The workspace `git origin` sele
 | Host | `platform` | Origin hosts | `baseUrl` when empty | Repository | Token sources | CLI login |
 |---|---|---|---|---|---|---|
 | GitHub | `github` | `github.com` | `https://api.github.com` | `owner/name` | `token`, `GITHUB_TOKEN`, `GH_TOKEN` | `gh` |
-| GitLab | `gitlab` | `gitlab.com` | `https://gitlab.com` (adapter appends `/api/v4`) | `group/subgroup/project` | `token`, `GITLAB_TOKEN`, `PR_REVIEW_TOKEN` | — |
-| Gitea / Forgejo / Codeberg | `forgejo` (alias `gitea`) | self-hosted Gitea / Forgejo hosts, `codeberg.org` | site root without `/api/v1` (adapter appends it) | `owner/name` | `token`, `GITEA_TOKEN`, `FORGEJO_TOKEN`, `PR_REVIEW_TOKEN` | `tea` |
+| GitLab | `gitlab` | `gitlab.com` only; a self-hosted origin falls back to Gitea | `https://gitlab.com` (adapter appends `/api/v4`) | `group/subgroup/project` | `token`, `GITLAB_TOKEN`, `PR_REVIEW_TOKEN` | — |
+| Gitea / Forgejo / Codeberg | `forgejo` (alias `gitea`) | self-hosted Gitea / Forgejo hosts, `codeberg.org` | site root without `/api/v1` (adapter appends it; derived from the workspace origin when empty) | `owner/name` | `token`, `GITEA_TOKEN`, `FORGEJO_TOKEN`, `PR_REVIEW_TOKEN` | `tea` |
 | Gitee | `gitee` | `gitee.com` | `https://gitee.com/api/v5` (a web root is also accepted) | `owner/name` | `token`, `GITEE_TOKEN`, `PR_REVIEW_TOKEN` | — |
 | GitCode | `gitcode` | `gitcode.com`, `gitcode.net` | `https://api.gitcode.com/api/v5` (a web root is also accepted) | `owner/name` | `token`, `GITCODE_TOKEN`, `GITEE_TOKEN`, `PR_REVIEW_TOKEN` | — |
 | AtomGit | `atomgit` | `atomgit.com` | `https://api.atomgit.com/api/v5` (a web root is also accepted) | `owner/name` | `token`, `ATOMGIT_TOKEN`, `GITEE_TOKEN`, `PR_REVIEW_TOKEN` | — |
@@ -53,7 +53,9 @@ The plugin talks to one code host per workspace. The workspace `git origin` sele
 - GitCode and AtomGit accept `GITEE_TOKEN` because they share the Gitee v5 API family.
 - `tea` login works for any Gitea-compatible host, including Codeberg.
 - Codeup also needs `organizationId` (the first segment of `repo` when empty) and, optionally, `projectId` (resolved through the API when empty).
-- Self-hosted Gitea / Forgejo hosts are detected from the origin. Any unrecognized host falls back to the Gitea adapter, including self-hosted GitLab and GitHub Enterprise.
+- Self-hosted Gitea / Forgejo hosts are detected from the origin. Any unrecognized host falls back to the Gitea adapter, including self-hosted GitLab and GitHub Enterprise; the panel uses Gitea endpoints for them, and `platform: gitlab` in the default config is overridden once a workspace origin is recognized.
+- With `platform: forgejo` and an empty `baseUrl`, the host has no address until a workspace origin supplies one, so it does not poll.
+- This table and the platform map in `providers.js` are maintained together; update both when a platform changes.
 - A token needs permission to read pull requests and post comments; for private repositories it needs repository read access.
 
 ## Install
@@ -66,7 +68,7 @@ dsh plugin --profile <name> add github:modouai/dsh-pr-review-plugin
 
 Point the install at a tag or commit (`…#<tag-or-sha>`) to pin what actually runs. The package is also published to npm, so `dsh plugin --profile <name> add @modouai/dsh-pr-review` works by name. To install a local checkout instead, pass its path: `dsh plugin --profile <name> add ./dsh-pr-review-plugin` (run `pnpm install` inside the checkout first — a linked checkout keeps its own `node_modules`).
 
-Before starting Harness, provide a token for your host: an environment variable, `token` in the config, or the CLI login for GitHub / Gitea (see [Supported code hosts](#supported-code-hosts)). In a git workspace no repository setting is needed; the workspace `origin` selects the repository and platform.
+Before starting Harness, provide a token for your host: an environment variable, `token` in the config, or the CLI login for GitHub / Gitea (see [Supported code hosts](#supported-code-hosts)). GitLab, the Gitee family and Codeup take `token` or environment variables; they have no CLI login. In a git workspace no repository setting is needed; the workspace `origin` selects the repository and platform.
 
 Verify the layer, then start Harness:
 
@@ -251,7 +253,7 @@ export CODEUP_TOKEN=...    # Codeup (YUNXIAO_TOKEN works too)
     maxDiffCharsPerFile: 14000
 ```
 
-This example targets `gitlab.com`; a self-hosted GitLab origin is not detected and falls back to the Gitea adapter.
+This example targets `gitlab.com`; a self-hosted GitLab origin is not detected and falls back to the Gitea adapter. Do not rely on `platform: gitlab` to override it: a workspace origin replaces it once recognized.
 
 **Start on a fixed Codeup repository.** Set `repo` to `org/group/repo`; leave `organizationId` empty to take the first segment, and `projectId` empty to resolve it through the Codeup API:
 

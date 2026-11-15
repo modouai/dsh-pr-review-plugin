@@ -9,8 +9,11 @@
 
 import { heuristicOrder, diffExcerpts } from './diff.js';
 
-/** Human-readable platform name for prompts. Unknown values stay neutral instead of being mislabelled. */
-const PLATFORM_LABELS = {
+/**
+ * Human-readable platform names for prompts. Keep the keys in sync with the
+ * `platform` values produced by providers.js (`gitea` is an alias of `forgejo`).
+ */
+export const PLATFORM_LABELS = Object.freeze({
   github: 'GitHub',
   gitlab: 'GitLab',
   gitea: 'Gitea/Forgejo',
@@ -19,12 +22,15 @@ const PLATFORM_LABELS = {
   gitcode: 'GitCode',
   atomgit: 'AtomGit',
   codeup: 'Codeup',
-};
+});
 
-function platformLabel(platform) {
+export function platformLabel(platform) {
   const raw = typeof platform === 'string' ? platform.trim() : '';
   if (raw === '') return '未知平台';
-  return PLATFORM_LABELS[raw.toLowerCase()] ?? `未知平台（${raw}）`;
+  // Keep an unexpected value short and free of control characters before it reaches a prompt.
+  const clean = raw.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 40);
+  if (clean === '') return '未知平台';
+  return PLATFORM_LABELS[clean.toLowerCase()] ?? `未知平台（${clean}）`;
 }
 
 /** Extract the first JSON object from a model answer that may carry prose or fences. */

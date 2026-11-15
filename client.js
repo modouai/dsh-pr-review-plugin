@@ -76,7 +76,7 @@ window.__ModuleLoader__.load({
         emptyReview: '该 PR 尚未审查，点「立即审查」开始。',
         emptyFile: '选择左侧文件查看变更与审查详情。',
         noFiles: '还没有变更文件。',
-        tokenMissing: '缺少代码平台 token：请在插件配置或环境变量里填写；GitHub / Gitea 也可先用 gh / tea 登录。',
+        tokenMissing: '缺少代码平台 token：请在插件配置或环境变量里填写；GitHub / Gitea（Forgejo）也可先用 gh / tea 登录。',
         truncatedList: '仅列出最近更新的 20 个 PR；更早的 PR 未显示。',
         filesTruncated: '该 PR 的变更文件过多，仅纳入了前 400 个；未纳入的文件不在本页。',
         detailTitle: '审查详情',

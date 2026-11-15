@@ -23,7 +23,7 @@
     "conclude": "生成最终结论",
     "concluding": "汇总中…",
     "empty": "还没有加载拉取请求。",
-    "noToken": "缺少代码平台 token：请在插件配置或环境变量里填写；GitHub / Gitea 也可先用 gh / tea 登录。",
+    "noToken": "缺少代码平台 token：请在插件配置或环境变量里填写；GitHub / Gitea（Forgejo）也可先用 gh / tea 登录。",
     "orderHint": "入口文件排在最前，建议按此顺序审查。",
     "changed": "修改",
     "added": "新增",

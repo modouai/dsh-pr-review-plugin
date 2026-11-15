@@ -8,6 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  PLATFORM_LABELS,
   buildCommentMarkdown,
   buildConcludePrompt,
   buildExplainPrompt,
@@ -23,6 +24,7 @@ import {
   normalizeConclusion,
   normalizeVerdict,
   parseFeedbackReply,
+  platformLabel,
   textSimilarity,
 } from '../llm.js';
 
@@ -438,23 +440,27 @@ test('buildConcludePrompt: marks truncated report/explanations explicitly', () =
   assert.match(text, /……（内容过长，已截断，剩余 \d+ 字符未提供）/);
 });
 
+test('platformLabel: known aliases, normalization and unknown values', () => {
+  assert.equal(platformLabel('GitHub'), 'GitHub');
+  assert.equal(platformLabel(' gItLaB '), 'GitLab');
+  assert.equal(platformLabel('gitea'), 'Gitea/Forgejo');
+  assert.equal(platformLabel('forgejo'), 'Gitea/Forgejo');
+  assert.equal(platformLabel(''), '未知平台');
+  assert.equal(platformLabel('   '), '未知平台');
+  assert.equal(platformLabel(123), '未知平台');
+  assert.equal(platformLabel({}), '未知平台');
+  assert.equal(platformLabel(null), '未知平台');
+  assert.equal(platformLabel('bitbucket'), '未知平台（bitbucket）');
+  assert.equal(platformLabel('bad\nvalue'), '未知平台（badvalue）');
+  assert.equal(platformLabel('x'.repeat(60)), `未知平台（${'x'.repeat(40)}）`);
+});
+
 test('prompts: name the real platform and keep unknown values neutral', () => {
   const base = {
     repo: 'group/project', number: 1, title: 't', author: 'a',
     headRef: 'h', baseRef: 'b', changedFiles: 0, additions: 0, deletions: 0, body: '',
   };
-  // Mirrors PLATFORM_LABELS in llm.js; update both together.
-  const labels = {
-    github: 'GitHub',
-    gitlab: 'GitLab',
-    gitea: 'Gitea/Forgejo',
-    forgejo: 'Gitea/Forgejo',
-    gitee: 'Gitee',
-    gitcode: 'GitCode',
-    atomgit: 'AtomGit',
-    codeup: 'Codeup',
-  };
-  for (const [platform, label] of Object.entries(labels)) {
+  for (const [platform, label] of Object.entries(PLATFORM_LABELS)) {
     const prompt = buildReportPrompt({ ...base, platform }, [], new Map(), { maxDiffCharsPerFile: 14000 });
     assert.ok(prompt.messages[0].content[0].text.includes(`平台：${label}；`), platform);
   }
@@ -462,14 +468,19 @@ test('prompts: name the real platform and keep unknown values neutral', () => {
   const mixed = buildReportPrompt({ ...base, platform: ' GitHub ' }, [], new Map(), { maxDiffCharsPerFile: 14000 });
   assert.ok(mixed.messages[0].content[0].text.includes('平台：GitHub；'));
 
-  for (const platform of ['bitbucket', '', undefined, null]) {
+  for (const [platform, expected] of [
+    ['bitbucket', '未知平台（bitbucket）'],
+    ['', '未知平台'],
+    ['   ', '未知平台'],
+    [undefined, '未知平台'],
+    [null, '未知平台'],
+    [123, '未知平台'],
+    [{}, '未知平台'],
+  ]) {
     const prompt = buildReportPrompt({ ...base, platform }, [], new Map(), { maxDiffCharsPerFile: 14000 });
     const text = prompt.messages[0].content[0].text;
     assert.ok(!text.includes('平台：Gitea/Forgejo；'), String(platform));
-    assert.ok(
-      text.includes(platform === 'bitbucket' ? '平台：未知平台（bitbucket）；' : '平台：未知平台；'),
-      String(platform),
-    );
+    assert.ok(text.includes(`平台：${expected}；`), String(platform));
   }
 
   const explain = buildExplainPrompt(

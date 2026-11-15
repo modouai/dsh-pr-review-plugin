@@ -28,7 +28,7 @@ const execFileAsync = promisify(execFile);
 export { MAX_PULL_FILES };
 
 /** Accepted `platform` values; `gitea` is an alias of `forgejo`. */
-const PLATFORMS = new Set(['github', 'gitea', 'forgejo', 'gitlab', 'gitee', 'gitcode', 'atomgit', 'codeup']);
+export const PLATFORMS = new Set(['github', 'gitea', 'forgejo', 'gitlab', 'gitee', 'gitcode', 'atomgit', 'codeup']);
 
 /** Default API base per platform (empty means "resolve from the workspace origin"). */
 const PLATFORM_DEFAULTS = {
@@ -183,7 +183,7 @@ async function ghCliToken(apiHost, owner) {
 }
 
 /** Environment variables tried per platform, in order. */
-const ENV_TOKENS = {
+export const ENV_TOKENS = Object.freeze({
   github: ['GITHUB_TOKEN', 'GH_TOKEN'],
   forgejo: ['GITEA_TOKEN', 'FORGEJO_TOKEN', 'PR_REVIEW_TOKEN'],
   gitlab: ['GITLAB_TOKEN', 'PR_REVIEW_TOKEN'],
@@ -191,7 +191,29 @@ const ENV_TOKENS = {
   gitcode: ['GITCODE_TOKEN', 'GITEE_TOKEN', 'PR_REVIEW_TOKEN'],
   atomgit: ['ATOMGIT_TOKEN', 'GITEE_TOKEN', 'PR_REVIEW_TOKEN'],
   codeup: ['CODEUP_TOKEN', 'YUNXIAO_TOKEN', 'PR_REVIEW_TOKEN'],
+});
+
+/** Display names for the missing-token message; `gitea` is normalized to `forgejo`. */
+const PLATFORM_NAMES = {
+  github: 'GitHub',
+  forgejo: 'Gitea / Forgejo',
+  gitlab: 'GitLab',
+  gitee: 'Gitee',
+  gitcode: 'GitCode',
+  atomgit: 'AtomGit',
+  codeup: 'Codeup',
 };
+
+/** One actionable missing-token message built from the same env list resolveToken reads. */
+export function missingTokenMessage(platform) {
+  const key = platform === 'gitea' ? 'forgejo' : platform;
+  const label = PLATFORM_NAMES[key] ?? 'Gitea / Forgejo';
+  const env = (ENV_TOKENS[key] ?? []).join(' / ');
+  const cli = key === 'github'
+    ? '，或先 `gh auth login`'
+    : (key === 'forgejo' ? '，或先 `tea login`' : '');
+  return `缺少 ${label} token：请在插件配置填写 token${env === '' ? '' : `，或设置 ${env}`}${cli}。`;
+}
 
 /** Resolve a token: explicit config, then platform env vars, then the CLI login of that platform. */
 export async function resolveToken(config, provider) {

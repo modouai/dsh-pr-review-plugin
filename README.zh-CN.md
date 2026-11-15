@@ -41,8 +41,8 @@
 | 平台 | `platform` | origin 主机 | `baseUrl` 为空时 | 仓库格式 | token 来源 | CLI 登录 |
 |---|---|---|---|---|---|---|
 | GitHub | `github` | `github.com` | `https://api.github.com` | `owner/name` | `token`、`GITHUB_TOKEN`、`GH_TOKEN` | `gh` |
-| GitLab | `gitlab` | `gitlab.com` | `https://gitlab.com`（适配器补 `/api/v4`） | `group/subgroup/project` | `token`、`GITLAB_TOKEN`、`PR_REVIEW_TOKEN` | — |
-| Gitea / Forgejo / Codeberg | `forgejo`（别名 `gitea`） | 自建 Gitea / Forgejo 主机、`codeberg.org` | 站点根，不带 `/api/v1`（适配器补上） | `owner/name` | `token`、`GITEA_TOKEN`、`FORGEJO_TOKEN`、`PR_REVIEW_TOKEN` | `tea` |
+| GitLab | `gitlab` | 仅 `gitlab.com`；自建实例回退到 Gitea | `https://gitlab.com`（适配器补 `/api/v4`） | `group/subgroup/project` | `token`、`GITLAB_TOKEN`、`PR_REVIEW_TOKEN` | — |
+| Gitea / Forgejo / Codeberg | `forgejo`（别名 `gitea`） | 自建 Gitea / Forgejo 主机、`codeberg.org` | 站点根，不带 `/api/v1`（适配器补上；留空时由工作区 origin 推导） | `owner/name` | `token`、`GITEA_TOKEN`、`FORGEJO_TOKEN`、`PR_REVIEW_TOKEN` | `tea` |
 | Gitee | `gitee` | `gitee.com` | `https://gitee.com/api/v5`（也接受站点根） | `owner/name` | `token`、`GITEE_TOKEN`、`PR_REVIEW_TOKEN` | — |
 | GitCode | `gitcode` | `gitcode.com`、`gitcode.net` | `https://api.gitcode.com/api/v5`（也接受站点根） | `owner/name` | `token`、`GITCODE_TOKEN`、`GITEE_TOKEN`、`PR_REVIEW_TOKEN` | — |
 | AtomGit | `atomgit` | `atomgit.com` | `https://api.atomgit.com/api/v5`（也接受站点根） | `owner/name` | `token`、`ATOMGIT_TOKEN`、`GITEE_TOKEN`、`PR_REVIEW_TOKEN` | — |
@@ -53,7 +53,9 @@
 - GitCode 与 AtomGit 接受 `GITEE_TOKEN`，因为三者共用 Gitee v5 API。
 - `tea` 登录适用于任意 Gitea 兼容主机，包括 Codeberg。
 - Codeup 还需要 `organizationId`（留空取 `repo` 首段）和可选的 `projectId`（留空时调 API 解析）。
-- 自建 Gitea / Forgejo 主机由 origin 识别。未识别主机会回退到 Gitea 适配器，包括自建 GitLab 与 GitHub Enterprise。
+- 自建 Gitea / Forgejo 主机由 origin 识别。未匹配已知平台主机名的主机一律回退到 Gitea 适配器，包括自建 GitLab 与 GitHub Enterprise；面板会对它们使用 Gitea 接口，`platform: gitlab` 会在工作区 origin 识别后被覆盖。
+- `platform: forgejo` 且 `baseUrl` 为空时，插件没有可轮询的地址，直到工作区 origin 提供一个；此间不会轮询。
+- 本表与 `providers.js` 的平台映射一起维护，平台变更时两处同步更新。
 - token 需有读取 PR 与发布评论的权限；私有仓库还需仓库读权限。
 
 ## 安装
@@ -66,7 +68,7 @@ dsh plugin --profile <name> add github:modouai/dsh-pr-review-plugin
 
 需要锁定实际运行的代码时，在地址后加 tag 或 commit（`…#<tag-or-sha>`）。包已发布到 npm，也可以按包名安装：`dsh plugin --profile <name> add @modouai/dsh-pr-review`。安装本地 checkout 则传路径：`dsh plugin --profile <name> add ./dsh-pr-review-plugin`（先在 checkout 里执行 `pnpm install`，链接安装保留各自独立的 `node_modules`）。
 
-启动 Harness 之前，先为你的平台准备 token：环境变量、配置里的 `token`，或 GitHub / Gitea 的 CLI 登录（见[支持的代码平台](#支持的代码平台)）。工作区是 git 仓库时不需要填仓库；origin 会决定仓库与平台。
+启动 Harness 之前，先为你的平台准备 token：环境变量、配置里的 `token`，或 GitHub / Gitea 的 CLI 登录（见[支持的代码平台](#支持的代码平台)）。GitLab、Gitee 系与 Codeup 用 `token` 或环境变量，没有 CLI 登录。工作区是 git 仓库时不需要填仓库；origin 会决定仓库与平台。
 
 验证层，再启动 Harness：
 
@@ -251,7 +253,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     maxDiffCharsPerFile: 14000
 ```
 
-该示例面向 `gitlab.com`；自建 GitLab 的 origin 不会被识别，会回退到 Gitea 适配器。
+该示例面向 `gitlab.com`；自建 GitLab 的 origin 不会被识别，会回退到 Gitea 适配器。不要依赖 `platform: gitlab` 覆盖：工作区 origin 识别后会覆盖它。
 
 **固定 Codeup 仓库**：`repo` 用 `org/group/repo`；`organizationId` 留空取首段，`projectId` 留空时由 Codeup API 解析：
 

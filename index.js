@@ -24,7 +24,7 @@ import path from 'node:path';
 import { HarnessError } from '@deepseek-ai/dsh-llm';
 import Schema from '@deepseek-ai/schemastery';
 
-import { createClient, MAX_PULL_FILES, resolveProviderConfig, resolveToken } from './providers.js';
+import { createClient, MAX_PULL_FILES, missingTokenMessage, resolveProviderConfig, resolveToken } from './providers.js';
 import { parseDiff } from './diff.js';
 import {
   buildChatPrompt,
@@ -949,26 +949,6 @@ export function apply(ctx, config) {
   }
 
   // ---------- provider client ----------
-
-  /** One actionable message per platform when no token can be found. */
-  function missingTokenMessage(platform) {
-    switch (platform) {
-      case 'github':
-        return '缺少 GitHub token：请在插件配置填写 token，或设置 GITHUB_TOKEN / GH_TOKEN，或先 `gh auth login`。';
-      case 'gitlab':
-        return '缺少 GitLab token：请在插件配置填写 token，或设置 GITLAB_TOKEN / PR_REVIEW_TOKEN。';
-      case 'gitee':
-        return '缺少 Gitee token：请在插件配置填写 token，或设置 GITEE_TOKEN / PR_REVIEW_TOKEN。';
-      case 'gitcode':
-        return '缺少 GitCode token：请在插件配置填写 token，或设置 GITCODE_TOKEN / GITEE_TOKEN / PR_REVIEW_TOKEN。';
-      case 'atomgit':
-        return '缺少 AtomGit token：请在插件配置填写 token，或设置 ATOMGIT_TOKEN / GITEE_TOKEN / PR_REVIEW_TOKEN。';
-      case 'codeup':
-        return '缺少 Codeup token：请在插件配置填写 token，或设置 CODEUP_TOKEN / YUNXIAO_TOKEN / PR_REVIEW_TOKEN。';
-      default:
-        return '缺少 Gitea / Forgejo token：请在插件配置填写 token，或设置 GITEA_TOKEN / FORGEJO_TOKEN / PR_REVIEW_TOKEN，或先 `tea login`。';
-    }
-  }
 
   async function ensureClient() {
     if (state.client !== null) return state.client;
