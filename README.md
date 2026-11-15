@@ -31,8 +31,32 @@ Write: `review_update_analysis`, `review_update_report`, `review_update_overview
 
 - A DeepSeek Harness (DSH) installation with the Web UI, 0.2.2-rc.1 or later in the 0.2 line (declared as `engines.dsh`; incompatible versions are rejected at install/start). The plugin runs as a Cordis function plugin and uses the Harness `llm` service for model calls (no separate API key — it uses your Harness model, or the `provider` / `model` you configure).
 - The `git` CLI, so the plugin can resolve a workspace's `origin` remote.
-- A supported code host. GitHub uses the REST API v3; GitLab uses REST v4; Gitea, Forgejo and Codeberg share the Gitea API (`/api/v1`); Gitee, GitCode and AtomGit share the GitHub-shaped v5 API (`/api/v5`); Codeup uses the Alibaba Cloud Yunxiao OpenAPI. Gogs exposes a different API and is **not** supported. Self-hosted Gitea instances are detected from the workspace origin.
-- A code host token with permission to read pull requests and post comments (see below).
+- A supported code host (see [Supported code hosts](#supported-code-hosts)). Gogs, Bitbucket and SVN are **not** supported.
+- A code host token with permission to read pull requests and post comments.
+
+## Supported code hosts
+
+The plugin talks to one code host per workspace. The workspace `git origin` selects it; the `platform` / `baseUrl` / `repo` settings set the host's default target (see [Repository selection](#repository-selection)).
+
+| Host | `platform` | Origin hosts | `baseUrl` when empty | Repository | Token sources | CLI login |
+|---|---|---|---|---|---|---|
+| GitHub | `github` | `github.com` | `https://api.github.com` | `owner/name` | `token`, `GITHUB_TOKEN`, `GH_TOKEN` | `gh` |
+| GitLab | `gitlab` | `gitlab.com` only; a self-hosted origin falls back to Gitea | `https://gitlab.com` (adapter appends `/api/v4`) | `group/subgroup/project` | `token`, `GITLAB_TOKEN`, `PR_REVIEW_TOKEN` | — |
+| Gitea / Forgejo / Codeberg | `forgejo` (alias `gitea`) | self-hosted Gitea / Forgejo hosts, `codeberg.org` | site root without `/api/v1` (adapter appends it; derived from the workspace origin when empty) | `owner/name` | `token`, `GITEA_TOKEN`, `FORGEJO_TOKEN`, `PR_REVIEW_TOKEN` | `tea` |
+| Gitee | `gitee` | `gitee.com` | `https://gitee.com/api/v5` (a web root is also accepted) | `owner/name` | `token`, `GITEE_TOKEN`, `PR_REVIEW_TOKEN` | — |
+| GitCode | `gitcode` | `gitcode.com`, `gitcode.net` | `https://api.gitcode.com/api/v5` (a web root is also accepted) | `owner/name` | `token`, `GITCODE_TOKEN`, `GITEE_TOKEN`, `PR_REVIEW_TOKEN` | — |
+| AtomGit | `atomgit` | `atomgit.com` | `https://api.atomgit.com/api/v5` (a web root is also accepted) | `owner/name` | `token`, `ATOMGIT_TOKEN`, `GITEE_TOKEN`, `PR_REVIEW_TOKEN` | — |
+| Codeup | `codeup` | `codeup.aliyun.com` | `https://openapi-rdc.aliyuncs.com` | `org/group/repo` | `token`, `CODEUP_TOKEN`, `YUNXIAO_TOKEN`, `PR_REVIEW_TOKEN` | — |
+
+- The `baseUrl` setting itself defaults to empty; the table shows the value the adapter uses when it is empty (Gitea/Forgejo takes it from the workspace origin).
+- `gitea` and `forgejo` are aliases for the same Gitea API and share one cache file.
+- GitCode and AtomGit accept `GITEE_TOKEN` because they share the Gitee v5 API family.
+- `tea` login works for any Gitea-compatible host, including Codeberg.
+- Codeup also needs `organizationId` (the first segment of `repo` when empty) and, optionally, `projectId` (resolved through the API when empty).
+- Self-hosted Gitea / Forgejo hosts are detected from the origin. Any unrecognized host falls back to the Gitea adapter, including self-hosted GitLab and GitHub Enterprise; the panel uses Gitea endpoints for them, and `platform: gitlab` in the default config is overridden once a workspace origin is recognized.
+- With `platform: forgejo` and an empty `baseUrl`, the host has no address until a workspace origin supplies one, so it does not poll.
+- This table and the platform map in `providers.js` are maintained together; update both when a platform changes.
+- A token needs permission to read pull requests and post comments; for private repositories it needs repository read access.
 
 ## Install
 
@@ -44,14 +68,16 @@ dsh plugin --profile <name> add github:modouai/dsh-pr-review-plugin
 
 Point the install at a tag or commit (`…#<tag-or-sha>`) to pin what actually runs. The package is also published to npm, so `dsh plugin --profile <name> add @modouai/dsh-pr-review` works by name. To install a local checkout instead, pass its path: `dsh plugin --profile <name> add ./dsh-pr-review-plugin` (run `pnpm install` inside the checkout first — a linked checkout keeps its own `node_modules`).
 
-Verify the layer before starting, then restart Harness:
+Before starting Harness, provide a token for your host: an environment variable, `token` in the config, or the CLI login for GitHub / Gitea (see [Supported code hosts](#supported-code-hosts)). GitLab, the Gitee family and Codeup take `token` or environment variables; they have no CLI login. In a git workspace no repository setting is needed; the workspace `origin` selects the repository and platform.
+
+Verify the layer, then start Harness:
 
 ```sh
 dsh --profile <name> --dump-config   # shows a "# == @modouai/dsh-pr-review" layer
 dsh --profile <name>
 ```
 
-The bundle ships its default configuration in [`cordis.patch.yml`](cordis.patch.yml). See [Configuration](#configuration) for where to change values and what each key does.
+On startup the host logs a `[pr-review] ready: …` line with the active host and API base. The bundle ships its default configuration in [`cordis.patch.yml`](cordis.patch.yml); see [Configuration](#configuration) for the default target and the remaining keys.
 
 ## Configuration
 
@@ -99,20 +125,20 @@ dsh --profile <name> --dump-config
 
 Repository selection is workspace-first:
 
-- When the session workspace is a git repository with an `origin` remote, that remote selects the repository and platform. `github.com` selects GitHub, `gitlab.com` GitLab, `gitee.com` Gitee, `gitcode.com` / `gitcode.net` GitCode, `atomgit.com` AtomGit, `codeup.aliyun.com` Codeup; other hosts fall back to the Gitea API.
+- When the session workspace is a git repository with an `origin` remote, that remote selects the repository and platform. The host mapping is in [Supported code hosts](#supported-code-hosts); an unrecognized host falls back to the Gitea API.
 - Switching workspaces switches the active repository, its pull request list, and its cache.
-- `platform`, `baseUrl`, and `repo` are fallback values. The plugin uses them before a workspace origin is recognized (for example, during startup polling or in a non-git workspace). Once a workspace resolves an origin, the origin wins.
+- `platform`, `baseUrl`, and `repo` are used only before a workspace resolves a repository: when set, the host polls that target in the background. Once a workspace attaches, its origin wins and the panel follows it.
 
-Use the fallback when the workspace is not a git repository, or when you want polling to start on a known repository before any workspace is attached.
+A workspace that is not a git repository activates no repository: the panel shows the workspace error and does not fall back to the default target. Self-hosted GitLab and GitHub Enterprise origins are not recognized as their own platform; see [Supported code hosts](#supported-code-hosts).
 
 ### Connection settings
 
 | Key | Accepted values | Default | Effect |
 |---|---|---|---|
-| `platform` | `github`, `gitea`, `forgejo`, `gitlab`, `gitee`, `gitcode`, `atomgit`, `codeup` | `forgejo` | API family for the fallback repository. `gitea` and `forgejo` are aliases for the same Gitea API; `gitee`, `gitcode` and `atomgit` share one adapter. |
-| `baseUrl` | URL, or empty | empty | Fallback host. Gitea/Forgejo: site root without `/api/v1`. GitLab: instance root without `/api/v4` (default `https://gitlab.com`). Gitee: API root (default `https://gitee.com/api/v5`). GitCode: `https://api.gitcode.com/api/v5`. AtomGit: `https://api.atomgit.com/api/v5`. Codeup: API domain (default `https://openapi-rdc.aliyuncs.com`; a Region-edition organization uses its own `*.devops.aliyuncs.com` domain). Empty means "derive from the workspace origin". |
-| `repo` | `owner/name`, or empty | empty | Fallback repository. GitLab subgroups (`group/subgroup/project`) are supported. Empty means "derive from the workspace origin". |
-| `organizationId` | string, or empty | empty | Codeup only. Empty reads the first segment of the workspace origin. |
+| `platform` | `github`, `gitea`, `forgejo`, `gitlab`, `gitee`, `gitcode`, `atomgit`, `codeup` | `forgejo` | API family for the default target. `gitea` and `forgejo` are aliases for the same Gitea API; `gitee`, `gitcode` and `atomgit` share one adapter. |
+| `baseUrl` | URL, or empty | empty | Default target host. Empty uses the platform value listed in [Supported code hosts](#supported-code-hosts); for Gitea/Forgejo that value is the workspace origin. |
+| `repo` | `owner/name`, or empty | empty | Default target repository. GitLab subgroups (`group/subgroup/project`) are supported; Codeup uses `org/group/repo`. Empty means "derive from the workspace origin". |
+| `organizationId` | string, or empty | empty | Codeup only. Empty takes the first segment of `repo` (the origin path when the workspace supplies it). |
 | `projectId` | string, or empty | empty | Codeup only. Numeric project id. Empty resolves it from `organizationId` + repository path through the Codeup API. |
 | `token` | token string, or empty | empty | Explicit API token. Empty falls back to environment variables; GitHub and Gitea/Forgejo also try their CLI login (see below). |
 
@@ -167,7 +193,7 @@ export ATOMGIT_TOKEN=...   # AtomGit (optional override)
 export CODEUP_TOKEN=...    # Codeup (YUNXIAO_TOKEN works too)
 ```
 
-**Start on a fixed Gitea/Forgejo repository.** Use this for a non-git workspace, or to poll before a workspace is attached:
+**Start on a fixed Gitea/Forgejo repository.** Use this for polling before a workspace is attached; a git workspace still switches the panel to its own origin:
 
 ```yaml
 - id: pr-review
@@ -207,7 +233,29 @@ export CODEUP_TOKEN=...    # Codeup (YUNXIAO_TOKEN works too)
     maxDiffCharsPerFile: 14000
 ```
 
-**Start on a fixed Codeup repository.** Codeup needs the organization id and the repository path; both default from the workspace origin. `projectId` is optional (it is resolved through the Codeup API when empty):
+**Start on a fixed GitLab repository.** Use the instance root as `baseUrl`; subgroups stay in `repo`:
+
+```yaml
+- id: pr-review
+  name: '@modouai/dsh-pr-review'
+  config:
+    platform: gitlab
+    baseUrl: https://gitlab.com
+    repo: group/subgroup/project
+    token: ''
+    pollSeconds: 60
+    autoReview: true
+    autoReconclude: false
+    commentLanguage: en
+    provider: ''
+    model: ''
+    reasoningEffort: 'off'
+    maxDiffCharsPerFile: 14000
+```
+
+This example targets `gitlab.com`; a self-hosted GitLab origin is not detected and falls back to the Gitea adapter. Do not rely on `platform: gitlab` to override it: a workspace origin replaces it once recognized.
+
+**Start on a fixed Codeup repository.** Set `repo` to `org/group/repo`; leave `organizationId` empty to take the first segment, and `projectId` empty to resolve it through the Codeup API:
 
 ```yaml
 - id: pr-review
@@ -229,7 +277,9 @@ export CODEUP_TOKEN=...    # Codeup (YUNXIAO_TOKEN works too)
     maxDiffCharsPerFile: 14000
 ```
 
-**Start on a fixed GitLab or Gitee-family repository.** Use `platform: gitlab` with the instance root, or `platform: gitee` / `gitcode` / `atomgit` with the matching API root; `repo` stays `owner/name` (GitLab also accepts `group/subgroup/project`).
+With the `org/group/repo` form, a non-empty `organizationId` overrides the first segment; the rest is the repository path.
+
+**Start on a fixed Gitee-family repository.** Use `platform: gitee`, `gitcode`, or `atomgit`; `baseUrl` can be the web root or the matching API root; `repo` stays `owner/name`.
 
 **Keep cost and latency down.** Poll less often, review only on demand, and send less diff text. These keys go inside the row's `config:` block:
 

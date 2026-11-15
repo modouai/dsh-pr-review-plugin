@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "PR review",
-    "description": "Reviews GitHub and Gitea/Forgejo pull requests: automatic report, entry-first file order, per-file explanation, and follow-up conversation."
+    "description": "Reviews pull requests on GitHub, GitLab, Gitea/Forgejo/Codeberg, Gitee, GitCode, AtomGit and Codeup: automatic report, entry-first file order, per-file explanation, and follow-up conversation."
   },
   "panel": {
     "title": "PR review",
@@ -23,7 +23,7 @@
     "conclude": "Final conclusion",
     "concluding": "Concluding…",
     "empty": "No pull requests loaded yet.",
-    "noToken": "Gitea/Forgejo token missing. Add a token to the plugin config.",
+    "noToken": "Code host token missing. Add it to the plugin config or an environment variable; GitHub and Gitea/Forgejo can also use the gh / tea CLI login.",
     "orderHint": "Entry files come first: review in this order.",
     "changed": "changed",
     "added": "added",

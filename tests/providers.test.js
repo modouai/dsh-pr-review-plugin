@@ -5,11 +5,12 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import nodePath from 'node:path';
 
-import { GH_BINARIES, resolveProviderConfig, resolveToken, createClient } from '../providers.js';
+import { ENV_TOKENS, GH_BINARIES, PLATFORMS, missingTokenMessage, resolveProviderConfig, resolveToken, createClient } from '../providers.js';
 import { countDiffLines, unifiedDiffFromFiles } from '../provider-common.js';
 import { redactUrl } from '../provider-http.js';
 
@@ -171,6 +172,28 @@ test('resolveToken: finds gh outside the desktop app PATH', {
       else process.env[key] = value;
     }
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('missingTokenMessage: covers every env var resolveToken actually reads', () => {
+  for (const platform of PLATFORMS) {
+    const key = platform === 'gitea' ? 'forgejo' : platform;
+    const message = missingTokenMessage(platform);
+    for (const name of ENV_TOKENS[key]) {
+      assert.ok(message.includes(name), `${platform} message missing ${name}`);
+    }
+  }
+  assert.ok(missingTokenMessage('github').includes('gh auth login'));
+  assert.ok(missingTokenMessage('gitea').includes('tea login'));
+  assert.ok(!missingTokenMessage('github').includes('PR_REVIEW_TOKEN'));
+  assert.ok(!missingTokenMessage('gitlab').includes('gh auth login'));
+  assert.ok(!missingTokenMessage('gitlab').includes('tea login'));
+});
+
+test('package keywords cover every platform', () => {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  for (const platform of PLATFORMS) {
+    assert.ok(pkg.keywords.includes(platform), `package.json keywords missing ${platform}`);
   }
 });
 
