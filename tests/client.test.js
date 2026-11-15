@@ -1064,6 +1064,15 @@ test('the file column shows batch progress and the manual analyze-all button', (
   assert.ok(failing.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 3 })));
   assert.ok(failing.textOnly.includes(fill(dict.analyzingFailed, { failed: 1 })));
 
+  const allFailed = render({ analyzing: { total: 2, done: 2, failed: 2 } });
+  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 2 })));
+  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFailed, { failed: 2 })));
+
+  // Progress without a usable total is not a batch: keep the plain count.
+  const degenerate = render({ analyzing: { total: 0, done: 0, failed: 0 } });
+  assert.ok(degenerate.textOnly.includes(dict.fileUnit));
+  assert.equal(degenerate.textOnly.includes(fill(dict.analyzingFiles, { done: 0, total: 0 })), false);
+
   // The last file of a batch still reports progress until the host clears `analyzing`.
   const finishing = render({ analyzing: { total: 2, done: 2, failed: 0, current: '' } });
   assert.ok(finishing.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 2 })));

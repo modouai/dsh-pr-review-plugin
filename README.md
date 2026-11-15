@@ -148,7 +148,7 @@ A workspace that is not a git repository activates no repository: the panel show
 |---|---|---|---|
 | `pollSeconds` | number ≥ 15 | `60` | How often the plugin polls for open pull requests. It also bounds how quickly new commits are noticed; the minimum is 15 seconds. |
 | `autoReview` | boolean | `true` | Start a round automatically when a pull request first appears or its head SHA changes. Set `false` to review only when you click **Review now**. A failed round is retried after 5 minutes. |
-| `autoAnalyze` | boolean | `true` | Analyze every changed file of a finished round in the background, one model call per file, so a round costs one call per changed file. Set `false` to analyze a file only when you open it, or on demand with **Analyze all**. The automatic pass does not retry failed files; **Analyze all** does. Starting a new round cancels a batch still running from the previous one. A failed file shows its error in the file panel and stays out of the analyzed coverage until it succeeds. |
+| `autoAnalyze` | boolean | `true` | Analyze every changed file of a finished round in the background, one model call per file, so a round costs one call per changed file (100 files, 100 calls). Set `false` to analyze a file only when you open it, or on demand with **Analyze all**. The automatic pass does not retry failed files; **Analyze all** does, costing about one call per unfinished or failed file. Starting a new round cancels a batch still running from the previous one. A failed file shows its error in the file panel and stays out of the analyzed coverage until it succeeds. |
 | `autoReconclude` | boolean | `false` | Regenerate the conclusion when the report or per-file analysis changes after it. Runs at most once every 5 minutes, never during a running round, and only while the conclusion is stale. |
 | `commentLanguage` | `zh`, `en` | `zh` | Language of the published comment's labels, headings, appendix, and footer. It does not translate model-written summaries or findings; the built-in prompts are Chinese. |
 
@@ -310,7 +310,7 @@ The last two snippets are partial on purpose: unlisted keys keep their defaults.
 
 1. In a session, click the **Review PRs** button in the session header (or the card under the composer in an empty session).
 2. Pick a pull request at the top; with `autoReview` on, the first review starts in the background (otherwise click **Review now**).
-3. Click a file in the left column to read its diff and analysis; with `autoAnalyze` on, files are analyzed in the background as the batch progresses, so a file you open early may still be waiting. Click a hunk for the per-segment walkthrough; switch to the full file when needed.
+3. Click a file in the left column to read its diff and analysis; with `autoAnalyze` on, files are analyzed in the background as the batch progresses, so a file you open early may still be waiting; with it off, opening a file starts its analysis. Click a hunk for the per-segment walkthrough; switch to the full file when needed.
 4. Discuss in the main conversation — for example "risk 1 doesn't hold" or "turn suggestion 2 into a blocker" — and the review data updates directly.
 5. Click **Conclude review**; if the report changes afterwards, the panel offers **Regenerate conclusion**.
 6. Click **Publish** to preview the Markdown, select the findings to include, and append the comment. Each round appends a new comment; history is never overwritten.

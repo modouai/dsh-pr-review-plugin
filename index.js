@@ -1341,6 +1341,9 @@ export function apply(ctx, config) {
       // A single missing verdict must not present as "pass".
       verdict: parsed.verdict ?? 'suggest',
     });
+    // Repeat the check at the write point: an await added between parse and store must
+    // not reopen the stale-write window.
+    if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     record.explanations.set(filePath, {
       status: 'done',
       error: null,
@@ -1382,9 +1385,11 @@ export function apply(ctx, config) {
     }
   }
 
-  /** True while `job` still owns this record: no new round, no replacement record. */
+  /** True while `job` still owns this record: same job, same round, still in the map. */
   function analysisBatchCurrent(record, job) {
-    return record.analyzing === job && state.reviews.get(record.number) === record;
+    return record.analyzing === job
+      && (record.analysisEpoch ?? 0) === job.epoch
+      && state.reviews.get(record.number) === record;
   }
 
   /**
@@ -1409,7 +1414,15 @@ export function apply(ctx, config) {
       if (unanalyzed || (includeErrors && entry !== undefined && entry.status === 'error')) pending.push(file.path);
     }
     if (pending.length === 0) return false;
-    const job = { total: pending.length, done: 0, failed: 0, current: pending[0], abort: new AbortController() };
+    const job = {
+      total: pending.length,
+      done: 0,
+      failed: 0,
+      current: pending[0],
+      abort: new AbortController(),
+      // The round this batch belongs to; every guard rejects a batch from another round.
+      epoch: record.analysisEpoch ?? 0,
+    };
     record.analyzing = job;
     scheduleSave();
     void runAnalysisBatch(record, job, pending);

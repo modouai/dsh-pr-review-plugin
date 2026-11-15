@@ -1120,11 +1120,15 @@ window.__ModuleLoader__.load({
       const { t, overviewMode, onSelectOverview, files, filePath, review, onOpenFile } = props;
       const width = typeof props.width === 'number' && props.width > 0 ? props.width : 0;
       const style = width === 0 ? undefined : { flex: `0 0 ${width}px`, minWidth: `${width}px` };
-      const analyzing = props.analyzing ?? null;
+      // A batch always reports a positive total; anything else is not usable progress and
+      // falls back to the plain file count instead of showing "0/0".
+      const analyzing = typeof props.analyzing?.total === 'number' && props.analyzing.total > 0
+        ? props.analyzing
+        : null;
       const countLabel = analyzing === null
         ? `${files.length} ${t('fileUnit')}`
-        : fill(t('analyzingFiles'), { done: analyzing.done ?? 0, total: analyzing.total ?? 0 })
-          + (analyzing.failed > 0 ? fill(t('analyzingFailed'), { failed: analyzing.failed }) : '');
+        : fill(t('analyzingFiles'), { done: analyzing.done ?? 0, total: analyzing.total })
+          + ((analyzing.failed ?? 0) > 0 ? fill(t('analyzingFailed'), { failed: analyzing.failed }) : '');
       return h(
         'aside',
         { className: 'prr-files', style },
@@ -2992,6 +2996,10 @@ window.__ModuleLoader__.load({
      * popover. The selected path stays with the caller; everything else lives here.
      */
     function useFileDetail({ withRepo, generationRef, review, prNumber, filePath }) {
+      // A response fetched for an older head must not land after a round switch; the ref
+      // stays current across renders, unlike the closure that started the request.
+      const headRef = React.useRef(review?.headSha ?? '');
+      headRef.current = review?.headSha ?? '';
       const [fileDiff, setFileDiff] = React.useState(null);
       const [fileDiffError, setFileDiffError] = React.useState('');
       const [fileContent, setFileContent] = React.useState(null);
@@ -3004,20 +3012,24 @@ window.__ModuleLoader__.load({
     const loadFileDiff = React.useCallback(async (number, path) => {
       if (typeof number !== 'number' || path === '') return;
       const generation = generationRef.current;
+      const head = headRef.current;
       setFileDiff(null);
       setFileDiffError('');
       try {
         const data = await api(withRepo(`/pr-review-api/file?number=${number}&path=${encodeURIComponent(path)}`));
-        if (generation !== generationRef.current) return;
+        if (generation !== generationRef.current || headRef.current !== head) return;
         setFileDiff(data.file ?? null);
       } catch (error) {
-        if (generation === generationRef.current) setFileDiffError(error instanceof Error ? error.message : String(error));
+        if (generation === generationRef.current && headRef.current === head) {
+          setFileDiffError(error instanceof Error ? error.message : String(error));
+        }
       }
     }, []);
 
     const loadFileContent = React.useCallback(async (number, path) => {
       if (typeof number !== 'number' || path === '') return null;
-      const key = fileContentKey(number, review?.headSha ?? '', path);
+      const head = headRef.current;
+      const key = fileContentKey(number, head, path);
       const cached = fileContentCache.get(key);
       if (cached !== undefined) {
         setFileContent(cached);
@@ -3029,14 +3041,16 @@ window.__ModuleLoader__.load({
       setFileContentError('');
       try {
         const data = await api(withRepo(`/pr-review-api/file-content?number=${number}&path=${encodeURIComponent(path)}`));
-        if (generation !== generationRef.current) return null;
+        if (generation !== generationRef.current || headRef.current !== head) return null;
         const file = data.file ?? null;
         if (file !== null) fileContentCache.set(key, file);
         setFileContent(file);
         return file;
       } catch (error) {
-        setFileContentError(error instanceof Error ? error.message : String(error));
-        setFileContent(null);
+        if (generation === generationRef.current && headRef.current === head) {
+          setFileContentError(error instanceof Error ? error.message : String(error));
+          setFileContent(null);
+        }
         return null;
       } finally {
         setFileContentBusy(false);

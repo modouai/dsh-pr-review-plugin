@@ -2028,9 +2028,11 @@ test('a new round cancels the batch and drops its in-flight answer', async () =>
     focus: {},
   });
   let aborted = false;
+  const explainPrompts = [];
   const llm = (options) => {
     const prompt = JSON.stringify(options.messages);
     if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    explainPrompts.push(prompt);
     // llmSlow rejects on abort; record it so the test can prove the call was cancelled,
     // not merely ignored after it finished.
     options.signal.addEventListener('abort', () => { aborted = true; }, { once: true });
@@ -2051,6 +2053,7 @@ test('a new round cancels the batch and drops its in-flight answer', async () =>
     // epoch-only paths — a provider that ignores the abort, and a manual explain that
     // holds no signal — are covered by the two tests below.
     assert.equal(aborted, true, 'the round-1 model call was aborted, not left running');
+    assert.equal(explainPrompts.length, 1, 'the batch stopped instead of starting the next file');
 
     const after = await plugin.review();
     assert.equal(after.round, 2);
@@ -2421,6 +2424,45 @@ test('aborted batches release their analysis slots for later batches', async () 
       && (current.explanations ?? []).length === 2
       && (current.explanations ?? []).every((entry) => entry.status === 'done'));
     assert.equal(done.explanations.length, 2);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the analysis slot ceiling caps concurrent model calls at two', async () => {
+  let active = 0;
+  let peak = 0;
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText('{}')(options);
+    active += 1;
+    peak = Math.max(peak, active);
+    return (async function* () {
+      try {
+        await delay(60);
+        yield { type: 'text-delta', text: BATCH_EXPLANATION };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+      } finally {
+        active -= 1;
+      }
+    })();
+  };
+  const plugin = await setup({
+    fetch: multiPrFetch,
+    llm,
+    reviews: { 1: unanalyzedPr(1), 2: unanalyzedPr(2), 3: unanalyzedPr(3), 4: unanalyzedPr(4) },
+  });
+  try {
+    for (const number of [1, 2, 3, 4]) {
+      const started = await plugin.call('/pr-review-api/analyze', 'POST', { number });
+      assert.equal(started.json.started, true);
+    }
+    for (const number of [1, 2, 3, 4]) {
+      await plugin.waitFor(number, (current) => current.analyzing === null
+        && (current.explanations ?? []).length === 2
+        && (current.explanations ?? []).every((entry) => entry.status === 'done'), 8000);
+    }
+    assert.equal(peak, 2, 'four batches never exceed the two-slot ceiling');
   } finally {
     await plugin.dispose();
   }
