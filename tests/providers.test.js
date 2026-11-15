@@ -5,8 +5,11 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import nodePath from 'node:path';
 
-import { resolveProviderConfig, resolveToken, createClient } from '../providers.js';
+import { GH_BINARIES, resolveProviderConfig, resolveToken, createClient } from '../providers.js';
 import { countDiffLines, unifiedDiffFromFiles } from '../provider-common.js';
 import { redactUrl } from '../provider-http.js';
 
@@ -116,6 +119,45 @@ test('resolveToken: platform environment variables in order', async () => {
       if (previous[name] === undefined) delete process.env[name];
       else process.env[name] = previous[name];
     }
+  }
+});
+
+test('resolveToken: gh fallback includes absolute paths for desktop launches', () => {
+  assert.equal(GH_BINARIES[0], 'gh');
+  assert.ok(GH_BINARIES.includes('/opt/homebrew/bin/gh'));
+  assert.ok(GH_BINARIES.includes('/usr/local/bin/gh'));
+});
+
+test('resolveToken: finds gh outside the desktop app PATH', {
+  skip: process.platform === 'win32' ? 'POSIX shell fixture' : false,
+}, async () => {
+  const root = await mkdtemp(nodePath.join(tmpdir(), 'pr-review-gh-'));
+  const bin = nodePath.join(root, 'bin');
+  const home = nodePath.join(root, 'home');
+  await mkdir(bin);
+  await mkdir(home);
+  const gh = nodePath.join(bin, 'gh');
+  await writeFile(gh, '#!/bin/sh\necho fake-gh-token\n');
+  await chmod(gh, 0o755);
+  const saved = {
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+    GH_TOKEN: process.env.GH_TOKEN,
+  };
+  try {
+    process.env.PATH = bin;
+    process.env.HOME = home;
+    delete process.env.GITHUB_TOKEN;
+    delete process.env.GH_TOKEN;
+    const provider = resolveProviderConfig({ platform: 'github', repo: 'owner/repo' });
+    assert.equal(await resolveToken({}, provider), 'fake-gh-token');
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(root, { recursive: true, force: true });
   }
 });
 

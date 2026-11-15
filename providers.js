@@ -121,6 +121,18 @@ function tokenFromGhHosts(text, host) {
   return null;
 }
 
+/**
+ * gh CLI locations tried in order. A desktop app launches with the minimal
+ * `/usr/bin:/bin:/usr/sbin:/sbin` PATH, so a Homebrew or user-local install is
+ * invisible to a plain `execFile('gh')`.
+ */
+export const GH_BINARIES = Object.freeze([
+  'gh',
+  '/opt/homebrew/bin/gh',
+  '/usr/local/bin/gh',
+  '/usr/bin/gh',
+]);
+
 /** Ask the gh CLI for a token, preferring the login of the repository owner. */
 async function ghCliToken(apiHost, owner) {
   const host = apiHost.startsWith('api.') ? apiHost.slice(4) : apiHost;
@@ -128,13 +140,15 @@ async function ghCliToken(apiHost, owner) {
   if (owner !== '') attempts.push(['auth', 'token', '--hostname', host, '--user', owner]);
   attempts.push(['auth', 'token', '--hostname', host]);
   attempts.push(['auth', 'token']);
-  for (const args of attempts) {
-    try {
-      const { stdout } = await execFileAsync('gh', args, { timeout: 8000, env: process.env });
-      const token = stdout.trim();
-      if (token !== '') return token;
-    } catch {
-      // gh absent, logged out, or without that user: try the next attempt.
+  for (const binary of GH_BINARIES) {
+    for (const args of attempts) {
+      try {
+        const { stdout } = await execFileAsync(binary, args, { timeout: 8000, env: process.env });
+        const token = stdout.trim();
+        if (token !== '') return token;
+      } catch {
+        // Binary absent, logged out, or without that user: try the next binary/attempt.
+      }
     }
   }
   return null;
