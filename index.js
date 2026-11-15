@@ -70,6 +70,7 @@ const DEFAULTS = {
   projectId: '',
   pollSeconds: 60,
   autoReview: true,
+  autoAnalyze: true,
   provider: '',
   model: '',
   reasoningEffort: 'off',
@@ -99,6 +100,7 @@ export const Config = Schema.object({
   projectId: Schema.string().default(DEFAULTS.projectId),
   pollSeconds: Schema.number().min(15).default(DEFAULTS.pollSeconds),
   autoReview: Schema.boolean().default(DEFAULTS.autoReview),
+  autoAnalyze: Schema.boolean().default(DEFAULTS.autoAnalyze),
   provider: Schema.string().default(DEFAULTS.provider),
   model: Schema.string().default(DEFAULTS.model),
   reasoningEffort: Schema.union(['off', 'low', 'high', 'max']).default(DEFAULTS.reasoningEffort),
@@ -172,6 +174,15 @@ function serializeReview(record) {
     pull: record.pull,
     files: record.files,
     filesTruncated: record.filesTruncated === true,
+    analyzing: record.analyzing === null || record.analyzing === undefined
+      ? null
+      : {
+          total: record.analyzing.total,
+          done: record.analyzing.done,
+          failed: record.analyzing.failed,
+          current: record.analyzing.current,
+          startedAt: record.analyzing.startedAt,
+        },
     report: record.report,
     explanations: [...record.explanations.entries()].map(([filePath, entry]) => ({
       file: filePath,
@@ -831,6 +842,8 @@ export function apply(ctx, config) {
       roundHistory: [],
       concluding: null,
       concludingAbort: null,
+      analyzing: null,
+      analysisEpoch: 0,
       publishing: false,
       concludeError: null,
       lastAutoConcludeAt: 0,
@@ -1091,6 +1104,8 @@ export function apply(ctx, config) {
       roundHistory: [],
       concluding: null,
       concludingAbort: null,
+      analyzing: null,
+      analysisEpoch: 0,
       publishing: false,
       concludeError: null,
       lastAutoConcludeAt: 0,
@@ -1120,6 +1135,9 @@ export function apply(ctx, config) {
         : (Array.isArray(record.publishedItems) ? record.publishedItems : []),
     };
     abortConclude(record);
+    // Invalidate a running batch: its in-flight explain must not write into the new round.
+    record.analyzing = null;
+    record.analysisEpoch = (record.analysisEpoch ?? 0) + 1;
     history.push(makeRoundEntry(previousRoundEntry.round + 1, '', now));
     record.round = previousRoundEntry.round + 1;
     record.report = null;
@@ -1227,6 +1245,8 @@ export function apply(ctx, config) {
     record.finishedAt = Date.now();
     currentRoundEntry(record).finishedAt = record.finishedAt;
     scheduleSave();
+    // Every finished round analyzed in the background: files no longer wait for a click.
+    ensureAutoAnalyze(record);
   }
 
   /** In-flight file explanations: duplicate requests share one model call. */
@@ -1260,6 +1280,9 @@ export function apply(ctx, config) {
 
   /** The model call behind explainFile; callers deduplicate through explainInFlight. */
   async function explainFileUncached(record, number, filePath, cached) {
+    // A new round may start while the model is answering; its per-file analyses are cleared,
+    // so this answer must not land in the fresh round.
+    const epoch = record.analysisEpoch ?? 0;
     const diffFiles = await ensureDiffFiles(record);
     const file = (record.files ?? []).find((item) => item.path === filePath) ?? {
       path: filePath,
@@ -1293,6 +1316,7 @@ export function apply(ctx, config) {
       // A single missing verdict must not present as "pass".
       verdict: parsed.verdict ?? 'suggest',
     });
+    if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     record.explanations.set(filePath, {
       status: 'done',
       error: null,
@@ -1303,6 +1327,105 @@ export function apply(ctx, config) {
     scheduleSave();
     maybeAutoConclude(record);
     return { explanation, cached: false };
+  }
+
+  // ---------- batch file analysis ----------
+
+  /**
+   * Batches of different PRs run in parallel (auto review can finish several rounds at
+   * once); this ceiling keeps their model calls from piling up on the provider.
+   */
+  const ANALYZE_CONCURRENCY = 2;
+  let analyzeActive = 0;
+  const analyzeWaiters = [];
+
+  /** Run `task` while holding one of the analysis slots. */
+  async function withAnalyzeSlot(task) {
+    while (analyzeActive >= ANALYZE_CONCURRENCY) {
+      await new Promise((resolve) => analyzeWaiters.push(resolve));
+    }
+    analyzeActive += 1;
+    try {
+      return await task();
+    } finally {
+      analyzeActive -= 1;
+      const next = analyzeWaiters.shift();
+      if (next !== undefined) next();
+    }
+  }
+
+  /** True while `job` still owns this record: no new round, no replacement record. */
+  function analysisBatchCurrent(record, job) {
+    return record.analyzing === job && state.reviews.get(record.number) === record;
+  }
+
+  /**
+   * Analyze every file that has no analysis yet, one model call at a time.
+   * `includeErrors` retries files whose previous analysis failed; the automatic path
+   * leaves them alone so a broken call is not repeated on every panel poll.
+   */
+  function startAnalysisBatch(record, options = {}) {
+    if (record === undefined || record === null) return false;
+    if (record.status !== 'done') return false;
+    if (record.report === null || record.report === undefined) return false;
+    if (record.analyzing !== null && record.analyzing !== undefined) return false;
+    const includeErrors = options.includeErrors === true;
+    const pending = [];
+    for (const file of Array.isArray(record.files) ? record.files : []) {
+      const entry = record.explanations.get(file.path);
+      if (entry === undefined || (includeErrors && entry.status === 'error')) pending.push(file.path);
+    }
+    if (pending.length === 0) return false;
+    const job = { total: pending.length, done: 0, failed: 0, current: pending[0], startedAt: Date.now() };
+    record.analyzing = job;
+    scheduleSave();
+    void runAnalysisBatch(record, job, pending);
+    return true;
+  }
+
+  /** Auto mode entry: honors the `autoAnalyze` setting. */
+  function ensureAutoAnalyze(record) {
+    if (settings.autoAnalyze !== true) return false;
+    return startAnalysisBatch(record);
+  }
+
+  /** The batch itself; a failed file is kept on the record and does not stop the rest. */
+  async function runAnalysisBatch(record, job, pending) {
+    try {
+      for (const filePath of pending) {
+        if (!analysisBatchCurrent(record, job)) return;
+        job.current = filePath;
+        try {
+          // Re-check after waiting for a slot: a new round may have taken over meanwhile.
+          const result = await withAnalyzeSlot(() => (
+            analysisBatchCurrent(record, job)
+              ? explainFile(record.number, filePath, false)
+              : null
+          ));
+          if (result === null) return;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          console.warn(`[pr-review] PR #${record.number} 自动分析 ${filePath} 失败：${message}`);
+          if (!analysisBatchCurrent(record, job)) return;
+          record.explanations.set(filePath, {
+            status: 'error',
+            error: message,
+            explanation: null,
+            chat: record.explanations.get(filePath)?.chat ?? [],
+            updatedAt: Date.now(),
+          });
+          job.failed += 1;
+        }
+        if (!analysisBatchCurrent(record, job)) return;
+        job.done += 1;
+        scheduleSave();
+      }
+    } finally {
+      if (analysisBatchCurrent(record, job)) {
+        record.analyzing = null;
+        scheduleSave();
+      }
+    }
   }
 
   /** Continue the conversation about one file, or about the whole PR. */
@@ -1531,6 +1654,7 @@ export function apply(ctx, config) {
         repo: provider.repo,
         baseUrl: provider.baseUrl,
         autoReview: settings.autoReview !== false,
+        autoAnalyze: settings.autoAnalyze === true,
         pollSeconds: settings.pollSeconds,
         commentLanguage: commentLanguage(),
         autoReconclude: settings.autoReconclude === true,
@@ -1564,7 +1688,10 @@ export function apply(ctx, config) {
         sendError(res, 400, 'bad-request', 'number must be a positive integer');
         return;
       }
-      sendJson(res, 200, { ok: true, review: serializeReview(state.reviews.get(number)) });
+      const record = state.reviews.get(number);
+      // Resume a batch the app restart or a disabled setting left unfinished.
+      ensureAutoAnalyze(record);
+      sendJson(res, 200, { ok: true, review: serializeReview(record) });
     },
     POST: async (req, res) => {
       await ensureRepoFor(req);
@@ -1623,6 +1750,27 @@ export function apply(ctx, config) {
       }
       const result = await explainFile(number, filePath, body?.force === true);
       sendJson(res, 200, { ok: true, ...result });
+    },
+  });
+
+  // Manual batch: analyze every file that has no analysis yet and retry the failed ones.
+  route(`${PREFIX}/analyze`, {
+    POST: async (req, res) => {
+      await ensureRepoFor(req);
+      const text = await readBoundedBody(req);
+      const body = text === null ? null : parseBody(text);
+      const number = Number(body?.number);
+      if (!Number.isInteger(number) || number <= 0) {
+        sendError(res, 400, 'bad-request', 'number must be a positive integer');
+        return;
+      }
+      const record = state.reviews.get(number);
+      if (record === undefined) {
+        sendError(res, 404, 'not-found', 'review not found');
+        return;
+      }
+      const started = startAnalysisBatch(record, { includeErrors: true });
+      sendJson(res, 200, { ok: true, started });
     },
   });
 

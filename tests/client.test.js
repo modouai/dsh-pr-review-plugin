@@ -1016,6 +1016,48 @@ test('the file column carries the pinned overview entry above the list', () => {
   assert.equal(inactiveNav.props['data-active'], 'false');
 });
 
+test('the file column shows batch progress and the manual analyze-all button', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const t = translator(parts);
+  const files = [{ path: 'src/a.js', order: 1, severity: '', additions: 1, deletions: 0, reason: '' }];
+  const hits = [];
+  const render = (extra) => fake.render(fake.React.createElement(parts.FilesPane, {
+    t,
+    overviewMode: false,
+    onSelectOverview: () => {},
+    files,
+    filePath: '',
+    review: { files },
+    onOpenFile: () => {},
+    ...extra,
+  }));
+  const analyzeAllButton = (rendered) => rendered.elements.find(
+    (node) => node.type === 'button' && fake.textOf(node).trim() === '全部分析',
+  );
+
+  // Automatic mode: progress replaces the file count and no button competes with it.
+  const running = render({ analyzing: { total: 3, done: 1, failed: 0, current: 'src/a.js' } });
+  assert.match(running.textOnly, /分析中 1\/3/);
+  assert.equal(analyzeAllButton(running), undefined);
+
+  // Manual mode: the count stays and the batch button appears.
+  const manual = render({ manual: true, analyzeAllBusy: false, onAnalyzeAll: () => hits.push('all') });
+  assert.match(manual.textOnly, /1 个文件/);
+  const button = analyzeAllButton(manual);
+  assert.ok(button, 'manual mode renders the analyze-all button');
+  button.props.onClick();
+  assert.deepEqual(hits, ['all']);
+
+  // While the request is in flight the button reports the work and cannot be clicked twice.
+  const busy = render({ manual: true, analyzeAllBusy: true });
+  const busyButton = busy.elements.find(
+    (node) => node.type === 'button' && fake.textOf(node).trim() === '正在分析…',
+  );
+  assert.ok(busyButton);
+  assert.equal(busyButton.props.disabled, true);
+});
+
 // ---------- v2: right-sidebar review tab ----------
 
 test('sidebar review addresses round-trip the workspace cwd and an optional PR number', () => {

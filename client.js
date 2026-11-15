@@ -72,6 +72,9 @@ window.__ModuleLoader__.load({
         fileSuggestions: '改进建议',
         explaining: '正在分析…',
         reExplain: '重新分析',
+        analyzeAll: '全部分析',
+        analyzeAllHint: '逐个分析还没有分析的文件；已有的分析保留，失败的文件会重试。',
+        analyzingFiles: '分析中 {done}/{total}',
         emptyPr: '没有打开的 PR',
         emptyReview: '该 PR 尚未审查，点「立即审查」开始。',
         emptyFile: '选择左侧文件查看变更与审查详情。',
@@ -274,6 +277,9 @@ window.__ModuleLoader__.load({
         fileSuggestions: 'Suggestions',
         explaining: 'Analyzing…',
         reExplain: 'Analyze again',
+        analyzeAll: 'Analyze all',
+        analyzeAllHint: 'Analyze every file that has no analysis yet. Existing analyses stay; failed files are retried.',
+        analyzingFiles: 'Analyzing {done}/{total}',
         emptyPr: 'No open pull requests',
         emptyReview: 'This pull request has no review yet. Start one with Review now.',
         emptyFile: 'Pick a file on the left to see its diff and review.',
@@ -1112,6 +1118,12 @@ window.__ModuleLoader__.load({
       const { t, overviewMode, onSelectOverview, files, filePath, review, onOpenFile } = props;
       const width = typeof props.width === 'number' && props.width > 0 ? props.width : 0;
       const style = width === 0 ? undefined : { flex: `0 0 ${width}px`, minWidth: `${width}px` };
+      const analyzing = props.analyzing ?? null;
+      const countLabel = analyzing === null
+        ? `${files.length} ${t('fileUnit')}`
+        : t('analyzingFiles')
+            .replace('{done}', String(analyzing.done))
+            .replace('{total}', String(analyzing.total));
       return h(
         'aside',
         { className: 'prr-files', style },
@@ -1130,7 +1142,16 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'prr-pane-head' },
           `${t('files')}`,
-          h('span', { className: 'prr-count' }, `${files.length} ${t('fileUnit')}`),
+          h('span', { className: 'prr-count', title: analyzing === null ? undefined : analyzing.current }, countLabel),
+          props.manual === true && analyzing === null && files.length > 0
+            ? h(Btn, {
+                small: true,
+                label: props.analyzeAllBusy === true ? t('explaining') : t('analyzeAll'),
+                title: t('analyzeAllHint'),
+                disabled: props.analyzeAllBusy === true,
+                onClick: () => props.onAnalyzeAll(),
+              })
+            : null,
         ),
         h(
           'div',
@@ -3538,6 +3559,7 @@ window.__ModuleLoader__.load({
       const [detailWidth, setDetailWidth] = React.useState(panelSizing.detail);
       const rootRef = React.useRef(null);
       const [explainBusy, setExplainBusy] = React.useState(false);
+      const [analyzeAllBusy, setAnalyzeAllBusy] = React.useState(false);
       const [wrap, setWrap] = React.useState(false);
       const [mode, setMode] = React.useState('overview');
       const [scrollLine, setScrollLine] = React.useState(0);
@@ -3643,6 +3665,21 @@ window.__ModuleLoader__.load({
           setExplainBusy(false);
         }
       }, [loadReview]);
+
+      /** Manual mode: ask the host to analyze every file that still has no analysis. */
+      const requestAnalyzeAll = React.useCallback(async () => {
+        const number = review?.number ?? stateRef.current.prNumber;
+        if (typeof number !== 'number') return;
+        setAnalyzeAllBusy(true);
+        try {
+          await postJson(withRepo('/pr-review-api/analyze'), { number });
+          await loadReview(number);
+        } catch (error) {
+          setReviewError(error instanceof Error ? error.message : String(error));
+        } finally {
+          setAnalyzeAllBusy(false);
+        }
+      }, [review, loadReview]);
 
       const explanationFor = (target) => {
         if (review === null || target === '') return null;
@@ -3826,12 +3863,14 @@ window.__ModuleLoader__.load({
       }, [sidebar]);
 
 
-      // Poll the review while it is being generated; refresh the PR list slowly.
+      // Poll the review while it is being generated or its files are being analyzed;
+      // refresh the PR list slowly.
       React.useEffect(() => {
         const reviewTimer = setInterval(() => {
           const current = stateRef.current;
           if (current.prNumber === null) return;
-          if (current.review !== null && current.review.status !== 'reviewing') return;
+          const analyzing = current.review?.analyzing ?? null;
+          if (current.review !== null && current.review.status !== 'reviewing' && analyzing === null) return;
           void loadReview(current.prNumber);
         }, 4000);
         const listTimer = setInterval(() => {
@@ -4354,6 +4393,12 @@ window.__ModuleLoader__.load({
         filePath: overviewMode ? '' : filePath,
         review,
         onOpenFile: (path) => void openFile(path),
+        // A historical round has no batch of its own; the progress belongs to the current round.
+        analyzing: historicalView ? null : (review?.analyzing ?? null),
+        // The on-demand batch only makes sense for a finished round in manual mode.
+        manual: historicalView !== true && list?.autoAnalyze === false && review?.status === 'done',
+        analyzeAllBusy,
+        onAnalyzeAll: () => void requestAnalyzeAll(),
       });
 
       return h(
