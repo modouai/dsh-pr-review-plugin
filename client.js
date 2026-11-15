@@ -4788,51 +4788,28 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One attempt to dock the review tab.
-     * - `opened`: the tab is committed (and the column expands itself).
-     * - `pending`: the host has no adopted surface / on-screen session yet; the entry queues the
-     *   request and retries when `sidebarRight.mounted` changes.
-     * - `unsupported` / `failed`: no right sidebar, or both navigation paths threw.
+     * One attempt to dock the review tab with the public navigation controller.
+     * - `opened`: the tab is committed.
+     * - `pending`: the host has no on-screen/adopted session yet; the entry queues and retries.
+     * - `unsupported` / `failed`: no public opener, or navigation threw a real error.
      *
-     * The session-scoped opener is tried first because it works as soon as that session's store
-     * is adopted, while the public `openResource` additionally needs the session to be the
-     * on-screen one (its `require()` throws otherwise, which is why a mounted-only gate never
-     * opened anything on a fresh page).
+     * `openResource` is the documented external entry path. The internal `openResourceIn`
+     * silently does nothing until that session's sidebar store is adopted, so using it first
+     * left the entry stuck whenever the store was not adopted yet.
      */
     function requestReviewTab(ctx, sessionId, cwd) {
       const sidebarRight = ctx.get('sidebarRight') ?? ctx.sidebarRight;
       if (sidebarRight === undefined || sidebarRight === null) return 'unsupported';
+      if (typeof sidebarRight.openResource !== 'function') return 'unsupported';
       const address = sidebarReviewAddress(cwd);
-      let firstError = null;
-      if (typeof sidebarRight.openResourceIn === 'function' && typeof sessionId === 'string' && sessionId !== '') {
-        try {
-          sidebarRight.openResourceIn(sessionId, address, { destination: 'sidebar' });
-          if (reviewTabPresent(sidebarRight, sessionId)) return 'opened';
-        } catch (error) {
-          firstError = error;
-        }
-      }
-      const mounted = mountedSessionStore(ctx);
-      const mountedId = mounted === undefined ? undefined : mounted.getSnapshot();
-      if (mountedId === sessionId && typeof sidebarRight.openResource === 'function') {
-        try {
-          sidebarRight.openResource(address, { destination: 'sidebar' });
-          return reviewTabPresent(sidebarRight, sessionId) ? 'opened' : 'pending';
-        } catch (error) {
-          if (isPendingOpenError(error)) {
-            // The session is on screen but its sidebar surface is still being adopted.
-            firstError = null;
-            return 'pending';
-          }
-          firstError = error;
-        }
-      }
-      if (firstError !== null) {
-        console.warn('[pr-review] 打开审查面板失败', firstError);
+      try {
+        sidebarRight.openResource(address, { destination: 'sidebar' });
+        return reviewTabPresent(sidebarRight, sessionId) ? 'opened' : 'pending';
+      } catch (error) {
+        if (isPendingOpenError(error)) return 'pending';
+        console.warn('[pr-review] 打开审查面板失败', error);
         return 'failed';
       }
-      // Not on screen yet, or its store is still being minted: queue and retry.
-      return 'pending';
     }
 
     /**

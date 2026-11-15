@@ -1032,53 +1032,32 @@ test('sidebar review addresses round-trip the workspace cwd and an optional PR n
   assert.equal(parts.parseSidebarReviewAddress('dsh-resource://pr-review/'), null);
 });
 
-test('requestReviewTab docks with the session-scoped opener, then the public one', () => {
+test('requestReviewTab opens through the public navigation controller', () => {
   const client = loadClient();
   const { parts } = client;
-  const mountedStore = (sessionId) => ({ getSnapshot: () => sessionId, subscribe: () => () => {} });
   const tab = { contentId: 'dsh-resource://pr-review/x' };
 
-  // Adopted store: the session-scoped opener commits the tab (works even before the column shows).
+  // The public controller is the external entry path; it commits the tab.
   const calls = [];
-  const adopted = {
-    mounted: mountedStore(undefined),
-    openResourceIn: (sessionId, url, options) => calls.push(['in', sessionId, url, options.destination]),
-    openResource: (url, options) => calls.push(['public', url, options.destination]),
+  const ready = {
+    openResource: (url, options) => calls.push([url, options.destination]),
     tabsIn: () => [tab],
   };
-  assert.equal(parts.requestReviewTab({ get: (name) => (name === 'sidebarRight' ? adopted : undefined) }, 'session-a', '/repo/example'), 'opened');
-  assert.equal(calls[0][0], 'in');
-  assert.equal(calls[0][1], 'session-a');
-  assert.equal(calls[0][2], 'dsh-resource://pr-review/%2Frepo%2Fexample');
-  assert.equal(calls[0][3], 'sidebar');
+  assert.equal(parts.requestReviewTab({ get: (name) => (name === 'sidebarRight' ? ready : undefined) }, 'session-a', '/repo/example'), 'opened');
   assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], 'dsh-resource://pr-review/%2Frepo%2Fexample');
+  assert.equal(calls[0][1], 'sidebar');
 
-  // No session-scoped opener: the public navigation works when the session is on screen.
-  const publicCalls = [];
-  const publicOnly = {
-    mounted: mountedStore('session-a'),
-    openResource: (url, options) => publicCalls.push([url, options.destination]),
-    tabsIn: () => [tab],
-  };
-  assert.equal(parts.requestReviewTab({ get: (name) => (name === 'sidebarRight' ? publicOnly : undefined) }, 'session-a', '/repo/example'), 'opened');
-  assert.equal(publicCalls.length, 1);
-  assert.equal(publicCalls[0][0], 'dsh-resource://pr-review/%2Frepo%2Fexample');
-  assert.equal(publicCalls[0][1], 'sidebar');
+  // The internal session-scoped opener is not an external entry path.
+  const internalOnly = { openResourceIn: () => {}, tabsIn: () => [] };
+  assert.equal(parts.requestReviewTab({ get: (name) => (name === 'sidebarRight' ? internalOnly : undefined) }, 'session-a', '/repo/example'), 'unsupported');
 
-  // Nothing adopted yet and the session is not on screen: queue, never throw or fake success.
-  const notReady = {
-    mounted: mountedStore('session-b'),
-    openResourceIn: () => {},
-    tabsIn: () => [],
-  };
-  assert.equal(parts.requestReviewTab({ get: (name) => (name === 'sidebarRight' ? notReady : undefined) }, 'session-a', '/repo/example'), 'pending');
+  // A tab that is not committed yet keeps the request queued.
+  const slow = { openResource: () => {}, tabsIn: () => [] };
+  assert.equal(parts.requestReviewTab({ get: (name) => (name === 'sidebarRight' ? slow : undefined) }, 'session-a', '/repo/example'), 'pending');
 
-  // Older hosts / thrown navigation surface a visible error, never a floating fallback.
-  assert.equal(parts.requestReviewTab({ get: () => undefined }, 'session-a', '/repo/example'), 'unsupported');
   // An unadopted surface is "still opening", not a failure: the caller keeps the request queued.
   const adopting = {
-    mounted: mountedStore('session-a'),
-    openResourceIn: () => {},
     openResource: () => { throw new Error('sidebarRight: no session surface is mounted'); },
     tabsIn: () => [],
   };
@@ -1086,12 +1065,12 @@ test('requestReviewTab docks with the session-scoped opener, then the public one
 
   // A real navigation failure stays visible as an error.
   const broken = {
-    mounted: mountedStore('session-a'),
-    openResourceIn: () => {},
     openResource: () => { throw new Error('sidebarRight: no registered tab type claims "x"'); },
     tabsIn: () => [],
   };
   assert.equal(parts.requestReviewTab({ get: (name) => (name === 'sidebarRight' ? broken : undefined) }, 'session-a', '/repo/example'), 'failed');
+
+  assert.equal(parts.requestReviewTab({ get: () => undefined }, 'session-a', '/repo/example'), 'unsupported');
 });
 
 test('the review entry is visible while connecting and on failure, hidden only at zero PRs', () => {
