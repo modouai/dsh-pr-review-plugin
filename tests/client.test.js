@@ -1052,6 +1052,15 @@ test('the file column shows batch progress and the manual analyze-all button', (
   assert.ok(failing.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 3 })));
   assert.ok(failing.textOnly.includes(fill(dict.analyzingFailed, { failed: 1 })));
 
+  // The last file of a batch still reports progress until the host clears `analyzing`.
+  const finishing = render({ analyzing: { total: 2, done: 2, failed: 0, current: '' } });
+  assert.ok(finishing.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 2 })));
+
+  // Automatic mode with no batch: the plain count returns and no button appears.
+  const idle = render({});
+  assert.ok(idle.textOnly.includes(dict.fileUnit));
+  assert.equal(analyzeAllButton(idle), undefined);
+
   // Manual mode: the count stays and the batch button appears.
   const manual = render({ manual: true, analyzeAllBusy: false, onAnalyzeAll: () => hits.push('all') });
   assert.ok(manual.textOnly.includes(dict.fileUnit));
@@ -1397,7 +1406,8 @@ test('already-published preview offers the append-anyway path', () => {
   }));
 
   assert.match(textOnly, /# PR 评论正文/);
-  assert.match(textOnly, /语言：中文/);
+  assert.doesNotMatch(textOnly, /语言：/);
+  assert.match(textOnly, /追加一条新评论/);
   assert.match(textOnly, /已经发布过/);
   const append = elements.find(
     (node) => node.type === 'button' && /仍然追加/.test(fake.textOf(node)),
@@ -1425,7 +1435,7 @@ test('publishing conflict preview tells the user to retry later', () => {
     onCancel: () => {},
   }));
   assert.match(textOnly, /另一个发布任务正在进行/);
-  assert.match(textOnly, /语言：English（en）/);
+  assert.doesNotMatch(textOnly, /语言：/);
 });
 
 test('api surfaces host conflict codes for the publish branch', async () => {
