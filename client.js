@@ -3380,7 +3380,7 @@ window.__ModuleLoader__.load({
     /**
      * Background conclusion generation: start, cancel, and the short wait window for writes.
      */
-    function useConcludeAction({ withRepo, stateRef, loadReview }) {
+    function useConcludeAction({ withRepo, stateRef, loadReview, setReviewError }) {
       const [concludeBusy, setConcludeBusy] = React.useState(false);
       const [concludeWait, setConcludeWait] = React.useState(false);
       const [concludeCancelBusy, setConcludeCancelBusy] = React.useState(false);
@@ -3401,7 +3401,7 @@ window.__ModuleLoader__.load({
       } finally {
         setConcludeBusy(false);
       }
-    }, [loadReview]);
+    }, [loadReview, setReviewError]);
     const cancelConclude = React.useCallback(async () => {
       const number = stateRef.current.prNumber;
       if (typeof number !== 'number') return;
@@ -3414,7 +3414,7 @@ window.__ModuleLoader__.load({
       } finally {
         setConcludeCancelBusy(false);
       }
-    }, [loadReview]);
+    }, [loadReview, setReviewError]);
 
       return {
         concludeBusy, setConcludeBusy, concludeWait, setConcludeWait, concludeCancelBusy,
@@ -3615,7 +3615,7 @@ window.__ModuleLoader__.load({
       const {
         concludeBusy, setConcludeBusy, concludeWait, setConcludeWait, concludeCancelBusy,
         runConclude, cancelConclude,
-      } = useConcludeAction({ withRepo, stateRef, loadReview });
+      } = useConcludeAction({ withRepo, stateRef, loadReview, setReviewError });
       const {
         overlayDraft, setOverlayDraft, overlayBusy, suggestionNotice, setSuggestionNotice,
         sendChatMessage, sendOverlayMessage,
