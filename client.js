@@ -4808,6 +4808,9 @@ window.__ModuleLoader__.load({
         return reviewTabPresent(sidebarRight, sessionId) ? 'opened' : 'pending';
       } catch (error) {
         if (isPendingOpenError(error)) return 'pending';
+        // Without an on-screen session there is no surface to open yet; keep the entry queued.
+        const mounted = mountedSessionStore(ctx);
+        if (mounted !== undefined && mounted.getSnapshot() === undefined) return 'pending';
         console.warn('[pr-review] 打开审查面板失败', error);
         return 'failed';
       }

@@ -1048,20 +1048,35 @@ test('requestReviewTab opens through the public navigation controller', () => {
   assert.equal(calls[0][0], 'dsh-resource://pr-review/%2Frepo%2Fexample');
   assert.equal(calls[0][1], 'sidebar');
 
-  // The internal session-scoped opener is not an external entry path.
-  const internalOnly = { openResourceIn: () => {}, tabsIn: () => [] };
+  // The internal session-scoped opener is not an external entry path and must not be called.
+  let internalCalls = 0;
+  const internalOnly = {
+    openResourceIn: () => { internalCalls += 1; },
+    tabsIn: () => [],
+  };
   assert.equal(parts.requestReviewTab({ get: (name) => (name === 'sidebarRight' ? internalOnly : undefined) }, 'session-a', '/repo/example'), 'unsupported');
+  assert.equal(internalCalls, 0);
 
   // A tab that is not committed yet keeps the request queued.
   const slow = { openResource: () => {}, tabsIn: () => [] };
   assert.equal(parts.requestReviewTab({ get: (name) => (name === 'sidebarRight' ? slow : undefined) }, 'session-a', '/repo/example'), 'pending');
 
   // An unadopted surface is "still opening", not a failure: the caller keeps the request queued.
+  // The app signals this with its "no session surface is mounted" message; keep this assertion
+  // aligned with sidebar-right if that message changes.
   const adopting = {
     openResource: () => { throw new Error('sidebarRight: no session surface is mounted'); },
     tabsIn: () => [],
   };
   assert.equal(parts.requestReviewTab({ get: (name) => (name === 'sidebarRight' ? adopting : undefined) }, 'session-a', '/repo/example'), 'pending');
+
+  // No session on screen yet: queue even when the navigation error is not the pending text.
+  const offscreen = {
+    mounted: { getSnapshot: () => undefined },
+    openResource: () => { throw new Error('sidebarRight: no active docked pane'); },
+    tabsIn: () => [],
+  };
+  assert.equal(parts.requestReviewTab({ get: (name) => (name === 'sidebarRight' ? offscreen : undefined) }, 'session-a', '/repo/example'), 'pending');
 
   // A real navigation failure stays visible as an error.
   const broken = {

@@ -5,7 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import nodePath from 'node:path';
 
@@ -126,6 +126,7 @@ test('resolveToken: gh fallback includes absolute paths for desktop launches', (
   assert.equal(GH_BINARIES[0], 'gh');
   assert.ok(GH_BINARIES.includes('/opt/homebrew/bin/gh'));
   assert.ok(GH_BINARIES.includes('/usr/local/bin/gh'));
+  assert.ok(GH_BINARIES.includes('C:\\Program Files\\GitHub CLI\\gh.exe'));
 });
 
 test('resolveToken: finds gh outside the desktop app PATH', {
@@ -134,24 +135,36 @@ test('resolveToken: finds gh outside the desktop app PATH', {
   const root = await mkdtemp(nodePath.join(tmpdir(), 'pr-review-gh-'));
   const bin = nodePath.join(root, 'bin');
   const home = nodePath.join(root, 'home');
+  const argsFile = nodePath.join(root, 'gh-args.txt');
   await mkdir(bin);
   await mkdir(home);
   const gh = nodePath.join(bin, 'gh');
-  await writeFile(gh, '#!/bin/sh\necho fake-gh-token\n');
+  await writeFile(gh, '#!/bin/sh\nprintf \'%s\\n\' "$@" > "$FAKE_GH_ARGS"\necho fake-gh-token\n');
   await chmod(gh, 0o755);
   const saved = {
     PATH: process.env.PATH,
     HOME: process.env.HOME,
     GITHUB_TOKEN: process.env.GITHUB_TOKEN,
     GH_TOKEN: process.env.GH_TOKEN,
+    GH_CONFIG_DIR: process.env.GH_CONFIG_DIR,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+    PR_REVIEW_TOKEN: process.env.PR_REVIEW_TOKEN,
+    FAKE_GH_ARGS: process.env.FAKE_GH_ARGS,
   };
   try {
     process.env.PATH = bin;
     process.env.HOME = home;
+    process.env.FAKE_GH_ARGS = argsFile;
     delete process.env.GITHUB_TOKEN;
     delete process.env.GH_TOKEN;
+    delete process.env.GH_CONFIG_DIR;
+    delete process.env.XDG_CONFIG_HOME;
+    delete process.env.PR_REVIEW_TOKEN;
     const provider = resolveProviderConfig({ platform: 'github', repo: 'owner/repo' });
     assert.equal(await resolveToken({}, provider), 'fake-gh-token');
+    const args = (await readFile(argsFile, 'utf8')).trim().split('\n');
+    assert.equal(args[0], 'auth');
+    assert.equal(args[1], 'token');
   } finally {
     for (const [key, value] of Object.entries(saved)) {
       if (value === undefined) delete process.env[key];
