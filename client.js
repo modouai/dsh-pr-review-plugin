@@ -194,6 +194,11 @@ window.__ModuleLoader__.load({
         previewConfirm: '确认发布',
         previewSelectNoneHint: '没有勾选任何条目：请至少选中一条再发布。',
         publishOlderHint: '当前显示的是旧版本结论；切到最新版本后才能发布。',
+        appendComment: '追加评论',
+        appendCommentHint: 'v{version} 已经发布；确认后会追加一条新评论。',
+        appendStaleHint: 'v{version} 已经发布；本次追加的是当前选中的结论，结论之后还有未发布的新改动。',
+        publishStaleHint: '发布的是当前选中的结论；结论之后还有未发布的新改动。',
+        publishConcludingHint: '正在生成新结论；此时发布的是当前选中的版本。',
         previewConfirmAppend: '仍然追加',
         alreadyPublished: '当前轮次与版本已经发布过同一结论。可以仍然追加一条新评论。',
         publishingBusy: '另一个发布任务正在进行，请稍候重试。',
@@ -394,6 +399,11 @@ window.__ModuleLoader__.load({
         previewConfirm: 'Publish',
         previewSelectNoneHint: 'Nothing is selected: pick at least one item before publishing.',
         publishOlderHint: 'This is an older conclusion version; switch to the latest version to publish.',
+        appendComment: 'Append comment',
+        appendCommentHint: 'v{version} is already published; confirming appends a new comment.',
+        appendStaleHint: 'v{version} is already published; this appends the selected conclusion, which does not include the newer changes.',
+        publishStaleHint: 'Publishes the selected conclusion; newer changes are not included.',
+        publishConcludingHint: 'A new conclusion is being generated; this publishes the selected version.',
         previewConfirmAppend: 'Append anyway',
         alreadyPublished: 'This round and version were already published. You can still append another comment.',
         publishingBusy: 'Another publish is in progress; try again shortly.',
@@ -1637,6 +1647,28 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The conflict the publish preview opens with. The dialog would otherwise let the reviewer
+     * confirm a publish that the host rejects with `already-published`; opening straight in the
+     * append flow says what will happen before the first click. '' means a normal publish.
+     *
+     * It always reads the newest round's newest version: the preview (and the host's publish
+     * path) renders `review.conclusion`, which is exactly that version. Selecting an older
+     * version or a historical round disables publishing, so the two never disagree in the UI.
+     * `isCurrent` is true because `latest` is the newest round by construction.
+     */
+    function previewConflictOf(record) {
+      const rounds = roundsOf(record);
+      const latest = rounds.length === 0 ? null : rounds[rounds.length - 1];
+      const versions = versionsOf(record, latest, true);
+      if (versions.length === 0) return '';
+      const latestVersion = versions[versions.length - 1];
+      const roundNumber = latest === null ? 1 : latest.round;
+      return isRoundVersionPublished(publishedOfRound(record, roundNumber), roundNumber, latestVersion.version)
+        ? 'already-published'
+        : '';
+    }
+
+    /**
      * One round pill for the top bar: the latest round reuses the live status text/tone, a
      * historical round reports when its newest conclusion was generated (or that it has none).
      */
@@ -2399,8 +2431,23 @@ window.__ModuleLoader__.load({
             t('openPlatform'),
           )
         : null;
-      const concludeLabel = staleInfo !== null ? t('reconclude') : t('conclude');
+      const concludeLabel = derived.hasVersion === true ? t('reconclude') : t('conclude');
+      const selectedPublished = derived.selectedPublished === true;
+      const publishLabel = props.publishBusy === true || review.publishing === true
+        ? t('publishing')
+        : (props.previewBusy === true
+          ? t('previewLoading')
+          : (selectedPublished ? t('appendComment') : t('publishComment')));
       const progressActive = props.concluding !== null && props.concluding !== undefined;
+      const publishTitle = isOlderVersion === true
+        ? t('publishOlderHint')
+        : selectedPublished
+          ? fill(t(staleInfo !== null ? 'appendStaleHint' : 'appendCommentHint'), {
+              version: selectedVersion === null ? '?' : selectedVersion.version,
+            })
+          : staleInfo !== null
+            ? t('publishStaleHint')
+            : (progressActive === true ? t('publishConcludingHint') : undefined);
       const actions = h(
         'div',
         { className: 'prr-actions' },
@@ -2413,19 +2460,23 @@ window.__ModuleLoader__.load({
             })
           : h(Btn, {
               label: props.concludeBusy ? t('concluding') : concludeLabel,
-              primary: true,
+              // Regenerating is the next step only when there is nothing to publish: a stale
+              // conclusion, no conclusion at all, or a historical version whose publish is
+              // disabled — the footer must never end up with no primary action.
+              primary: selectedVersion === null || staleInfo !== null || isOlderVersion === true,
               disabled: props.concludeBusy === true || props.reviewBusy === true,
               onClick: props.onConclude,
             }),
         selectedVersion === null
           ? null
           : h(Btn, {
-              label: props.publishBusy === true || review.publishing === true
-                ? t('publishing')
-                : (props.previewBusy === true ? t('previewLoading') : t('publishComment')),
+              label: publishLabel,
+              // Publishing (or appending) is the step that reaches the PR; it steps back only
+              // while the conclusion is stale and regenerating is what the reviewer wants.
+              primary: staleInfo === null && isOlderVersion !== true,
               disabled: props.publishBusy === true || props.previewBusy === true
                 || review.publishing === true || isOlderVersion === true,
-              title: isOlderVersion === true ? t('publishOlderHint') : undefined,
+              title: publishTitle,
               onClick: props.onPublish,
             }),
         props.comment !== null && props.comment !== undefined && typeof props.comment.url === 'string' && props.comment.url !== ''
@@ -2555,6 +2606,9 @@ window.__ModuleLoader__.load({
       // composer takeover or the embedded footer. Both read it from `actionsBridge`.
       const footer = overviewFooter(props, {
         report, pull, selectedVersion, staleInfo, isCurrent, isOlderVersion,
+        hasVersion: versions.length > 0,
+        selectedPublished: selectedVersion !== null
+          && isRoundVersionPublished(publishedEntries, roundNumber, selectedVersion.version),
       });
       React.useEffect(() => {
         actionsBridge.set(footer.actions);
@@ -3246,7 +3300,7 @@ window.__ModuleLoader__.load({
         markdown: typeof data?.markdown === 'string' ? data.markdown : (previous?.markdown ?? ''),
         round: latest === null ? 1 : latest.round,
         version: latestVersion === null ? 1 : latestVersion.version,
-        conflict: previous?.conflict ?? '',
+        conflict: previous?.conflict ?? previewConflictOf(record),
         items: selectionSupported ? items : [],
         selectionSupported,
         selectedIds,

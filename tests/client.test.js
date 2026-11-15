@@ -50,6 +50,7 @@ const EXPOSED = [
   'mountedSessionStore',
   'reviewAskContext',
   'isRoundVersionPublished',
+  'previewConflictOf',
   'VersionSelector',
   'PublishPreviewModal',
   'DetailHeader',
@@ -451,6 +452,7 @@ function renderFooter(client, review, extra = {}) {
   const current = rounds.length === 0 ? null : rounds[rounds.length - 1];
   const versions = parts.versionsOf(review, current, true);
   const selectedVersion = versions.length === 0 ? null : versions[versions.length - 1];
+  const roundNumber = current === null ? 1 : current.round;
   const footer = parts.overviewFooter(props, {
     report: review.report,
     pull: review.pull ?? {},
@@ -458,6 +460,9 @@ function renderFooter(client, review, extra = {}) {
     staleInfo: parts.staleInfoOf(review, versions),
     isCurrent: extra.isCurrent ?? true,
     isOlderVersion: extra.isOlderVersion ?? false,
+    hasVersion: versions.length > 0,
+    selectedPublished: selectedVersion !== null
+      && parts.isRoundVersionPublished(review.published ?? [], roundNumber, selectedVersion.version),
   });
   const noticeAt = (expanded) => {
     if (footer.notice === null) return fake.render(fake.React.createElement('span'));
@@ -495,6 +500,7 @@ test('the footer keeps the actions out of the overview scroll', () => {
 
 test('the footer actions name the conclusion and the publish step', () => {
   const client = loadClient();
+  const { fake } = client;
   const version = makeVersion(1, '第一轮结论');
   const review = makeReview({
     round: 1,
@@ -504,8 +510,144 @@ test('the footer actions name the conclusion and the publish step', () => {
   });
   const { actions } = renderFooter(client, review);
 
-  assert.match(actions.textOnly, /生成最终结论/);
+  // A round that already has a version regenerates it; "first conclusion" is not on offer.
+  assert.match(actions.textOnly, /重新生成结论/);
+  assert.doesNotMatch(actions.textOnly, /生成最终结论/);
   assert.match(actions.textOnly, /发布/);
+  // Publishing the unpublished version is the next step, so it owns the primary slot.
+  const publish = actions.elements.find(
+    (node) => node.type === 'button' && fake.textOf(node) === '发布',
+  );
+  assert.ok(publish, 'publish button missing');
+  assert.match(String(publish.props.className), /prr-btn-primary/);
+});
+
+test('a round without a conclusion offers the first generation only', () => {
+  const client = loadClient();
+  const { fake } = client;
+  const review = makeReview({ round: 1, conclusion: null, roundHistory: [makeRound(1)] });
+  const { actions } = renderFooter(client, review);
+
+  assert.match(actions.textOnly, /生成最终结论/);
+  assert.doesNotMatch(actions.textOnly, /重新生成结论/);
+  assert.equal(
+    actions.elements.filter((node) => node.type === 'button' && /发布/.test(fake.textOf(node))).length,
+    0,
+    'nothing can be published before a conclusion exists',
+  );
+});
+
+test('a published version turns publishing into an explicit append action', () => {
+  const client = loadClient();
+  const { fake } = client;
+  const version = makeVersion(1, '第一轮结论');
+  const review = makeReview({
+    round: 1,
+    conclusionAt: version.createdAt,
+    conclusion: version.conclusion,
+    roundHistory: [makeRound(1, { conclusions: [version] })],
+    published: [{ round: 1, version: 1, url: 'https://example.test/comment/1' }],
+  });
+  const { actions } = renderFooter(client, review);
+
+  const append = actions.elements.find(
+    (node) => node.type === 'button' && fake.textOf(node) === '追加评论',
+  );
+  assert.ok(append, 'the publish button should read as an append');
+  assert.match(String(append.props.className), /prr-btn-primary/);
+  assert.match(String(append.props.title ?? ''), /v1 已经发布/);
+  assert.doesNotMatch(String(append.props.title ?? ''), /\{version\}/, 'the placeholder must be filled');
+  assert.equal(
+    actions.elements.filter((node) => node.type === 'button' && fake.textOf(node) === '发布').length,
+    0,
+  );
+});
+
+test('the publish button says which version the click would publish', () => {
+  const client = loadClient();
+  const { fake } = client;
+  const version = makeVersion(1, '第一轮结论', { createdAt: 5000 });
+  const publishOf = (review, extra) => {
+    const { actions } = renderFooter(client, review, extra);
+    return actions.elements.find(
+      (node) => node.type === 'button' && /发布|追加评论/.test(fake.textOf(node)),
+    );
+  };
+  const concludeOf = (actions) => actions.elements.find(
+    (node) => node.type === 'button' && /结论/.test(fake.textOf(node)),
+  );
+
+  // Stale: the click publishes the selected conclusion, not the changes made after it.
+  const stale = makeReview({
+    round: 1,
+    conclusionAt: 5000,
+    conclusion: version.conclusion,
+    roundHistory: [makeRound(1, { conclusions: [version] })],
+    explanations: [{ file: 'src/a.js', status: 'done', explanation: null, chat: [], updatedAt: 6000 }],
+  });
+  const staleButton = publishOf(stale);
+  assert.match(String(staleButton.props.title ?? ''), /结论之后还有未发布的新改动/);
+  assert.doesNotMatch(String(staleButton.props.className), /prr-btn-primary/, 'regenerating owns the primary slot while stale');
+  // …and it owns it alone: exactly one primary action in the footer.
+  const staleConclude = concludeOf(renderFooter(client, stale).actions);
+  assert.match(String(staleConclude.props.className), /prr-btn-primary/);
+
+  // Published and stale: the append is what will happen, and the title says it ships the
+  // selected conclusion without the newer changes.
+  const appendStale = makeReview({
+    round: 1,
+    conclusionAt: 5000,
+    conclusion: version.conclusion,
+    roundHistory: [makeRound(1, { conclusions: [version] })],
+    explanations: [{ file: 'src/a.js', status: 'done', explanation: null, chat: [], updatedAt: 6000 }],
+    published: [{ round: 1, version: 1, url: 'https://example.test/comment/1' }],
+  });
+  const appendStaleButton = publishOf(appendStale);
+  assert.equal(fake.textOf(appendStaleButton), '追加评论');
+  assert.match(String(appendStaleButton.props.title ?? ''), /本次追加的是当前选中的结论/);
+
+  // Concluding: publishing keeps working, but on the version that is already there.
+  const concluding = makeReview({
+    round: 1,
+    conclusionAt: version.createdAt,
+    conclusion: version.conclusion,
+    roundHistory: [makeRound(1, { conclusions: [version] })],
+  });
+  const concludingButton = publishOf(concluding, { concluding: { stage: 'model', startedAt: 6000 } });
+  assert.equal(concludingButton.props.disabled, false);
+  assert.match(String(concludingButton.props.title ?? ''), /正在生成新结论/);
+});
+
+test('the preview opens in the append flow when the conclusion was already published', () => {
+  const { parts } = loadClient();
+  const version = makeVersion(1, '第一轮结论');
+  const published = makeReview({
+    round: 1,
+    conclusionAt: version.createdAt,
+    conclusion: version.conclusion,
+    roundHistory: [makeRound(1, { conclusions: [version] })],
+    published: [{ round: 1, version: 1, url: 'https://example.test/comment/1' }],
+  });
+  const fresh = makeReview({
+    round: 1,
+    conclusionAt: version.createdAt,
+    conclusion: version.conclusion,
+    roundHistory: [makeRound(1, { conclusions: [version] })],
+  });
+
+  assert.equal(parts.previewConflictOf(published), 'already-published');
+  assert.equal(parts.previewConflictOf(fresh), '');
+  assert.equal(parts.previewConflictOf(makeReview({ round: 1, conclusion: null, roundHistory: [makeRound(1)] })), '');
+  // Only the same round and version counts: another version or another round is a fresh publish.
+  assert.equal(parts.previewConflictOf({
+    ...published,
+    published: [{ round: 1, version: 2, url: 'https://example.test/comment/2' }],
+  }), '');
+  assert.equal(parts.previewConflictOf({
+    ...published,
+    published: [{ round: 2, version: 1, url: 'https://example.test/comment/3' }],
+  }), '');
+  assert.equal(parts.previewConflictOf({ ...published, published: [] }), '');
 });
 
 test('stale analysis folds to one summary row that expands to the changed files', () => {
@@ -578,6 +720,14 @@ test('an older conclusion version cannot be published', () => {
   assert.ok(older, 'publish button missing');
   assert.equal(older.props.disabled, true);
   assert.match(String(older.props.title ?? ''), /旧版本结论/);
+  // Publishing is disabled here, so regenerating must own the primary slot — the footer never
+  // ends up with no primary action.
+  const olderFooter = renderFooter(client, review, { isOlderVersion: true }).actions;
+  const olderConclude = olderFooter.elements.find(
+    (node) => node.type === 'button' && fake.textOf(node) === '重新生成结论',
+  );
+  assert.ok(olderConclude, 'conclude button missing');
+  assert.match(String(olderConclude.props.className), /prr-btn-primary/);
 
   // The latest version stays publishable.
   const latest = findPublish(renderFooter(client, review).actions);
