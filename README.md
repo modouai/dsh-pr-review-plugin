@@ -8,8 +8,6 @@ AI-assisted pull request review for the DeepSeek Harness Web UI. The plugin watc
 
 ![Review panel: diff with per-segment analysis](docs/images/panel-diff.en.png)
 
-The screenshots use a fictional repository (`acme/portal`, PR #128) and contain no real project data. The panel follows the Harness UI language. The page behind them is self-contained: open [`docs/images/src/mock.html`](docs/images/src/mock.html) directly in a browser and switch `view` / `lang` in the query string.
-
 ## Features
 
 - **Workspace aware**: each session's workspace `git origin` selects the repository and platform (GitHub; GitLab; Gitea / Forgejo / Codeberg; Gitee / GitCode / AtomGit; Codeup); the panel only shows pull requests from that repository, and switching workspaces switches reviews with it.

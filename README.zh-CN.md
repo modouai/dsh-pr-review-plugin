@@ -8,8 +8,6 @@
 
 ![审查面板：diff 与逐段分析](docs/images/panel-diff.zh.png)
 
-示例图使用虚构仓库（`acme/portal`，PR #128），不含任何真实项目数据。面板语言跟随 Harness 界面语言。示例页本身是自包含的：用浏览器直接打开 [`docs/images/src/mock.html`](docs/images/src/mock.html)，在查询串里切换 `view` / `lang`。
-
 ## 功能
 
 - **按工作区识别仓库**：每个会话工作区的 git `origin` 决定仓库与平台（GitHub；GitLab；Gitea / Forgejo / Codeberg；Gitee / GitCode / AtomGit；Codeup）；面板只显示该仓库的 PR，切换工作区即切换对应的审查数据。
