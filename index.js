@@ -58,6 +58,12 @@ export const inject = ['webServer', 'connection', 'llm'];
 
 const PREFIX = '/pr-review-api';
 
+/**
+ * Order of the panel snapshot among the host's runtime-context contributions. Built-in
+ * placements stop at 210 (harness source, Web surface); external context sorts after them.
+ */
+const CONTEXT_ORDER = 300;
+
 const DEFAULTS = {
   platform: 'forgejo',
   // Empty by default: the panel follows the workspace git origin. When repo/baseUrl are set,
@@ -2440,12 +2446,8 @@ export function apply(ctx, config) {
 
   /** What the reviewer currently has on screen in the panel (reported by the client). */
   const focusBySession = new Map();
-  /** Last time a snapshot was injected into a session (kept for diagnostics). */
-  const lastInjectAt = new Map();
-  /** Last snapshot text injected per session: identical snapshots are never injected twice. */
-  const lastSnapshotBySession = new Map();
 
-  /** Build the compact review snapshot injected into the main conversation (§5). */
+  /** Build the compact review snapshot the model reads as runtime context (§5). */
   function reviewSnapshotText(record, focus) {
     const round = focus && Number.isInteger(focus.round) ? focus.round : (record.round ?? 1);
     const latest = latestConclusionVersionOf(record);
@@ -2477,44 +2479,34 @@ export function apply(ctx, config) {
   }
 
   /**
-   * Inject one runtime-context user message into the session's agent. Returns false when the
-   * runtime has no agent for it (headless or before the session is admitted); never throws.
+   * Render the snapshot for one session, or '' when the panel shows no review. It runs inside
+   * the host's runtime-context assembly, which re-reads contributed text before every admitted
+   * step, so the focus and the review record are both whatever the panel shows right now.
    */
-  function injectReviewContext(sessionId, text) {
+  function reviewContextText(sessionId) {
+    if (typeof sessionId !== 'string' || sessionId === '') return '';
+    const bound = activeReviewBySession.get(sessionId);
+    if (!Number.isInteger(bound)) return '';
+    const record = state.reviews.get(bound);
+    if (record === undefined || record === null) return '';
     try {
-      const agents = ctx.get('agents') ?? ctx.agents;
-      const agent = agents !== undefined && agents !== null && typeof agents.get === 'function'
-        ? agents.get(sessionId)
-        : undefined;
-      if (agent === undefined || agent === null || typeof agent.inject !== 'function') return false;
-      agent.inject({
-        id: randomUUID(),
-        role: 'user',
-        content: [{ type: 'text', text }],
-        source: { kind: 'runtime-context' },
-      });
-      lastInjectAt.set(sessionId, Date.now());
-      return true;
+      return reviewSnapshotText(record, focusBySession.get(sessionId) ?? null);
     } catch (error) {
-      console.warn('[pr-review] 注入审查上下文失败', error);
-      return false;
+      console.warn('[pr-review] 生成审查上下文失败', error);
+      return '';
     }
   }
 
   /**
-   * Record the reviewer's current view and refresh the injected snapshot when it changed.
-   * The snapshot is the only way the agent can resolve "这个文件/这一条", so it must follow the
-   * panel: same snapshot is skipped, a real change injects immediately (2s debounce for bursts).
+   * Record the reviewer's current view. Nothing is pushed to the agent here: the snapshot is
+   * registered as a runtime-context contribution, and the host renders it into its own
+   * superseding snapshot on the next step. A message injected with `source.kind:
+   * 'runtime-context'` is owned by the agent loop and dropped at admission, so that path never
+   * reaches the model.
    */
-  function reportReviewFocus(sessionId, record, focus, force) {
-    if (typeof sessionId !== 'string' || sessionId === '') return false;
+  function recordReviewFocus(sessionId, focus) {
+    if (typeof sessionId !== 'string' || sessionId === '') return;
     focusBySession.set(sessionId, focus);
-    if (record === null || record === undefined) return false;
-    const text = reviewSnapshotText(record, focus);
-    if (text === (lastSnapshotBySession.get(sessionId) ?? '')) return false;
-    const injected = injectReviewContext(sessionId, text);
-    if (injected) lastSnapshotBySession.set(sessionId, text);
-    return injected;
   }
 
   /** Human-written conclusion items keep their existing ids where the point is unchanged. */
@@ -3308,6 +3300,22 @@ export function apply(ctx, config) {
     }
   }
 
+  // The panel's snapshot is runtime context, not a pushed message: the host renders contributed
+  // context into the user-role snapshot it owns, dedupes unchanged sections, and supersedes the
+  // previous one, which is what keeps "这个文件" pointing at what the reviewer sees right now.
+  if (systemPrompt !== undefined && systemPrompt !== null && typeof systemPrompt.context === 'function') {
+    try {
+      systemPrompt.context({
+        name: 'pr-review: focus',
+        order: CONTEXT_ORDER,
+        interpolate: false,
+        text: (context) => reviewContextText(agentSessionId(context?.agent)),
+      });
+    } catch (error) {
+      console.warn('[pr-review] 注册运行时上下文失败', error);
+    }
+  }
+
   /** Read the optional panel focus fields a client reports alongside the active PR. */
   function focusOfBody(body) {
     if (body === null || typeof body !== 'object') return null;
@@ -3319,8 +3327,8 @@ export function apply(ctx, config) {
     };
   }
 
-  // The panel reports the PR it shows so tools default to what the reviewer is reading, and
-  // injects one compact snapshot so the conversation knows what "this file" means.
+  // The panel reports the PR it shows so tools default to what the reviewer is reading, and so
+  // the runtime-context snapshot follows the panel; see `pr-review: focus` above.
   route(`${PREFIX}/active`, {
     POST: async (req, res) => {
       const text = await readBoundedBody(req);
@@ -3332,22 +3340,18 @@ export function apply(ctx, config) {
         return;
       }
       const focus = focusOfBody(body);
-      let injected = false;
       if (Number.isInteger(number) && number > 0) {
         activeReviewBySession.set(sessionId, number);
-        const record = state.reviews.get(number) ?? null;
-        injected = reportReviewFocus(sessionId, record, focus, true);
+        recordReviewFocus(sessionId, focus);
       } else {
         activeReviewBySession.delete(sessionId);
         focusBySession.delete(sessionId);
-        lastInjectAt.delete(sessionId);
-        lastSnapshotBySession.delete(sessionId);
       }
-      sendJson(res, 200, { ok: true, active: Number.isInteger(number) && number > 0 ? number : null, injected });
+      sendJson(res, 200, { ok: true, active: Number.isInteger(number) && number > 0 ? number : null });
     },
   });
 
-  // View/file changes update the recorded focus; the snapshot is refreshed at most once a minute.
+  // View/file changes update the recorded focus; the host re-reads it on the next step.
   route(`${PREFIX}/focus`, {
     POST: async (req, res) => {
       const text = await readBoundedBody(req);
@@ -3358,13 +3362,11 @@ export function apply(ctx, config) {
         sendError(res, 400, 'bad-request', 'sessionId and number are required');
         return;
       }
-      if (!activeReviewBySession.has(sessionId)) {
-        sendJson(res, 200, { ok: true, injected: false });
-        return;
-      }
-      const record = state.reviews.get(number) ?? null;
-      const injected = reportReviewFocus(sessionId, record, focusOfBody(body), false);
-      sendJson(res, 200, { ok: true, injected });
+      // Focus is also a binding report: a late `/active` release must not leave the panel
+      // invisible to the agent, so a focus event re-binds the session to the PR on screen.
+      activeReviewBySession.set(sessionId, number);
+      recordReviewFocus(sessionId, focusOfBody(body));
+      sendJson(res, 200, { ok: true, active: number });
     },
   });
 

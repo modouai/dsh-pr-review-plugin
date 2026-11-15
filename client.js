@@ -3935,8 +3935,10 @@ window.__ModuleLoader__.load({
         };
       }, [loadReview, loadList]);
 
-      // Report view changes (overview ↔ file, diff ↔ analysis) so the injected snapshot follows
-      // the panel; the host throttles actual injections to once a minute.
+      // Report view changes (overview ↔ file, diff ↔ analysis) so the host's runtime-context
+      // snapshot follows the panel on the next model step. Debounced: bursts of clicks are one
+      // report. The host compares the contributed section text and re-emits the snapshot only
+      // when it changes, so an unchanged panel costs nothing.
       React.useEffect(() => {
         if (!sidebar) return undefined;
         const sessionId = typeof props.sessionId === 'string' ? props.sessionId : '';
