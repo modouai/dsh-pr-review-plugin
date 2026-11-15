@@ -716,19 +716,31 @@ window.__ModuleLoader__.load({
       pass: 'verdictPass',
     };
 
+    /**
+     * Verdict → the tone shared by the verdict pill and the file row dot. Anything the model or
+     * a tool writes outside the three known values reads as idle in both places, so the two
+     * surfaces cannot drift apart again.
+     */
+    function verdictTone(value) {
+      return value === 'block' || value === 'suggest' || value === 'pass' ? value : 'idle';
+    }
+
     /** Severity → localized label. */
     function severityLabel(severity, t) {
       return t(VERDICT_KEY[severity] ?? 'verdictUnknown');
     }
 
     /**
-     * Dot tone for one file row. A finished analysis has an explicit verdict, and the row must
-     * agree with the pill the detail pane shows (a pass with no findings is still a pass).
-     * Before that, fall back to the findings themselves so in-flight work still reads right.
+     * Dot tone for one file row: 'block' | 'suggest' | 'pass' | '' (no dot). A finished analysis
+     * is authoritative — its verdict drives the dot exactly as the pill shows it, and an unknown
+     * verdict means no dot (the pill's idle tone). Only an unfinished analysis falls back to the
+     * findings it already has; that fallback describes work in progress, not a final verdict.
      */
     function fileSeverityOf(entry) {
-      const verdict = entry?.status === 'done' ? entry?.explanation?.verdict : '';
-      if (verdict === 'block' || verdict === 'suggest' || verdict === 'pass') return verdict;
+      if (entry?.status === 'done') {
+        const tone = verdictTone(entry?.explanation?.verdict);
+        return tone === 'idle' ? '' : tone;
+      }
       const issues = Array.isArray(entry?.explanation?.issues) ? entry.explanation.issues : [];
       if (issues.some((issue) => issue?.severity === 'block')) return 'block';
       return issues.length > 0 ? 'suggest' : '';
@@ -1088,8 +1100,7 @@ window.__ModuleLoader__.load({
 
     function VerdictPill(props) {
       const { verdict, t } = props;
-      const tone = verdict === 'block' || verdict === 'suggest' || verdict === 'pass' ? verdict : 'idle';
-      return h(Pill, { tone, label: severityLabel(verdict, t) });
+      return h(Pill, { tone: verdictTone(verdict), label: severityLabel(verdict, t) });
     }
 
     function Btn(props) {

@@ -1192,7 +1192,7 @@ test('the file column shows batch progress and the manual analyze-all button', (
 
 // ---------- v2: right-sidebar review tab ----------
 
-test('a file row dot follows the per-file verdict, falling back to its findings', () => {
+test('a file row dot follows the per-file verdict; only unfinished files fall back to findings', () => {
   const { parts } = loadClient();
 
   // A finished analysis is authoritative: a pass with no findings is still a pass.
@@ -1218,17 +1218,46 @@ test('a file row dot follows the per-file verdict, falling back to its findings'
     status: 'error',
     explanation: { issues: [{ severity: 'suggest' }] },
   }), 'suggest');
+  // A missing status is unfinished too.
+  assert.equal(parts.fileSeverityOf({ explanation: { issues: [{ severity: 'block' }] } }), 'block');
   assert.equal(parts.fileSeverityOf({ status: 'pending' }), '');
   assert.equal(parts.fileSeverityOf(null), '');
+
+  // The verdict wins over its own findings, in both directions.
+  assert.equal(parts.fileSeverityOf({
+    status: 'done',
+    explanation: { verdict: 'pass', issues: [{ severity: 'block' }] },
+  }), 'pass');
+  assert.equal(parts.fileSeverityOf({
+    status: 'done',
+    explanation: { verdict: 'block', issues: [{ severity: 'suggest' }] },
+  }), 'block');
+
+  // An unknown or missing verdict is idle for the pill, so the row shows no dot either.
+  assert.equal(parts.fileSeverityOf({
+    status: 'done',
+    explanation: { verdict: 'unknown', issues: [{ severity: 'block' }] },
+  }), '');
+  assert.equal(parts.fileSeverityOf({
+    status: 'done',
+    explanation: { issues: [{ severity: 'block' }] },
+  }), '');
 });
 
 test('the pass dot uses the same green as the verdict pill', () => {
   const { parts } = loadClient();
+  const base = cssRule(parts.CSS, '.prr-sev');
   const dot = cssRule(parts.CSS, '.prr-sev[data-sev="pass"]');
   const pill = cssRule(parts.CSS, '.prr-pill[data-tone="pass"]');
   assert.ok(dot, 'pass dot rule missing');
+  // The dot has to stay visible: the shared rule owns its size and shape.
+  assert.match(base, /width:6px/);
+  assert.match(base, /height:6px/);
+  assert.match(base, /border-radius/);
   assert.match(dot, /background:var\(--dsw-alias-state-success-primary\)/);
   assert.match(pill, /--dsw-alias-state-success-primary/, 'the pill keeps the same tone');
+  // Exactly one pass rule: a later rewrite would silently override the color.
+  assert.equal(parts.CSS.split('.prr-sev[data-sev="pass"]').length - 1, 1);
 });
 
 test('sidebar review addresses round-trip the workspace cwd and an optional PR number', () => {
