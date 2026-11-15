@@ -150,7 +150,7 @@ A workspace that is not a git repository activates no repository: the panel show
 | `autoReview` | boolean | `true` | Start a round automatically when a pull request first appears or its head SHA changes. Set `false` to review only when you click **Review now**. A failed round is retried after 5 minutes. |
 | `autoAnalyze` | boolean | `true` | Analyze every changed file of a finished round in the background, one model call per file, so a round costs one call per changed file (100 files, 100 calls). Set `false` to analyze a file only when you open it, or on demand with **Analyze all**. The automatic pass does not retry failed files; **Analyze all** does, costing about one call per unfinished or failed file. Starting a new round cancels a batch still running from the previous one. A failed file shows its error in the file panel and stays out of the analyzed coverage until it succeeds. |
 | `autoReconclude` | boolean | `false` | Regenerate the conclusion when the report or per-file analysis changes after it. Runs at most once every 5 minutes, never during a running round, and only while the conclusion is stale. |
-| `commentLanguage` | `zh`, `en` | `zh` | Language of the published comment's labels, headings, appendix, and footer. It does not translate model-written summaries or findings; the built-in prompts are Chinese. |
+| `commentLanguage` | `zh`, `en` | `zh` | Language of the published comment (labels, headings, appendix, footer) and the language the built-in prompts ask the model to write in: per-file analysis, conclusion, discussion answers and feedback parsing. It defaults to `zh`, so an English repository needs `commentLanguage: en` explicitly. The setting applies when text is generated; content generated earlier is not rewritten. |
 
 ### Model and limits
 
@@ -326,7 +326,7 @@ Review results are cached per repository under `~/.dsh/pr-review/<platform>-<rep
 - Upgrading the plugin: the browser side (`client.js`) hot-reloads; the host side (`index.js` / `providers.js` / `llm.js`) requires restarting Harness.
 - The pull request list shows the 20 most recently updated open pull requests; the panel says so when older ones exist.
 - Cache writes are atomic (temp file + rename). If the cache cannot be read, the plugin moves it aside as `<name>.corrupt-<timestamp>` instead of overwriting it, and shows a warning in the panel.
-- Published comments carry a footer identifying the plugin; the language follows `commentLanguage`.
+- Published comments carry a footer identifying the plugin; the language follows `commentLanguage`, as does the model-written text.
 - Comments are truncated gracefully if they exceed the platform's 60,000-character limit: the appendix shrinks first, then entries are omitted, and the truncation points to the review panel for details.
 
 ## License

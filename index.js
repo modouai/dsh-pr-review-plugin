@@ -1333,6 +1333,7 @@ export function apply(ctx, config) {
       record.report,
       focus,
       fileContent,
+      { language: commentLanguage() },
     );
     if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
@@ -1499,6 +1500,7 @@ export function apply(ctx, config) {
       history,
       question,
       record.conclusion ?? null,
+      { language: commentLanguage() },
     );
     const { answer, ops } = parseChatReply(await callModel(ctx, settings, prompt));
     let applied = [];
@@ -1585,6 +1587,7 @@ export function apply(ctx, config) {
           feedback: record.feedback ?? null,
           pullChat: Array.isArray(record.pullChat) ? record.pullChat : [],
           humanItemIds: Array.isArray(record.humanItemIds) ? record.humanItemIds : [],
+          language: commentLanguage(),
         },
       );
       if (record.concluding !== null) record.concluding.stage = 'model';
@@ -2193,6 +2196,7 @@ export function apply(ctx, config) {
         record.pull ?? { number, title: '', repo: provider.repo, platform: provider.platform },
         items,
         fresh,
+        { language: commentLanguage() },
       );
       const parsed = parseFeedbackReply(await callModel(ctx, settings, prompt));
       const states = { ...(record.feedback?.states ?? {}) };
