@@ -148,7 +148,7 @@ dsh --profile <name> --dump-config
 |---|---|---|---|
 | `pollSeconds` | 数字，≥ 15 | `60` | 轮询 open PR 的间隔，也决定新提交多久被发现；最小 15 秒。 |
 | `autoReview` | 布尔 | `true` | PR 首次出现或 head sha 变化时自动开启一轮审查。设为 `false` 后只在点「立即审查」时审查。失败的轮次 5 分钟后重试。 |
-| `autoAnalyze` | 布尔 | `true` | 每轮审查完成后在后台逐个分析全部变更文件，每个文件一次模型调用。设为 `false` 后点开文件才分析，也可在文件列表点「全部分析」一次补齐。自动分析不重试失败的文件；「全部分析」会重试。 |
+| `autoAnalyze` | 布尔 | `true` | 每轮审查完成后在后台逐个分析全部变更文件，每个文件一次模型调用，调用次数等于变更文件数。设为 `false` 后点开文件才分析，也可在文件列表点「全部分析」一次补齐。自动分析不重试失败的文件；「全部分析」会重试。开始新一轮会取消上一轮未跑完的批次。 |
 | `autoReconclude` | 布尔 | `false` | 报告或逐文件分析在结论之后更新时自动重新生成结论。5 分钟内最多一次，审查进行中不触发，结论未过期不触发。 |
 | `commentLanguage` | `zh`、`en` | `zh` | 发布评论里的固定标签、标题、附录与署名行用哪种语言。模型写的摘要与意见不翻译；内置提示词是中文。 |
 
@@ -206,6 +206,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     token: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: zh
     provider: ''
@@ -226,6 +227,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     token: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: en
     provider: ''
@@ -246,6 +248,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     token: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: en
     provider: ''
@@ -270,6 +273,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     token: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: zh
     provider: ''
@@ -306,7 +310,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
 
 1. 在会话里点头部的「审查 PR」按钮（空会话点输入框下方的「审查 PR」卡片）。
 2. 顶部选择 PR；`autoReview` 开启时首轮审查在后台自动开始，关闭时点「立即审查」。
-3. 左栏点文件查看 diff 与分析；`autoAnalyze` 开启时全部文件已在后台分析，通常打开即可阅读。点 hunk 看逐段讲解；需要时切换完整文件视图。
+3. 左栏点文件查看 diff 与分析；`autoAnalyze` 开启时文件在后台陆续分析，批次未跑完时点开文件可能仍显示未分析。点 hunk 看逐段讲解；需要时切换完整文件视图。
 4. 在主对话里继续讨论——例如「第 1 条风险不成立」「把第 2 条建议改成阻塞项」——审查数据直接更新。
 5. 点「生成最终结论」；报告有更新时面板会提示「重新生成结论」。
 6. 点「发布」预览 Markdown、勾选要纳入的条目后追加评论。每轮追加一条新评论，不覆盖历史。

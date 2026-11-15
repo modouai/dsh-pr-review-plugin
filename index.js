@@ -563,6 +563,14 @@ export function apply(ctx, config) {
     if (abort !== null && abort !== undefined) abort.abort();
   }
 
+  /** Stop a running analysis batch: its in-flight model call is cancelled, not just ignored. */
+  function abortAnalysis(record) {
+    if (record === undefined || record === null) return;
+    const job = record.analyzing;
+    record.analyzing = null;
+    if (job !== null && job !== undefined && job.abort !== undefined) job.abort.abort();
+  }
+
   /** Background auto-regeneration (opt-in): only when stale, idle and rate-limited. */
   function maybeAutoConclude(record) {
     if (settings.autoReconclude !== true) return false;
@@ -923,7 +931,10 @@ export function apply(ctx, config) {
       state.saveTimer = null;
     }
     await saveNow();
-    for (const record of state.reviews.values()) abortConclude(record);
+    for (const record of state.reviews.values()) {
+      abortConclude(record);
+      abortAnalysis(record);
+    }
     provider = nextProvider;
     cachePath = cacheFile(provider);
     state.repoKey = key;
@@ -1015,8 +1026,9 @@ export function apply(ctx, config) {
       .filter(([, record]) => record.status !== 'reviewing' && (record.published ?? []).length === 0)
       .sort((left, right) => (left[1].finishedAt ?? 0) - (right[1].finishedAt ?? 0));
     let pruned = 0;
-    for (const [number] of candidates) {
+    for (const [number, record] of candidates) {
       if (state.reviews.size <= MAX_REVIEWS) break;
+      abortAnalysis(record);
       state.reviews.delete(number);
       pruned += 1;
     }
@@ -1134,8 +1146,9 @@ export function apply(ctx, config) {
         : (Array.isArray(record.publishedItems) ? record.publishedItems : []),
     };
     abortConclude(record);
-    // Invalidate a running batch: its in-flight explain must not write into the new round.
-    record.analyzing = null;
+    // Cancel the running batch: its in-flight call must stop paying tokens, and its answer
+    // must not land in the new round.
+    abortAnalysis(record);
     record.analysisEpoch = (record.analysisEpoch ?? 0) + 1;
     history.push(makeRoundEntry(previousRoundEntry.round + 1, '', now));
     record.round = previousRoundEntry.round + 1;
@@ -1251,8 +1264,8 @@ export function apply(ctx, config) {
   /** In-flight file explanations: duplicate requests share one model call. */
   const explainInFlight = new Map();
 
-  /** Explain one file: deep logic walkthrough + findings. */
-  async function explainFile(number, filePath, force) {
+  /** Explain one file: deep logic walkthrough + findings. `signal` cancels a batch call. */
+  async function explainFile(number, filePath, force, signal) {
     const record = state.reviews.get(number);
     if (record === undefined) {
       const started = startReview(number, false);
@@ -1269,7 +1282,7 @@ export function apply(ctx, config) {
     const inFlightKey = `${number}:${filePath}:${record.analysisEpoch ?? 0}`;
     const running = explainInFlight.get(inFlightKey);
     if (running !== undefined) return running;
-    const task = explainFileUncached(record, number, filePath, cached);
+    const task = explainFileUncached(record, number, filePath, cached, signal);
     explainInFlight.set(inFlightKey, task);
     try {
       return await task;
@@ -1279,7 +1292,7 @@ export function apply(ctx, config) {
   }
 
   /** The model call behind explainFile; callers deduplicate through explainInFlight. */
-  async function explainFileUncached(record, number, filePath, cached) {
+  async function explainFileUncached(record, number, filePath, cached, signal) {
     // A new round may start while the model is answering; its per-file analyses are cleared,
     // so this answer must not land in the fresh round.
     const epoch = record.analysisEpoch ?? 0;
@@ -1308,7 +1321,8 @@ export function apply(ctx, config) {
       focus,
       fileContent,
     );
-    const raw = await callModel(ctx, settings, prompt);
+    if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
+    const raw = await callModel(ctx, settings, signal === undefined || signal === null ? prompt : { ...prompt, signal });
     const parsed = extractJson(raw);
     if (parsed === null) throw new Error(`模型没有返回可解析的 JSON。原始输出：${raw.slice(0, 400)}`);
     const explanation = normalizeExplanation({
@@ -1373,10 +1387,15 @@ export function apply(ctx, config) {
     const pending = [];
     for (const file of Array.isArray(record.files) ? record.files : []) {
       const entry = record.explanations.get(file.path);
-      if (entry === undefined || (includeErrors && entry.status === 'error')) pending.push(file.path);
+      // An entry without an explanation is not an analysis (restored legacy records can
+      // carry `done` with a null body); the automatic pass still leaves failures alone.
+      const empty = entry !== undefined && entry.status === 'done'
+        && (entry.explanation === null || entry.explanation === undefined);
+      const unanalyzed = entry === undefined || empty;
+      if (unanalyzed || (includeErrors && entry !== undefined && entry.status === 'error')) pending.push(file.path);
     }
     if (pending.length === 0) return false;
-    const job = { total: pending.length, done: 0, failed: 0, current: pending[0] };
+    const job = { total: pending.length, done: 0, failed: 0, current: pending[0], abort: new AbortController() };
     record.analyzing = job;
     scheduleSave();
     void runAnalysisBatch(record, job, pending);
@@ -1399,14 +1418,16 @@ export function apply(ctx, config) {
           // Re-check after waiting for a slot: a new round may have taken over meanwhile.
           const result = await withAnalyzeSlot(() => (
             analysisBatchCurrent(record, job)
-              ? explainFile(record.number, filePath, false)
+              ? explainFile(record.number, filePath, false, job.abort.signal)
               : null
           ));
-          if (result === null) return;
+          // A discarded answer belongs to a round that is gone; stop instead of counting it.
+          if (result === null || result.discarded === true) return;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
+          // A cancelled call is not a failed file: the record belongs to a round that is gone.
+          if (!analysisBatchCurrent(record, job) || job.abort.signal.aborted) return;
           console.warn(`[pr-review] PR #${record.number} 自动分析 ${filePath} 失败：${message}`);
-          if (!analysisBatchCurrent(record, job)) return;
           record.explanations.set(filePath, {
             status: 'error',
             error: message,
@@ -3334,7 +3355,10 @@ export function apply(ctx, config) {
 
   ctx.effect(() => () => {
     if (state.saveTimer !== null) clearTimeout(state.saveTimer);
-    for (const record of state.reviews.values()) abortConclude(record);
+    for (const record of state.reviews.values()) {
+      abortConclude(record);
+      abortAnalysis(record);
+    }
     // Synchronous flush: teardown may be the last turn the event loop gets.
     saveNowSync();
   }, 'pr-review: flush cache on unload');

@@ -258,8 +258,9 @@ async function setup(options = {}) {
     commentLanguage: options.commentLanguage ?? 'zh',
     autoReconclude: options.autoReconclude === true,
     // Batch analysis is opt-in per test: its background model calls would otherwise race
-    // the assertions of the review/conclusion tests. The schema default is `true`.
-    autoAnalyze: options.autoAnalyze === true,
+    // the assertions of the review/conclusion tests. The schema default is `true`;
+    // `useDefaultAutoAnalyze` omits the key to exercise that default end to end.
+    ...(options.useDefaultAutoAnalyze === true ? {} : { autoAnalyze: options.autoAnalyze === true }),
   });
 
   async function call(pathname, method = 'GET', body) {
@@ -1973,14 +1974,14 @@ test('a new round cancels the batch and drops its in-flight answer', async () =>
     order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
     focus: {},
   });
+  let aborted = false;
   const llm = (options) => {
     const prompt = JSON.stringify(options.messages);
     if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
-    return (async function* () {
-      await delay(200);
-      yield { type: 'text-delta', text: BATCH_EXPLANATION };
-      yield { type: 'finish', reason: { kind: 'stop' } };
-    })();
+    // llmSlow rejects on abort; record it so the test can prove the call was cancelled,
+    // not merely ignored after it finished.
+    options.signal.addEventListener('abort', () => { aborted = true; }, { once: true });
+    return llmSlow(200, BATCH_EXPLANATION)(options);
   };
   const plugin = await setup({ fetch: roundReviewFetch, llm, reviews: { 1: unanalyzedReview() } });
   try {
@@ -1991,8 +1992,9 @@ test('a new round cancels the batch and drops its in-flight answer', async () =>
     const forced = await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
     assert.equal(forced.status, 200);
     await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done' && current.analyzing === null);
-    // Let the round-1 answer arrive after the round was cleared.
-    await delay(400);
+    // Let the rejected round-1 call settle.
+    await delay(50);
+    assert.equal(aborted, true, 'the round-1 model call was aborted, not left running');
 
     const after = await plugin.review();
     assert.equal(after.round, 2);
@@ -2039,6 +2041,50 @@ test('a fresh explain for the new round does not join the stale in-flight call',
     ));
     assert.equal(done.round, 2);
     assert.equal(explains, 2, 'the new round paid for its own model call');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the schema default turns batch analysis on without an explicit option', async () => {
+  const llm = (options) => (
+    JSON.stringify(options.messages).includes('正在审查文件')
+      ? llmFromText(BATCH_EXPLANATION)(options)
+      : llmFromText('{}')(options)
+  );
+  const plugin = await setup({
+    fetch: batchFetch,
+    llm,
+    reviews: { 1: unanalyzedReview() },
+    useDefaultAutoAnalyze: true,
+  });
+  try {
+    const done = await plugin.waitFor(1, (current) => current.analyzing === null
+      && (current.explanations ?? []).length === 2
+      && (current.explanations ?? []).every((entry) => entry.status === 'done'));
+    assert.deepEqual(done.explanations.map((entry) => entry.file).sort(), ['src/a.js', 'src/b.js']);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a restored entry without an explanation is analyzed again', async () => {
+  const restored = legacyReview({
+    files: [{ path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 }],
+    // Legacy caches can carry `done` with a null body; it is not an analysis yet.
+    explanations: [{ file: 'src/a.js', status: 'done', error: null, explanation: null, chat: [], updatedAt: 150 }],
+  });
+  const llm = (options) => (
+    JSON.stringify(options.messages).includes('正在审查文件')
+      ? llmFromText(BATCH_EXPLANATION)(options)
+      : llmFromText('{}')(options)
+  );
+  const plugin = await setup({ fetch: batchFetch, llm, reviews: { 1: restored }, autoAnalyze: true });
+  try {
+    const done = await plugin.waitFor(1, (current) => (current.explanations ?? []).some(
+      (entry) => entry.file === 'src/a.js' && entry.status === 'done' && entry.explanation !== null,
+    ));
+    assert.equal(done.analyzing, null);
   } finally {
     await plugin.dispose();
   }

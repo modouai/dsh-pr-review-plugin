@@ -1081,7 +1081,7 @@ window.__ModuleLoader__.load({
           className,
           title: props.title,
           disabled: props.disabled === true,
-          onClick: props.onClick,
+          onClick: props.disabled === true ? undefined : props.onClick,
         },
         props.label,
       );
@@ -1123,10 +1123,8 @@ window.__ModuleLoader__.load({
       const analyzing = props.analyzing ?? null;
       const countLabel = analyzing === null
         ? `${files.length} ${t('fileUnit')}`
-        : t('analyzingFiles')
-            .replace('{done}', String(analyzing.done))
-            .replace('{total}', String(analyzing.total))
-          + (analyzing.failed > 0 ? t('analyzingFailed').replace('{failed}', String(analyzing.failed)) : '');
+        : fill(t('analyzingFiles'), { done: analyzing.done ?? 0, total: analyzing.total ?? 0 })
+          + (analyzing.failed > 0 ? fill(t('analyzingFailed'), { failed: analyzing.failed }) : '');
       return h(
         'aside',
         { className: 'prr-files', style },
@@ -3579,6 +3577,7 @@ window.__ModuleLoader__.load({
       const rememberRef = React.useRef(props.onRemember);
       rememberRef.current = props.onRemember;
       const explainInFlight = React.useRef(new Set());
+      const analyzeAllRef = React.useRef(false);
       const stateRef = React.useRef({ prNumber: null, review: null, list: null });
       const withRepoRef = React.useRef(withRepo);
       withRepoRef.current = withRepo;
@@ -3671,8 +3670,11 @@ window.__ModuleLoader__.load({
 
       /** Manual mode: ask the host to analyze every file that still has no analysis. */
       const requestAnalyzeAll = React.useCallback(async () => {
-        const number = review?.number ?? stateRef.current.prNumber;
+        // The disabled button is not enough: two clicks in one tick see the same state.
+        if (analyzeAllRef.current) return;
+        const number = stateRef.current.prNumber;
         if (typeof number !== 'number') return;
+        analyzeAllRef.current = true;
         setAnalyzeAllBusy(true);
         try {
           await postJson(withRepo('/pr-review-api/analyze'), { number });
@@ -3680,9 +3682,10 @@ window.__ModuleLoader__.load({
         } catch (error) {
           setReviewError(error instanceof Error ? error.message : String(error));
         } finally {
+          analyzeAllRef.current = false;
           setAnalyzeAllBusy(false);
         }
-      }, [review, loadReview]);
+      }, [loadReview]);
 
       const explanationFor = (target) => {
         if (review === null || target === '') return null;
