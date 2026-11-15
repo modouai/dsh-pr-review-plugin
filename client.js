@@ -716,9 +716,34 @@ window.__ModuleLoader__.load({
       pass: 'verdictPass',
     };
 
+    /**
+     * Verdict → the tone shared by the verdict pill and the file row dot. Anything the model or
+     * a tool writes outside the three known values reads as idle in both places, so the two
+     * surfaces cannot drift apart again.
+     */
+    function verdictTone(value) {
+      return value === 'block' || value === 'suggest' || value === 'pass' ? value : 'idle';
+    }
+
     /** Severity → localized label. */
     function severityLabel(severity, t) {
       return t(VERDICT_KEY[severity] ?? 'verdictUnknown');
+    }
+
+    /**
+     * Dot tone for one file row: 'block' | 'suggest' | 'pass' | '' (no dot). A finished analysis
+     * is authoritative — its verdict drives the dot exactly as the pill shows it, and an unknown
+     * verdict means no dot (the pill's idle tone). Only an unfinished analysis falls back to the
+     * findings it already has; that fallback describes work in progress, not a final verdict.
+     */
+    function fileSeverityOf(entry) {
+      if (entry?.status === 'done') {
+        const tone = verdictTone(entry?.explanation?.verdict);
+        return tone === 'idle' ? '' : tone;
+      }
+      const issues = Array.isArray(entry?.explanation?.issues) ? entry.explanation.issues : [];
+      if (issues.some((issue) => issue?.severity === 'block')) return 'block';
+      return issues.length > 0 ? 'suggest' : '';
     }
 
     const STATUS_KEY = {
@@ -833,6 +858,7 @@ window.__ModuleLoader__.load({
 .prr-sev{flex:0 0 auto;width:6px;height:6px;border-radius:3px}
 .prr-sev[data-sev="block"]{background:var(--dsw-alias-state-error-primary)}
 .prr-sev[data-sev="suggest"]{background:var(--dsw-alias-state-warn-primary)}
+.prr-sev[data-sev="pass"]{background:var(--dsw-alias-state-success-primary)}
 .prr-diffcol{flex:1 1 320px;min-width:240px;display:flex;flex-direction:column;min-height:0;background:var(--dsw-alias-bg-base)}
 .prr-diff-head{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);min-width:0}
 .prr-diff-path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;font-weight:600}
@@ -1074,8 +1100,7 @@ window.__ModuleLoader__.load({
 
     function VerdictPill(props) {
       const { verdict, t } = props;
-      const tone = verdict === 'block' || verdict === 'suggest' || verdict === 'pass' ? verdict : 'idle';
-      return h(Pill, { tone, label: severityLabel(verdict, t) });
+      return h(Pill, { tone: verdictTone(verdict), label: severityLabel(verdict, t) });
     }
 
     function Btn(props) {
@@ -4020,13 +4045,7 @@ window.__ModuleLoader__.load({
         const reasonMap = new Map(orderList.map((item) => [item.file, item.reason]));
         const severityMap = new Map();
         for (const entry of review.explanations ?? []) {
-          const issues = entry.explanation?.issues ?? [];
-          const severity = issues.some((issue) => issue.severity === 'block')
-            ? 'block'
-            : issues.length > 0
-              ? 'suggest'
-              : '';
-          severityMap.set(entry.file, severity);
+          severityMap.set(entry.file, fileSeverityOf(entry));
         }
         const paths = [];
         const seen = new Set();
