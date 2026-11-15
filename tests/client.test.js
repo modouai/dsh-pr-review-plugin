@@ -54,6 +54,7 @@ const EXPOSED = [
   'PublishPreviewModal',
   'DetailHeader',
   'FilesPane',
+  'FileDetailPanel',
   'isAnalyzing',
   'fileContentKey',
   'ConclusionBlock',
@@ -951,6 +952,55 @@ test('selecting a round follows the latest or pins history and shows the overvie
     roundPick: 1,
     mode: 'overview',
   });
+});
+
+test('per-file suggestions render as text whether stored as a string or an object', () => {
+  const client = loadClient();
+  const version = makeVersion(1, '结论');
+  const review = makeReview({
+    round: 1,
+    conclusionAt: version.createdAt,
+    conclusion: version.conclusion,
+    roundHistory: [makeRound(1, { conclusions: [version] })],
+  });
+  // Model output stores plain strings; a review_update_analysis write stores { point, line }.
+  const { textOnly } = renderOverview(client, review, {
+    fileFindings: [
+      {
+        file: 'src/a.js',
+        issues: [],
+        suggestions: ['模型写的建议', { point: '工具写的建议', line: 12 }],
+      },
+    ],
+  });
+
+  assert.match(textOnly, /模型写的建议/);
+  assert.match(textOnly, /工具写的建议/);
+  assert.doesNotMatch(textOnly, /\[object Object\]/);
+});
+
+test('the file detail renders suggestion objects written by review_update_analysis', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const { textOnly } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t: translator(parts),
+    filePath: 'src/a.js',
+    explanation: {
+      status: 'done',
+      explanation: {
+        verdict: 'suggest',
+        summary: '文件摘要',
+        logic: '',
+        changes: '',
+        issues: [],
+        suggestions: ['纯文本建议', { point: '对象建议', line: 3 }],
+      },
+    },
+    onExplain: () => {},
+  }));
+
+  assert.match(textOnly, /纯文本建议/);
+  assert.match(textOnly, /对象建议/);
 });
 
 test('the detail header keeps only the pane title', () => {

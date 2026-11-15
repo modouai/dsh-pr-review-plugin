@@ -509,6 +509,18 @@ window.__ModuleLoader__.load({
       return output;
     }
 
+    /**
+     * Text of one per-file suggestion. Model output stores plain strings, while a
+     * `review_update_analysis` write stores `{ point, line }`; rendering the object itself is
+     * a React child error, so every suggestion goes through here.
+     */
+    function suggestionText(item) {
+      if (typeof item === 'string') return item;
+      if (item === null || typeof item !== 'object') return '';
+      if (typeof item.point === 'string') return item.point;
+      return typeof item.text === 'string' ? item.text : '';
+    }
+
     /** Starter text the review panel inserts into the main composer ("ask in conversation"). */
     function reviewAskContext(t, number, round, filePath) {
       const values = {
@@ -2625,12 +2637,12 @@ window.__ModuleLoader__.load({
                       ),
                     ),
                   ),
-                  (group.suggestions ?? []).map((text, index) =>
+                  (group.suggestions ?? []).map((item, index) =>
                     h(
                       'div',
                       { className: 'prr-rowitem', key: `suggestion-${index}` },
                       h('span', { className: 'prr-tag' }, t('suggestionTag')),
-                      h('div', { className: 'prr-rowmain prr-text' }, text),
+                      h('div', { className: 'prr-rowmain prr-text' }, suggestionText(item)),
                     ),
                   ),
                 ),
@@ -2709,7 +2721,7 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'prr-card' },
               detail.suggestions.map((item, index) =>
-                h('div', { className: 'prr-rowitem', key: index }, h('div', { className: 'prr-rowmain prr-text' }, item)),
+                h('div', { className: 'prr-rowitem', key: index }, h('div', { className: 'prr-rowmain prr-text' }, suggestionText(item))),
               ),
             ),
           );
@@ -4653,6 +4665,12 @@ window.__ModuleLoader__.load({
 
           static getDerivedStateFromError(error) {
             return { error };
+          }
+
+          componentDidCatch(error, info) {
+            // React already logs the throw; add our label so the panel's crash is easy to find
+            // among host errors, with the component stack the fallback cannot show.
+            console.error('[pr-review] 审查面板渲染失败', error, info?.componentStack ?? '');
           }
 
           render() {
