@@ -203,17 +203,8 @@ async function setup(options = {}) {
   const routes = new Map();
   const cleanups = [];
   const toolRegistry = new Map();
-  const injected = [];
+  const promptContexts = [];
   const ctx = {
-    agents: {
-      get(sessionId) {
-        return {
-          inject(message) {
-            injected.push({ sessionId, message });
-          },
-        };
-      },
-    },
     tools: {
       register(definition) {
         toolRegistry.set(definition.name, definition);
@@ -225,7 +216,18 @@ async function setup(options = {}) {
       if (typeof cleanup === 'function') cleanups.push(cleanup);
     },
     get(name) {
-      return name === 'tools' ? ctx.tools : undefined;
+      if (name === 'tools') return ctx.tools;
+      if (name === 'systemPrompt') return ctx.systemPrompt;
+      return undefined;
+    },
+    systemPrompt: {
+      section() {
+        return () => {};
+      },
+      context(definition) {
+        promptContexts.push(definition);
+        return () => {};
+      },
     },
     on() {
       return () => {};
@@ -295,7 +297,13 @@ async function setup(options = {}) {
     call,
     review,
     tools: toolRegistry,
-    injected,
+    promptContexts,
+    /** Snapshot text the registered runtime-context provider returns for one session. */
+    promptContext(sessionId = 'session-a', name = 'pr-review: focus') {
+      const provider = promptContexts.find((entry) => entry.name === name);
+      assert.ok(provider, `runtime context ${name} is registered`);
+      return provider.text({ agent: { session: { id: sessionId } } });
+    },
     async runTool(name, args = {}, agent = { session: { id: 'session-a' } }) {
       const definition = toolRegistry.get(name);
       assert.ok(definition, `tool ${name} is registered`);
@@ -1191,10 +1199,9 @@ test('review_update_report rewrites the report and marks the conclusion stale', 
   }
 });
 
-test('/active injects one compact review snapshot into the session agent', async () => {
+test('/active binds the panel focus to the runtime-context snapshot', async () => {
   const plugin = await setup();
   try {
-    const before = plugin.injected.length;
     const result = await plugin.call('/pr-review-api/active', 'POST', {
       sessionId: 'session-a',
       number: 1,
@@ -1204,60 +1211,56 @@ test('/active injects one compact review snapshot into the session agent', async
       round: 1,
     });
     assert.equal(result.status, 200);
-    assert.equal(result.json.injected, true);
-    assert.equal(plugin.injected.length, before + 1);
+    assert.equal(result.json.active, 1);
 
-    const snapshot = plugin.injected[plugin.injected.length - 1];
-    assert.equal(snapshot.sessionId, 'session-a');
-    assert.equal(snapshot.message.role, 'user');
-    assert.equal(snapshot.message.source.kind, 'runtime-context');
-    const text = snapshot.message.content.map((block) => block.text ?? '').join('\n');
+    const text = plugin.promptContext('session-a');
     assert.match(text, /<review-context>/);
     assert.match(text, /PR #1/);
     assert.match(text, /第 1 轮/);
     assert.match(text, /当前查看：文件 src\/a\.js/);
     assert.match(text, /revision：0/);
 
-    // Clearing the binding stops further injections.
+    // Another session has no binding, so it contributes nothing.
+    assert.equal(plugin.promptContext('session-b'), '');
+
+    // Clearing the binding removes the snapshot.
     await plugin.call('/pr-review-api/active', 'POST', { sessionId: 'session-a' });
-    const cleared = await plugin.call('/pr-review-api/focus', 'POST', { sessionId: 'session-a', number: 1 });
-    assert.equal(cleared.status, 200);
-    assert.equal(cleared.json.injected, false, 'throttled / unbound sessions do not inject');
+    assert.equal(plugin.promptContext('session-a'), '');
   } finally {
     await plugin.dispose();
   }
 });
 
-test('/focus injects again only when the snapshot actually changes', async () => {
+test('/focus makes the snapshot follow the panel', async () => {
   const plugin = await setup();
   try {
-    const start = plugin.injected.length;
-    const bound = await plugin.call('/pr-review-api/active', 'POST', { sessionId: 'session-a', number: 1, view: 'overview' });
-    assert.equal(bound.json.injected, true);
-    assert.equal(plugin.injected.length, start + 1);
+    // A focus report is itself a binding: it must work even if the panel's /active report was
+    // released by a late cleanup request.
+    await plugin.call('/pr-review-api/focus', 'POST', {
+      sessionId: 'session-a',
+      number: 1,
+      view: 'overview',
+    });
+    assert.match(plugin.promptContext('session-a'), /当前查看：总览/);
 
-    // Same focus again: the snapshot is unchanged, so nothing is injected.
+    // Same focus again: the snapshot text is unchanged, so the host sees no new section.
     const same = await plugin.call('/pr-review-api/focus', 'POST', {
       sessionId: 'session-a',
       number: 1,
       view: 'overview',
     });
-    assert.equal(same.json.injected, false);
-    assert.equal(plugin.injected.length, start + 1);
+    assert.equal(same.json.active, 1);
+    assert.match(plugin.promptContext('session-a'), /当前查看：总览/);
 
     // Switching to a file changes the snapshot, so the agent learns what "this file" means.
-    const changed = await plugin.call('/pr-review-api/focus', 'POST', {
+    await plugin.call('/pr-review-api/focus', 'POST', {
       sessionId: 'session-a',
       number: 1,
       view: 'file',
       path: 'src/a.js',
       pane: 'diff',
     });
-    assert.equal(changed.json.injected, true);
-    assert.equal(plugin.injected.length, start + 2);
-    const latest = plugin.injected[plugin.injected.length - 1];
-    const text = latest.message.content.map((block) => block.text ?? '').join('\n');
-    assert.match(text, /当前查看：文件 src\/a\.js/);
+    assert.match(plugin.promptContext('session-a'), /当前查看：文件 src\/a\.js/);
   } finally {
     await plugin.dispose();
   }
