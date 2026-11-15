@@ -54,6 +54,7 @@ const EXPOSED = [
   'PublishPreviewModal',
   'DetailHeader',
   'FilesPane',
+  'fileContentKey',
   'ConclusionBlock',
   'DiffView',
   'roundsOf',
@@ -1014,6 +1015,17 @@ test('the file column carries the pinned overview entry above the list', () => {
     (node) => node.type === 'button' && fake.textOf(node).trim() === '总览',
   );
   assert.equal(inactiveNav.props['data-active'], 'false');
+});
+
+test('the full-file cache key changes with the reviewed head', () => {
+  const client = loadClient();
+  const key = client.parts.fileContentKey;
+  assert.equal(typeof key, 'function');
+  const base = key(3, 'sha-a', 'src/a.js');
+  assert.equal(base, key(3, 'sha-a', 'src/a.js'));
+  assert.notEqual(base, key(3, 'sha-b', 'src/a.js'), 'a new head is a new snapshot');
+  assert.notEqual(base, key(4, 'sha-a', 'src/a.js'));
+  assert.notEqual(base, key(3, 'sha-a', 'src/b.js'));
 });
 
 test('the file column shows batch progress and the manual analyze-all button', () => {

@@ -2750,8 +2750,13 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** Full-file content cache keyed by "<pr>/<path>" (browser-side, survives view remounts). */
+    /** Full-file content cache keyed by "<pr>@<head>/<path>" (browser-side, survives remounts). */
     const fileContentCache = new Map();
+
+    /** Cache key: the reviewed head is part of it, so a new snapshot never reuses the old body. */
+    function fileContentKey(number, headSha, path) {
+      return `${number}@${headSha ?? ''}:${path}`;
+    }
 
     /** Full file at PR head with the diff's added lines highlighted, for reading complete context. */
     function FullFileView(props) {
@@ -3012,7 +3017,7 @@ window.__ModuleLoader__.load({
 
     const loadFileContent = React.useCallback(async (number, path) => {
       if (typeof number !== 'number' || path === '') return null;
-      const key = `${number}:${path}`;
+      const key = fileContentKey(number, review?.headSha ?? '', path);
       const cached = fileContentCache.get(key);
       if (cached !== undefined) {
         setFileContent(cached);
@@ -3036,7 +3041,14 @@ window.__ModuleLoader__.load({
       } finally {
         setFileContentBusy(false);
       }
-    }, []);
+    }, [review?.headSha]);
+
+    // A new reviewed head invalidates the full files fetched for the previous snapshot.
+    React.useEffect(() => {
+      fileContentCache.clear();
+      setFileContent(null);
+      setFileContentError('');
+    }, [prNumber, review?.headSha]);
 
     const toggleFullFile = React.useCallback(async () => {
       if (showFullFile) {
