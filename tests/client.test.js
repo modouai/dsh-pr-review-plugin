@@ -56,6 +56,7 @@ const EXPOSED = [
   'FilesPane',
   'FileDetailPanel',
   'isAnalyzing',
+  'fileSeverityOf',
   'fileContentKey',
   'ConclusionBlock',
   'DiffView',
@@ -1190,6 +1191,45 @@ test('the file column shows batch progress and the manual analyze-all button', (
 });
 
 // ---------- v2: right-sidebar review tab ----------
+
+test('a file row dot follows the per-file verdict, falling back to its findings', () => {
+  const { parts } = loadClient();
+
+  // A finished analysis is authoritative: a pass with no findings is still a pass.
+  assert.equal(parts.fileSeverityOf({
+    status: 'done',
+    explanation: { verdict: 'pass', issues: [] },
+  }), 'pass');
+  assert.equal(parts.fileSeverityOf({
+    status: 'done',
+    explanation: { verdict: 'suggest', issues: [] },
+  }), 'suggest');
+  assert.equal(parts.fileSeverityOf({
+    status: 'done',
+    explanation: { verdict: 'block', issues: [{ severity: 'block' }] },
+  }), 'block');
+
+  // Nothing decided yet: the findings the model already produced keep the dot meaningful.
+  assert.equal(parts.fileSeverityOf({
+    status: 'pending',
+    explanation: { verdict: 'pass', issues: [{ severity: 'block' }] },
+  }), 'block');
+  assert.equal(parts.fileSeverityOf({
+    status: 'error',
+    explanation: { issues: [{ severity: 'suggest' }] },
+  }), 'suggest');
+  assert.equal(parts.fileSeverityOf({ status: 'pending' }), '');
+  assert.equal(parts.fileSeverityOf(null), '');
+});
+
+test('the pass dot uses the same green as the verdict pill', () => {
+  const { parts } = loadClient();
+  const dot = cssRule(parts.CSS, '.prr-sev[data-sev="pass"]');
+  const pill = cssRule(parts.CSS, '.prr-pill[data-tone="pass"]');
+  assert.ok(dot, 'pass dot rule missing');
+  assert.match(dot, /background:var\(--dsw-alias-state-success-primary\)/);
+  assert.match(pill, /--dsw-alias-state-success-primary/, 'the pill keeps the same tone');
+});
 
 test('sidebar review addresses round-trip the workspace cwd and an optional PR number', () => {
   const client = loadClient();
