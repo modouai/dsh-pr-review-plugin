@@ -54,6 +54,8 @@ const EXPOSED = [
   'PublishPreviewModal',
   'DetailHeader',
   'FilesPane',
+  'isAnalyzing',
+  'fileContentKey',
   'ConclusionBlock',
   'DiffView',
   'roundsOf',
@@ -1014,6 +1016,111 @@ test('the file column carries the pinned overview entry above the list', () => {
     (node) => node.type === 'button' && fake.textOf(node).trim() === '总览',
   );
   assert.equal(inactiveNav.props['data-active'], 'false');
+});
+
+test('the full-file cache key changes with the reviewed head', () => {
+  const client = loadClient();
+  const key = client.parts.fileContentKey;
+  assert.equal(typeof key, 'function');
+  const base = key(3, 'sha-a', 'src/a.js');
+  assert.equal(base, key(3, 'sha-a', 'src/a.js'));
+  assert.notEqual(base, key(3, 'sha-b', 'src/a.js'), 'a new head is a new snapshot');
+  assert.notEqual(base, key(4, 'sha-a', 'src/a.js'));
+  assert.notEqual(base, key(3, 'sha-a', 'src/b.js'));
+});
+
+test('isAnalyzing only accepts a usable progress total', () => {
+  const { parts } = loadClient();
+  assert.equal(parts.isAnalyzing({ total: 2, done: 0 }), true);
+  assert.equal(parts.isAnalyzing({ total: 0 }), false);
+  assert.equal(parts.isAnalyzing({ total: '3' }), false);
+  assert.equal(parts.isAnalyzing({ done: 1 }), false);
+  assert.equal(parts.isAnalyzing(null), false);
+  assert.equal(parts.isAnalyzing(undefined), false);
+});
+
+test('the file column shows batch progress and the manual analyze-all button', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const t = translator(parts);
+  const dict = parts.DICT.zh;
+  const fill = (template, vars) => Object.keys(vars).reduce(
+    (text, key) => text.split(`{${key}}`).join(String(vars[key])),
+    template,
+  );
+  const files = [{ path: 'src/a.js', order: 1, severity: '', additions: 1, deletions: 0, reason: '' }];
+  const hits = [];
+  const render = (extra) => fake.render(fake.React.createElement(parts.FilesPane, {
+    t,
+    overviewMode: false,
+    onSelectOverview: () => {},
+    files,
+    filePath: '',
+    review: { files },
+    onOpenFile: () => {},
+    ...extra,
+  }));
+  const analyzeAllButton = (rendered) => rendered.elements.find(
+    (node) => node.type === 'button' && fake.textOf(node).trim() === dict.analyzeAll,
+  );
+
+  // Automatic mode: progress replaces the file count and no button competes with it.
+  const running = render({ analyzing: { total: 3, done: 1, failed: 0, current: 'src/a.js' } });
+  assert.ok(running.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 3 })));
+  assert.equal(running.textOnly.includes(dict.fileUnit), false, 'progress replaces the file count');
+  assert.equal(running.textOnly.includes(dict.analyzingFailed.replace('{failed}', '0')), false);
+  assert.equal(analyzeAllButton(running), undefined);
+
+  const failing = render({ analyzing: { total: 3, done: 2, failed: 1, current: 'src/b.js' } });
+  assert.ok(failing.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 3 })));
+  assert.ok(failing.textOnly.includes(fill(dict.analyzingFailed, { failed: 1 })));
+
+  const allFailed = render({ analyzing: { total: 2, done: 2, failed: 2 } });
+  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 2 })));
+  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFailed, { failed: 2 })));
+
+  // Progress without a usable total is not a batch: keep the plain count.
+  const degenerate = render({ analyzing: { total: 0, done: 0, failed: 0 } });
+  assert.ok(degenerate.textOnly.includes(dict.fileUnit));
+  assert.equal(degenerate.textOnly.includes(fill(dict.analyzingFiles, { done: 0, total: 0 })), false);
+  const noTotal = render({ analyzing: { done: 1, failed: 0 } });
+  assert.ok(noTotal.textOnly.includes(dict.fileUnit));
+
+  // Counts are clamped to the total: a bad payload never renders "5/3".
+  const clamped = render({ analyzing: { total: 2, done: 5, failed: 9 } });
+  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 2 })));
+  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFailed, { failed: 2 })));
+
+  // The last file of a batch still reports progress until the host clears `analyzing`.
+  const finishing = render({ analyzing: { total: 2, done: 2, failed: 0, current: '' } });
+  assert.ok(finishing.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 2 })));
+
+  // Automatic mode with no batch: the plain count returns and no button appears.
+  const idle = render({});
+  assert.ok(idle.textOnly.includes(dict.fileUnit));
+  assert.equal(analyzeAllButton(idle), undefined);
+
+  // Manual mode: the count stays and the batch button appears.
+  const manual = render({ manual: true, analyzeAllBusy: false, onAnalyzeAll: () => hits.push('all') });
+  assert.ok(manual.textOnly.includes(dict.fileUnit));
+  const button = analyzeAllButton(manual);
+  assert.ok(button, 'manual mode renders the analyze-all button');
+  button.props.onClick();
+  assert.deepEqual(hits, ['all']);
+
+  // A batch already running wins over the button, whatever the mode says.
+  const manualRunning = render({ manual: true, analyzing: { total: 2, done: 1, failed: 0, current: 'src/a.js' } });
+  assert.equal(analyzeAllButton(manualRunning), undefined);
+  assert.ok(manualRunning.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 2 })));
+
+  // While the request is in flight the button reports the work and cannot be clicked twice.
+  const busy = render({ manual: true, analyzeAllBusy: true, onAnalyzeAll: () => hits.push('again') });
+  const busyButton = busy.elements.find(
+    (node) => node.type === 'button' && fake.textOf(node).trim() === dict.explaining,
+  );
+  assert.ok(busyButton);
+  assert.equal(busyButton.props.disabled, true);
+  assert.equal(busyButton.props.onClick, undefined, 'a disabled button carries no click handler');
 });
 
 // ---------- v2: right-sidebar review tab ----------

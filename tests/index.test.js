@@ -257,6 +257,10 @@ async function setup(options = {}) {
     pollSeconds: 3600,
     commentLanguage: options.commentLanguage ?? 'zh',
     autoReconclude: options.autoReconclude === true,
+    // Batch analysis is opt-in per test: its background model calls would otherwise race
+    // the assertions of the review/conclusion tests. The schema default is `true`;
+    // `useDefaultAutoAnalyze` omits the key to exercise that default end to end.
+    ...(options.useDefaultAutoAnalyze === true ? {} : { autoAnalyze: options.autoAnalyze === true }),
   });
 
   async function call(pathname, method = 'GET', body) {
@@ -1769,6 +1773,701 @@ test('duplicate explain requests for one file share a single model call', async 
   }
 });
 
+// ---------- batch file analysis ----------
+
+/** A finished review with two files and no per-file analyses yet. */
+function unanalyzedReview() {
+  return legacyReview({
+    files: [
+      { path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+      { path: 'src/b.js', previousPath: '', status: 'modified', additions: 1, deletions: 1, changes: 2 },
+    ],
+    explanations: [],
+    report: {
+      verdict: 'suggest',
+      summary: '报告',
+      risks: [],
+      order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+      focus: {},
+    },
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+  });
+}
+
+const BATCH_DIFF = [
+  'diff --git a/src/a.js b/src/a.js',
+  '--- a/src/a.js',
+  '+++ b/src/a.js',
+  '@@ -1 +1 @@',
+  '-a',
+  '+b',
+  'diff --git a/src/b.js b/src/b.js',
+  '--- a/src/b.js',
+  '+++ b/src/b.js',
+  '@@ -1 +1 @@',
+  '-c',
+  '+d',
+].join('\n');
+
+/** Fetch fake for the batch tests: diff plus file contents for both files. */
+async function batchFetch(url) {
+  const target = String(url);
+  if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
+  if (target.includes('/pulls/1.diff')) return textResponse(200, BATCH_DIFF);
+  // b's content is unavailable on purpose: the analysis must fall back to the diff.
+  if (target.includes('/contents/src/b.js')) return jsonResponse(404, { message: 'not found' });
+  if (target.includes('/contents/')) {
+    return jsonResponse(200, {
+      encoding: 'base64',
+      content: Buffer.from('const a = 1;\n', 'utf8').toString('base64'),
+      size: 13,
+    });
+  }
+  throw new Error(`unexpected fetch in test: ${target}`);
+}
+
+const BATCH_EXPLANATION = JSON.stringify({
+  verdict: 'suggest',
+  summary: '讲解',
+  logic: '逻辑',
+  changes: '改动',
+  issues: [],
+  suggestions: [],
+});
+
+/** Fetch fake for tests that force a new round: detail, files, diff and file contents. */
+async function roundReviewFetch(url) {
+  const target = String(url);
+  if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
+  if (target.endsWith('/pulls/1.diff')) return textResponse(200, BATCH_DIFF);
+  if (target.includes('/pulls/1/files')) {
+    return jsonResponse(200, [
+      { filename: 'src/a.js', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+      { filename: 'src/b.js', status: 'modified', additions: 1, deletions: 1, changes: 2 },
+    ]);
+  }
+  if (target.includes('/contents/')) {
+    return jsonResponse(200, {
+      encoding: 'base64',
+      content: Buffer.from('const value = 1;\n', 'utf8').toString('base64'),
+      size: 17,
+    });
+  }
+  if (/\/pulls\/1$/.test(target)) {
+    return jsonResponse(200, {
+      number: 1,
+      title: 'PR 标题',
+      body: '',
+      user: { login: 'dev' },
+      state: 'open',
+      merged: false,
+      additions: 2,
+      deletions: 1,
+      changed_files: 2,
+      head: { ref: 'feature', sha: 'newsha' },
+      base: { ref: 'main', sha: 'def456' },
+      html_url: 'https://git.example/acme/demo/pulls/1',
+    });
+  }
+  throw new Error(`unexpected fetch in test: ${target}`);
+}
+
+/** Fetch fake for several pull requests at once (analysis slot tests). */
+async function multiPrFetch(url) {
+  const target = String(url);
+  if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
+  if (target.includes('/contents/')) {
+    return jsonResponse(200, {
+      encoding: 'base64',
+      content: Buffer.from('const value = 1;\n', 'utf8').toString('base64'),
+      size: 17,
+    });
+  }
+  if (target.includes('.diff')) return textResponse(200, BATCH_DIFF);
+  if (/\/pulls\/\d+\/files(?:\?.*)?$/.test(target)) {
+    return jsonResponse(200, [
+      { filename: 'src/a.js', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+      { filename: 'src/b.js', status: 'modified', additions: 1, deletions: 1, changes: 2 },
+    ]);
+  }
+  const detail = /\/pulls\/(\d+)(?:\?.*)?$/.exec(target);
+  if (detail !== null) {
+    const number = Number(detail[1]);
+    return jsonResponse(200, {
+      number,
+      title: `PR ${number}`,
+      body: '',
+      user: { login: 'dev' },
+      state: 'open',
+      merged: false,
+      additions: 2,
+      deletions: 1,
+      changed_files: 2,
+      head: { ref: 'feature', sha: `sha${number}` },
+      base: { ref: 'main', sha: 'def456' },
+      html_url: `https://git.example/acme/demo/pulls/${number}`,
+    });
+  }
+  throw new Error(`unexpected fetch in test: ${target}`);
+}
+
+/** A finished, unanalyzed review record for one pull request number. */
+function unanalyzedPr(number) {
+  const review = unanalyzedReview();
+  return {
+    ...review,
+    number,
+    pull: { ...review.pull, number, title: `PR ${number}`, url: `https://git.example/acme/demo/pulls/${number}` },
+  };
+}
+
+test('autoAnalyze explains every file of a finished round, one model call at a time', async () => {
+  let active = 0;
+  let peak = 0;
+  const prompts = [];
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText('{}')(options);
+    prompts.push(prompt);
+    active += 1;
+    peak = Math.max(peak, active);
+    return (async function* () {
+      try {
+        await delay(200);
+        yield { type: 'text-delta', text: BATCH_EXPLANATION };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+      } finally {
+        active -= 1;
+      }
+    })();
+  };
+  const plugin = await setup({ fetch: batchFetch, llm, reviews: { 1: unanalyzedReview() }, autoAnalyze: true });
+  try {
+    // The panel's first read starts the batch and reports it before the files finish.
+    const started = await plugin.review();
+    assert.notEqual(started.analyzing, null, 'the finished round starts a batch');
+    assert.equal(started.analyzing.total, 2);
+
+    const done = await plugin.waitFor(1, (current) => current.analyzing === null
+      && (current.explanations ?? []).every((entry) => entry.status === 'done')
+      && (current.explanations ?? []).length === 2);
+    assert.deepEqual(done.explanations.map((entry) => entry.file).sort(), ['src/a.js', 'src/b.js']);
+    assert.equal(prompts.length, 2, 'one model call per file');
+    assert.equal(peak, 1, 'files are analyzed one at a time');
+    assert.ok(prompts[0].includes('src/a.js'), 'the batch follows the file list order');
+    assert.ok(prompts[1].includes('src/b.js'));
+    assert.ok(prompts[0].includes('const a = 1'), 'each file gets its own full content');
+    assert.ok(prompts[1].includes('完整内容不可用'), 'unreadable content falls back to the diff only');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('autoAnalyze off leaves files untouched; the manual analyze route fills and retries them', async () => {
+  let failOnce = true;
+  const prompts = [];
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText('{}')(options);
+    prompts.push(prompt);
+    if (prompt.includes('src/b.js') && failOnce) {
+      failOnce = false;
+      return (async function* () {
+        throw new Error('model exploded');
+      })();
+    }
+    return llmFromText(BATCH_EXPLANATION)(options);
+  };
+  const plugin = await setup({ fetch: batchFetch, llm, reviews: { 1: unanalyzedReview() } });
+  try {
+    const idle = await plugin.review();
+    assert.equal(idle.analyzing, null);
+    assert.deepEqual(idle.explanations, []);
+    await delay(60);
+    const untouched = await plugin.review();
+    assert.deepEqual(untouched.explanations, [], 'manual mode never analyzes on its own');
+    assert.equal(prompts.length, 0);
+
+    // The host serializes the setting so the panel knows to offer the button.
+    const prs = await plugin.call('/pr-review-api/prs');
+    assert.equal(prs.json.autoAnalyze, false);
+
+    const started = await plugin.call('/pr-review-api/analyze', 'POST', { number: 1 });
+    assert.equal(started.status, 200);
+    assert.equal(started.json.started, true);
+
+    const firstPass = await plugin.waitFor(1, (current) => current.analyzing === null
+      && (current.explanations ?? []).length === 2);
+    const byFile = new Map(firstPass.explanations.map((entry) => [entry.file, entry]));
+    assert.equal(byFile.get('src/a.js').status, 'done');
+    assert.equal(byFile.get('src/b.js').status, 'error');
+    assert.match(byFile.get('src/b.js').error, /model exploded/);
+
+    const retried = await plugin.call('/pr-review-api/analyze', 'POST', { number: 1 });
+    assert.equal(retried.json.started, true);
+    await plugin.waitFor(1, (current) => current.analyzing === null
+      && (current.explanations ?? []).length === 2
+      && (current.explanations ?? []).every((entry) => entry.status === 'done'));
+    assert.equal(prompts.filter((prompt) => prompt.includes('src/b.js')).length, 2, 'the failed file is retried');
+    assert.equal(prompts.filter((prompt) => prompt.includes('src/a.js')).length, 1, 'a finished file is not paid for twice');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a new round cancels the batch and drops its in-flight answer', async () => {
+  const reportReply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '第二轮报告',
+    risks: [],
+    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+    focus: {},
+  });
+  let aborted = false;
+  const explainPrompts = [];
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    explainPrompts.push(prompt);
+    // llmSlow rejects on abort; record it so the test can prove the call was cancelled,
+    // not merely ignored after it finished.
+    options.signal.addEventListener('abort', () => { aborted = true; }, { once: true });
+    return llmSlow(200, BATCH_EXPLANATION)(options);
+  };
+  const plugin = await setup({ fetch: roundReviewFetch, llm, reviews: { 1: unanalyzedReview() } });
+  try {
+    const started = await plugin.call('/pr-review-api/analyze', 'POST', { number: 1 });
+    assert.equal(started.json.started, true);
+    await delay(30);
+
+    const forced = await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    assert.equal(forced.status, 200);
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done' && current.analyzing === null);
+    // Let the rejected round-1 call settle.
+    await delay(50);
+    // This test covers the abort path only (the provider rejects on the signal). The
+    // epoch-only paths — a provider that ignores the abort, and a manual explain that
+    // holds no signal — are covered by the two tests below.
+    assert.equal(aborted, true, 'the round-1 model call was aborted, not left running');
+    assert.equal(explainPrompts.length, 1, 'the batch stopped instead of starting the next file');
+
+    const after = await plugin.review();
+    assert.equal(after.round, 2);
+    assert.deepEqual(after.explanations, [], 'the round-1 answer did not land in round 2');
+    assert.equal(after.analyzing, null);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a fresh explain for the new round does not join the stale in-flight call', async () => {
+  const reportReply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '第二轮报告',
+    risks: [],
+    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+    focus: {},
+  });
+  let explains = 0;
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    explains += 1;
+    return (async function* () {
+      await delay(150);
+      yield { type: 'text-delta', text: BATCH_EXPLANATION };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })();
+  };
+  const plugin = await setup({ fetch: roundReviewFetch, llm, reviews: { 1: unanalyzedReview() } });
+  try {
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 1 });
+    await delay(30);
+
+    // The round-1 answer for src/a.js is still in flight when round 2 starts.
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+
+    const asked = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js' });
+    assert.equal(asked.status, 200);
+    assert.notEqual(asked.json.explanation, null, 'the new round answered instead of reusing the discarded call');
+    const done = await plugin.waitFor(1, (current) => (current.explanations ?? []).some(
+      (entry) => entry.file === 'src/a.js' && entry.status === 'done',
+    ));
+    assert.equal(done.round, 2);
+    assert.equal(explains, 2, 'the new round paid for its own model call');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a cancelled call cannot write into the new round even if the provider ignores the abort', async () => {
+  const reportReply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '第二轮报告',
+    risks: [],
+    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+    focus: {},
+  });
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    // The fake stream never reads options.signal: the cancellation contract inside
+    // callModel (plus the discarded-result check) has to drop this late text.
+    return (async function* () {
+      await delay(150);
+      yield { type: 'text-delta', text: BATCH_EXPLANATION };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })();
+  };
+  const plugin = await setup({ fetch: roundReviewFetch, llm, reviews: { 1: unanalyzedReview() } });
+  try {
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 1 });
+    await delay(30);
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+    // Let the answer the provider still sends arrive after the round was cleared.
+    await delay(300);
+
+    const after = await plugin.review();
+    assert.equal(after.round, 2);
+    assert.deepEqual(after.explanations, [], 'the late answer never reached the new round');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a manual explain in flight is discarded when a new round starts', async () => {
+  const reportReply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '第二轮报告',
+    risks: [],
+    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+    focus: {},
+  });
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    return (async function* () {
+      await delay(150);
+      yield { type: 'text-delta', text: BATCH_EXPLANATION };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })();
+  };
+  const plugin = await setup({ fetch: roundReviewFetch, llm, reviews: { 1: unanalyzedReview() } });
+  try {
+    // A click-driven explain holds no batch job and no signal; only the epoch can stop it.
+    const pending = plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js' });
+    await delay(30);
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const answer = await pending;
+    assert.equal(answer.status, 200);
+    assert.equal(answer.json.explanation, null, 'the stale manual answer was discarded');
+
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+    await delay(200);
+    const after = await plugin.review();
+    assert.deepEqual(after.explanations, [], 'the manual answer did not land in the new round');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a new round reads the new head instead of the cached file content', async () => {
+  const reportReply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '第二轮报告',
+    risks: [],
+    order: [{ file: 'src/a.js', reason: '' }],
+    focus: {},
+  });
+  const prompts = [];
+  const fetchHandler = async (url) => {
+    const target = String(url);
+    if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
+    if (target.includes('/pulls/1.diff')) return textResponse(200, BATCH_DIFF);
+    if (target.includes('/pulls/1/files')) {
+      return jsonResponse(200, [{ filename: 'src/a.js', status: 'modified', additions: 1, deletions: 1, changes: 2 }]);
+    }
+    if (target.includes('/contents/')) {
+      const ref = /[?&]ref=([^&]+)/.exec(target)?.[1] ?? '';
+      const body = ref === 'sha-two' ? 'const fresh = 2;\n' : 'const old = 1;\n';
+      return jsonResponse(200, { encoding: 'base64', content: Buffer.from(body, 'utf8').toString('base64'), size: body.length });
+    }
+    if (/\/pulls\/1$/.test(target)) {
+      return jsonResponse(200, {
+        number: 1,
+        title: 'PR 标题',
+        body: '',
+        user: { login: 'dev' },
+        state: 'open',
+        merged: false,
+        additions: 1,
+        deletions: 1,
+        changed_files: 1,
+        head: { ref: 'feature', sha: 'sha-two' },
+        base: { ref: 'main', sha: 'def456' },
+        html_url: 'https://git.example/acme/demo/pulls/1',
+      });
+    }
+    throw new Error(`unexpected fetch in test: ${target}`);
+  };
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    prompts.push(prompt);
+    return llmFromText(BATCH_EXPLANATION)(options);
+  };
+  const plugin = await setup({ fetch: fetchHandler, llm, reviews: { 1: unanalyzedReview() } });
+  try {
+    // Round 1 reads the old head and caches its content.
+    await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js' });
+    assert.ok(prompts[0].includes('const old = 1'));
+
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+
+    await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js' });
+    assert.ok(prompts[1].includes('const fresh = 2'), 'the new round read the new head');
+    assert.equal(prompts[1].includes('const old = 1'), false, 'the previous head stayed cached');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a stale malformed answer is discarded instead of reported as a failure', async () => {
+  const reportReply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '第二轮报告',
+    risks: [],
+    order: [{ file: 'src/a.js', reason: '' }],
+    focus: {},
+  });
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    return (async function* () {
+      await delay(120);
+      yield { type: 'text-delta', text: 'not json' };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })();
+  };
+  const plugin = await setup({ fetch: roundReviewFetch, llm, reviews: { 1: unanalyzedReview() } });
+  try {
+    const pending = plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js' });
+    await delay(30);
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const answer = await pending;
+    assert.equal(answer.status, 200, 'a stale parse failure is not a failure of the new round');
+    assert.equal(answer.json.explanation, null);
+
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+    const after = await plugin.review();
+    assert.deepEqual(after.explanations, []);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('an automatic batch continues past a failed file and never retries it on polls', async () => {
+  let explainCalls = 0;
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText('{}')(options);
+    explainCalls += 1;
+    if (prompt.includes('src/b.js')) {
+      return (async function* () {
+        throw new Error('boom');
+      })();
+    }
+    return llmFromText(BATCH_EXPLANATION)(options);
+  };
+  const plugin = await setup({ fetch: batchFetch, llm, reviews: { 1: unanalyzedReview() }, autoAnalyze: true });
+  try {
+    const done = await plugin.waitFor(1, (current) => current.analyzing === null
+      && (current.explanations ?? []).length === 2);
+    const byFile = new Map(done.explanations.map((entry) => [entry.file, entry]));
+    assert.equal(byFile.get('src/a.js').status, 'done', 'the batch kept going after the failure');
+    assert.equal(byFile.get('src/b.js').status, 'error');
+    assert.match(byFile.get('src/b.js').error, /boom/);
+
+    // The panel keeps polling; the automatic path must not retry the failed file.
+    const before = explainCalls;
+    await plugin.review();
+    await plugin.review();
+    await delay(50);
+    assert.equal(explainCalls, before, 'an error entry is left for the manual retry');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the schema default turns batch analysis on without an explicit option', async () => {
+  const llm = (options) => (
+    JSON.stringify(options.messages).includes('正在审查文件')
+      ? llmFromText(BATCH_EXPLANATION)(options)
+      : llmFromText('{}')(options)
+  );
+  const plugin = await setup({
+    fetch: batchFetch,
+    llm,
+    reviews: { 1: unanalyzedReview() },
+    useDefaultAutoAnalyze: true,
+  });
+  try {
+    // The panel is told the effective default too, so manual mode and the button agree.
+    const prs = await plugin.call('/pr-review-api/prs');
+    assert.equal(prs.json.autoAnalyze, true);
+
+    const done = await plugin.waitFor(1, (current) => current.analyzing === null
+      && (current.explanations ?? []).length === 2
+      && (current.explanations ?? []).every((entry) => entry.status === 'done'));
+    assert.deepEqual(done.explanations.map((entry) => entry.file).sort(), ['src/a.js', 'src/b.js']);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a restored entry without an explanation is analyzed again', async () => {
+  const restored = legacyReview({
+    files: [{ path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 }],
+    // Legacy caches can carry `done` with a null body; it is not an analysis yet.
+    explanations: [{ file: 'src/a.js', status: 'done', error: null, explanation: null, chat: [], updatedAt: 150 }],
+  });
+  const llm = (options) => (
+    JSON.stringify(options.messages).includes('正在审查文件')
+      ? llmFromText(BATCH_EXPLANATION)(options)
+      : llmFromText('{}')(options)
+  );
+  const plugin = await setup({ fetch: batchFetch, llm, reviews: { 1: restored }, autoAnalyze: true });
+  try {
+    const done = await plugin.waitFor(1, (current) => (current.explanations ?? []).some(
+      (entry) => entry.file === 'src/a.js' && entry.status === 'done' && entry.explanation !== null,
+    ));
+    assert.equal(done.analyzing, null);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('failed batches release their analysis slots for later batches', async () => {
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText('{}')(options);
+    if (prompt.includes('PR #1：') || prompt.includes('PR #2：')) {
+      return (async function* () {
+        throw new Error('model exploded');
+      })();
+    }
+    return llmFromText(BATCH_EXPLANATION)(options);
+  };
+  const plugin = await setup({
+    fetch: multiPrFetch,
+    llm,
+    reviews: { 1: unanalyzedPr(1), 2: unanalyzedPr(2), 3: unanalyzedPr(3) },
+  });
+  try {
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 1 });
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 2 });
+    // Both batches only finish if every rejected call gave its slot back; a leak would
+    // starve them (and the third batch below) at the two-slot ceiling.
+    await plugin.waitFor(1, (current) => current.analyzing === null && (current.explanations ?? []).length === 2);
+    await plugin.waitFor(2, (current) => current.analyzing === null && (current.explanations ?? []).length === 2);
+
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 3 });
+    const done = await plugin.waitFor(3, (current) => current.analyzing === null
+      && (current.explanations ?? []).length === 2
+      && (current.explanations ?? []).every((entry) => entry.status === 'done'));
+    assert.equal(done.explanations.length, 2);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('aborted batches release their analysis slots for later batches', async () => {
+  const reportReply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '报告',
+    risks: [],
+    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+    focus: {},
+  });
+  let analyzeThird = false;
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    if (analyzeThird && prompt.includes('PR #3：')) return llmFromText(BATCH_EXPLANATION)(options);
+    return llmSlow(10_000, BATCH_EXPLANATION)(options);
+  };
+  const plugin = await setup({
+    fetch: multiPrFetch,
+    llm,
+    reviews: { 1: unanalyzedPr(1), 2: unanalyzedPr(2), 3: unanalyzedPr(3) },
+  });
+  try {
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 1 });
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 2 });
+    // Both calls are in flight and hold the two slots when the rounds roll.
+    await delay(50);
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    await plugin.call('/pr-review-api/review', 'POST', { number: 2, force: true });
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+    await plugin.waitFor(2, (current) => current.round === 2 && current.status === 'done');
+
+    analyzeThird = true;
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 3 });
+    const done = await plugin.waitFor(3, (current) => current.analyzing === null
+      && (current.explanations ?? []).length === 2
+      && (current.explanations ?? []).every((entry) => entry.status === 'done'));
+    assert.equal(done.explanations.length, 2);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the analysis slot ceiling caps concurrent model calls at two', async () => {
+  let active = 0;
+  let peak = 0;
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText('{}')(options);
+    active += 1;
+    peak = Math.max(peak, active);
+    return (async function* () {
+      try {
+        await delay(60);
+        yield { type: 'text-delta', text: BATCH_EXPLANATION };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+      } finally {
+        active -= 1;
+      }
+    })();
+  };
+  const plugin = await setup({
+    fetch: multiPrFetch,
+    llm,
+    reviews: { 1: unanalyzedPr(1), 2: unanalyzedPr(2), 3: unanalyzedPr(3), 4: unanalyzedPr(4) },
+  });
+  try {
+    for (const number of [1, 2, 3, 4]) {
+      const started = await plugin.call('/pr-review-api/analyze', 'POST', { number });
+      assert.equal(started.json.started, true);
+    }
+    for (const number of [1, 2, 3, 4]) {
+      await plugin.waitFor(number, (current) => current.analyzing === null
+        && (current.explanations ?? []).length === 2
+        && (current.explanations ?? []).every((entry) => entry.status === 'done'), 8000);
+    }
+    assert.equal(peak, 2, 'four batches never exceed the two-slot ceiling');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 // ---------- DSH plugin conventions ----------
 
 test('Config schema fills defaults and rejects invalid values', async () => {
@@ -1778,6 +2477,7 @@ test('Config schema fills defaults and rejects invalid values', async () => {
   assert.equal(filled.pollSeconds, 60);
   assert.equal(filled.commentLanguage, 'zh');
   assert.equal(filled.autoReview, true);
+  assert.equal(filled.autoAnalyze, true);
   assert.equal(filled.reasoningEffort, 'off');
   assert.equal(Config({ platform: 'gitea' }).platform, 'gitea');
   assert.equal(Config({ platform: 'forgejo' }).platform, 'forgejo');

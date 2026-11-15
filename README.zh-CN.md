@@ -12,6 +12,7 @@
 
 - **按工作区识别仓库**：每个会话工作区的 git `origin` 决定仓库与平台（GitHub；GitLab；Gitea / Forgejo / Codeberg；Gitee / GitCode / AtomGit；Codeup）；面板只显示该仓库的 PR，切换工作区即切换对应的审查数据。
 - **自动轮次**：插件后台轮询 open PR，出现新提交（head sha 变化）即自动开始新一轮审查（可用 `autoReview` 关闭）。
+- **全量分析**：每轮审查完成后，后台逐个分析全部变更文件，一轮的模型调用次数等于变更文件数（可用 `autoAnalyze` 关闭）。关闭后，点开文件才分析，也可在文件列表点「全部分析」一次补齐。
 - **审查面板**：会话内右侧边栏面板——变更文件、diff、逐文件分析三列布局，列宽可拖动；点击 diff 中的 hunk 查看逐段分析，也可切换到完整文件视图（新增行高亮）。
 - **最终结论**：后台生成，展示阶段进度、可随时取消；结论带审查覆盖率（已分析 X/Y 文件）与版本号。报告或文件分析在结论之后又更新时，面板提示结论已过期并可重新生成（`autoReconclude` 可改为自动）。
 - **版本历史**：每个结论版本都保留，每轮审查有独立页签，历史轮次与旧版本随时可回看（只读）。
@@ -103,6 +104,7 @@ dsh --profile <name>
     projectId: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: zh
     provider: ''
@@ -146,6 +148,7 @@ dsh --profile <name> --dump-config
 |---|---|---|---|
 | `pollSeconds` | 数字，≥ 15 | `60` | 轮询 open PR 的间隔，也决定新提交多久被发现；最小 15 秒。 |
 | `autoReview` | 布尔 | `true` | PR 首次出现或 head sha 变化时自动开启一轮审查。设为 `false` 后只在点「立即审查」时审查。失败的轮次 5 分钟后重试。 |
+| `autoAnalyze` | 布尔 | `true` | 每轮审查完成后在后台逐个分析全部变更文件，每个文件一次模型调用，调用次数等于变更文件数（例如 100 个文件就是 100 次）。设为 `false` 后点开文件才分析，也可在文件列表点「全部分析」一次补齐。自动分析不重试失败的文件；「全部分析」会重试，调用量约等于未完成与失败的文件数。开始新一轮会取消上一轮未跑完的批次。失败的文件在文件详情里显示错误，成功前不计入「已分析」覆盖率。 |
 | `autoReconclude` | 布尔 | `false` | 报告或逐文件分析在结论之后更新时自动重新生成结论。5 分钟内最多一次，审查进行中不触发，结论未过期不触发。 |
 | `commentLanguage` | `zh`、`en` | `zh` | 发布评论里的固定标签、标题、附录与署名行用哪种语言。模型写的摘要与意见不翻译；内置提示词是中文。 |
 
@@ -203,6 +206,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     token: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: zh
     provider: ''
@@ -223,6 +227,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     token: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: en
     provider: ''
@@ -243,6 +248,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     token: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: en
     provider: ''
@@ -267,6 +273,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     token: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: zh
     provider: ''
@@ -284,6 +291,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
 ```yaml
     pollSeconds: 180
     autoReview: false
+    autoAnalyze: false
     reasoningEffort: 'off'
     maxDiffCharsPerFile: 8000
 ```
@@ -302,7 +310,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
 
 1. 在会话里点头部的「审查 PR」按钮（空会话点输入框下方的「审查 PR」卡片）。
 2. 顶部选择 PR；`autoReview` 开启时首轮审查在后台自动开始，关闭时点「立即审查」。
-3. 左栏点文件查看 diff 与分析；点 hunk 看逐段讲解；需要时切换完整文件视图。
+3. 左栏点文件查看 diff 与分析；`autoAnalyze` 开启时文件在后台陆续分析，批次未跑完时点开文件可能仍显示未分析；关闭时点开文件才开始分析。点 hunk 看逐段讲解；需要时切换完整文件视图。
 4. 在主对话里继续讨论——例如「第 1 条风险不成立」「把第 2 条建议改成阻塞项」——审查数据直接更新。
 5. 点「生成最终结论」；报告有更新时面板会提示「重新生成结论」。
 6. 点「发布」预览 Markdown、勾选要纳入的条目后追加评论。每轮追加一条新评论，不覆盖历史。

@@ -72,6 +72,10 @@ window.__ModuleLoader__.load({
         fileSuggestions: '改进建议',
         explaining: '正在分析…',
         reExplain: '重新分析',
+        analyzeAll: '全部分析',
+        analyzeAllHint: '逐个分析还没有分析的文件；已有的分析保留，失败的文件会重试。',
+        analyzingFiles: '分析中 {done}/{total}',
+        analyzingFailed: '，失败 {failed}',
         emptyPr: '没有打开的 PR',
         emptyReview: '该 PR 尚未审查，点「立即审查」开始。',
         emptyFile: '选择左侧文件查看变更与审查详情。',
@@ -274,6 +278,10 @@ window.__ModuleLoader__.load({
         fileSuggestions: 'Suggestions',
         explaining: 'Analyzing…',
         reExplain: 'Analyze again',
+        analyzeAll: 'Analyze all',
+        analyzeAllHint: 'Analyze every file that has no analysis yet. Existing analyses stay; failed files are retried.',
+        analyzingFiles: 'Analyzing {done}/{total}',
+        analyzingFailed: ', {failed} failed',
         emptyPr: 'No open pull requests',
         emptyReview: 'This pull request has no review yet. Start one with Review now.',
         emptyFile: 'Pick a file on the left to see its diff and review.',
@@ -1073,7 +1081,7 @@ window.__ModuleLoader__.load({
           className,
           title: props.title,
           disabled: props.disabled === true,
-          onClick: props.onClick,
+          onClick: props.disabled === true ? undefined : props.onClick,
         },
         props.label,
       );
@@ -1108,10 +1116,31 @@ window.__ModuleLoader__.load({
      * detail area switches between the overview and a file; that entry lives here so it stays
      * in one place instead of moving with the pane headers.
      */
+    /**
+     * A usable batch progress: the host always sends a positive total while a batch runs.
+     * The file column and the poll loop share this so one cannot call it a batch while the
+     * other treats it as no batch.
+     */
+    function isAnalyzing(analyzing) {
+      return analyzing !== null
+        && analyzing !== undefined
+        && typeof analyzing.total === 'number'
+        && analyzing.total > 0;
+    }
+
     function FilesPane(props) {
       const { t, overviewMode, onSelectOverview, files, filePath, review, onOpenFile } = props;
       const width = typeof props.width === 'number' && props.width > 0 ? props.width : 0;
       const style = width === 0 ? undefined : { flex: `0 0 ${width}px`, minWidth: `${width}px` };
+      // A batch always reports a positive total; anything else is not usable progress and
+      // falls back to the plain file count instead of showing "0/0".
+      const analyzing = isAnalyzing(props.analyzing) ? props.analyzing : null;
+      const done = analyzing === null ? 0 : Math.min(Math.max(analyzing.done ?? 0, 0), analyzing.total);
+      const failed = analyzing === null ? 0 : Math.min(Math.max(analyzing.failed ?? 0, 0), analyzing.total);
+      const countLabel = analyzing === null
+        ? `${files.length} ${t('fileUnit')}`
+        : fill(t('analyzingFiles'), { done, total: analyzing.total })
+          + (failed > 0 ? fill(t('analyzingFailed'), { failed }) : '');
       return h(
         'aside',
         { className: 'prr-files', style },
@@ -1130,7 +1159,16 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'prr-pane-head' },
           `${t('files')}`,
-          h('span', { className: 'prr-count' }, `${files.length} ${t('fileUnit')}`),
+          h('span', { className: 'prr-count', title: analyzing === null ? undefined : analyzing.current }, countLabel),
+          props.manual === true && analyzing === null && files.length > 0
+            ? h(Btn, {
+                small: true,
+                label: props.analyzeAllBusy === true ? t('explaining') : t('analyzeAll'),
+                title: t('analyzeAllHint'),
+                disabled: props.analyzeAllBusy === true,
+                onClick: () => props.onAnalyzeAll(),
+              })
+            : null,
         ),
         h(
           'div',
@@ -2728,8 +2766,13 @@ window.__ModuleLoader__.load({
       );
     }
 
-    /** Full-file content cache keyed by "<pr>/<path>" (browser-side, survives view remounts). */
+    /** Full-file content cache keyed by "<pr>@<head>/<path>" (browser-side, survives remounts). */
     const fileContentCache = new Map();
+
+    /** Cache key: the reviewed head is part of it, so a new snapshot never reuses the old body. */
+    function fileContentKey(number, headSha, path) {
+      return `${number}@${headSha ?? ''}:${path}`;
+    }
 
     /** Full file at PR head with the diff's added lines highlighted, for reading complete context. */
     function FullFileView(props) {
@@ -2965,6 +3008,10 @@ window.__ModuleLoader__.load({
      * popover. The selected path stays with the caller; everything else lives here.
      */
     function useFileDetail({ withRepo, generationRef, review, prNumber, filePath }) {
+      // A response fetched for an older head must not land after a round switch; the ref
+      // stays current across renders, unlike the closure that started the request.
+      const headRef = React.useRef(review?.headSha ?? '');
+      headRef.current = review?.headSha ?? '';
       const [fileDiff, setFileDiff] = React.useState(null);
       const [fileDiffError, setFileDiffError] = React.useState('');
       const [fileContent, setFileContent] = React.useState(null);
@@ -2977,20 +3024,24 @@ window.__ModuleLoader__.load({
     const loadFileDiff = React.useCallback(async (number, path) => {
       if (typeof number !== 'number' || path === '') return;
       const generation = generationRef.current;
+      const head = headRef.current;
       setFileDiff(null);
       setFileDiffError('');
       try {
         const data = await api(withRepo(`/pr-review-api/file?number=${number}&path=${encodeURIComponent(path)}`));
-        if (generation !== generationRef.current) return;
+        if (generation !== generationRef.current || headRef.current !== head) return;
         setFileDiff(data.file ?? null);
       } catch (error) {
-        if (generation === generationRef.current) setFileDiffError(error instanceof Error ? error.message : String(error));
+        if (generation === generationRef.current && headRef.current === head) {
+          setFileDiffError(error instanceof Error ? error.message : String(error));
+        }
       }
     }, []);
 
     const loadFileContent = React.useCallback(async (number, path) => {
       if (typeof number !== 'number' || path === '') return null;
-      const key = `${number}:${path}`;
+      const head = headRef.current;
+      const key = fileContentKey(number, head, path);
       const cached = fileContentCache.get(key);
       if (cached !== undefined) {
         setFileContent(cached);
@@ -3002,19 +3053,34 @@ window.__ModuleLoader__.load({
       setFileContentError('');
       try {
         const data = await api(withRepo(`/pr-review-api/file-content?number=${number}&path=${encodeURIComponent(path)}`));
-        if (generation !== generationRef.current) return null;
+        if (generation !== generationRef.current || headRef.current !== head) return null;
         const file = data.file ?? null;
         if (file !== null) fileContentCache.set(key, file);
         setFileContent(file);
         return file;
       } catch (error) {
-        setFileContentError(error instanceof Error ? error.message : String(error));
-        setFileContent(null);
+        if (generation === generationRef.current && headRef.current === head) {
+          setFileContentError(error instanceof Error ? error.message : String(error));
+          setFileContent(null);
+        }
         return null;
       } finally {
         setFileContentBusy(false);
       }
-    }, []);
+    }, [review?.headSha]);
+
+    // A new reviewed head invalidates the full files fetched for this pull request; other
+    // pull requests keep their entries (the cache key already contains the head).
+    React.useEffect(() => {
+      if (typeof prNumber === 'number') {
+        const prefix = `${prNumber}@`;
+        for (const key of [...fileContentCache.keys()]) {
+          if (key.startsWith(prefix)) fileContentCache.delete(key);
+        }
+      }
+      setFileContent(null);
+      setFileContentError('');
+    }, [prNumber, review?.headSha]);
 
     const toggleFullFile = React.useCallback(async () => {
       if (showFullFile) {
@@ -3538,6 +3604,7 @@ window.__ModuleLoader__.load({
       const [detailWidth, setDetailWidth] = React.useState(panelSizing.detail);
       const rootRef = React.useRef(null);
       const [explainBusy, setExplainBusy] = React.useState(false);
+      const [analyzeAllBusy, setAnalyzeAllBusy] = React.useState(false);
       const [wrap, setWrap] = React.useState(false);
       const [mode, setMode] = React.useState('overview');
       const [scrollLine, setScrollLine] = React.useState(0);
@@ -3554,6 +3621,7 @@ window.__ModuleLoader__.load({
       const rememberRef = React.useRef(props.onRemember);
       rememberRef.current = props.onRemember;
       const explainInFlight = React.useRef(new Set());
+      const analyzeAllRef = React.useRef(false);
       const stateRef = React.useRef({ prNumber: null, review: null, list: null });
       const withRepoRef = React.useRef(withRepo);
       withRepoRef.current = withRepo;
@@ -3641,6 +3709,25 @@ window.__ModuleLoader__.load({
         } finally {
           explainInFlight.current.delete(path);
           setExplainBusy(false);
+        }
+      }, [loadReview]);
+
+      /** Manual mode: ask the host to analyze every file that still has no analysis. */
+      const requestAnalyzeAll = React.useCallback(async () => {
+        // The disabled button is not enough: two clicks in one tick see the same state.
+        if (analyzeAllRef.current) return;
+        const number = stateRef.current.prNumber;
+        if (typeof number !== 'number') return;
+        analyzeAllRef.current = true;
+        setAnalyzeAllBusy(true);
+        try {
+          await postJson(withRepo('/pr-review-api/analyze'), { number });
+          await loadReview(number);
+        } catch (error) {
+          setReviewError(error instanceof Error ? error.message : String(error));
+        } finally {
+          analyzeAllRef.current = false;
+          setAnalyzeAllBusy(false);
         }
       }, [loadReview]);
 
@@ -3826,12 +3913,14 @@ window.__ModuleLoader__.load({
       }, [sidebar]);
 
 
-      // Poll the review while it is being generated; refresh the PR list slowly.
+      // Poll the review while it is being generated or its files are being analyzed;
+      // refresh the PR list slowly.
       React.useEffect(() => {
         const reviewTimer = setInterval(() => {
           const current = stateRef.current;
           if (current.prNumber === null) return;
-          if (current.review !== null && current.review.status !== 'reviewing') return;
+          const analyzing = current.review?.analyzing ?? null;
+          if (current.review !== null && current.review.status !== 'reviewing' && !isAnalyzing(analyzing)) return;
           void loadReview(current.prNumber);
         }, 4000);
         const listTimer = setInterval(() => {
@@ -4354,6 +4443,12 @@ window.__ModuleLoader__.load({
         filePath: overviewMode ? '' : filePath,
         review,
         onOpenFile: (path) => void openFile(path),
+        // A historical round has no batch of its own; the progress belongs to the current round.
+        analyzing: historicalView ? null : (review?.analyzing ?? null),
+        // The on-demand batch only makes sense for a finished round in manual mode.
+        manual: historicalView !== true && list?.autoAnalyze === false && review?.status === 'done',
+        analyzeAllBusy,
+        onAnalyzeAll: () => void requestAnalyzeAll(),
       });
 
       return h(

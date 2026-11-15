@@ -12,6 +12,7 @@ AI-assisted pull request review for the DeepSeek Harness Web UI. The plugin watc
 
 - **Workspace aware**: each session's workspace `git origin` selects the repository and platform (GitHub; GitLab; Gitea / Forgejo / Codeberg; Gitee / GitCode / AtomGit; Codeup); the panel only shows pull requests from that repository, and switching workspaces switches reviews with it.
 - **Automatic rounds**: the plugin polls for open pull requests and starts a new review round whenever new commits land (`autoReview` can be turned off).
+- **Batch analysis**: every finished round analyzes all changed files in the background, one file at a time, so a round costs one model call per changed file (`autoAnalyze` can be turned off). With it off, a file is analyzed when you open it, or all at once with **Analyze all** in the file column.
 - **Review panel**: a right-sidebar panel inside the session — changed files, diff, and per-file analysis in three resizable columns; click any hunk in the diff for its per-segment analysis, or switch to the full file (with added lines highlighted).
 - **Final conclusion**: generated in the background with visible stages and cancel support; carries review coverage (X of Y files analyzed) and a version number. When the report or file analysis changes afterwards, the panel flags the outdated conclusion and offers regeneration (automatic with `autoReconclude`).
 - **Version history**: every conclusion version is kept, and each review round gets its own tab, so older rounds and versions stay readable.
@@ -103,6 +104,7 @@ The file is a top-level YAML array. Keep one entry for this row; `dsh plugin add
     projectId: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: zh
     provider: ''
@@ -146,6 +148,7 @@ A workspace that is not a git repository activates no repository: the panel show
 |---|---|---|---|
 | `pollSeconds` | number ≥ 15 | `60` | How often the plugin polls for open pull requests. It also bounds how quickly new commits are noticed; the minimum is 15 seconds. |
 | `autoReview` | boolean | `true` | Start a round automatically when a pull request first appears or its head SHA changes. Set `false` to review only when you click **Review now**. A failed round is retried after 5 minutes. |
+| `autoAnalyze` | boolean | `true` | Analyze every changed file of a finished round in the background, one model call per file, so a round costs one call per changed file (100 files, 100 calls). Set `false` to analyze a file only when you open it, or on demand with **Analyze all**. The automatic pass does not retry failed files; **Analyze all** does, costing about one call per unfinished or failed file. Starting a new round cancels a batch still running from the previous one. A failed file shows its error in the file panel and stays out of the analyzed coverage until it succeeds. |
 | `autoReconclude` | boolean | `false` | Regenerate the conclusion when the report or per-file analysis changes after it. Runs at most once every 5 minutes, never during a running round, and only while the conclusion is stale. |
 | `commentLanguage` | `zh`, `en` | `zh` | Language of the published comment's labels, headings, appendix, and footer. It does not translate model-written summaries or findings; the built-in prompts are Chinese. |
 
@@ -203,6 +206,7 @@ export CODEUP_TOKEN=...    # Codeup (YUNXIAO_TOKEN works too)
     token: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: zh
     provider: ''
@@ -223,6 +227,7 @@ export CODEUP_TOKEN=...    # Codeup (YUNXIAO_TOKEN works too)
     token: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: en
     provider: ''
@@ -243,6 +248,7 @@ export CODEUP_TOKEN=...    # Codeup (YUNXIAO_TOKEN works too)
     token: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: en
     provider: ''
@@ -267,6 +273,7 @@ This example targets `gitlab.com`; a self-hosted GitLab origin is not detected a
     token: ''
     pollSeconds: 60
     autoReview: true
+    autoAnalyze: true
     autoReconclude: false
     commentLanguage: zh
     provider: ''
@@ -284,6 +291,7 @@ With the `org/group/repo` form, a non-empty `organizationId` overrides the first
 ```yaml
     pollSeconds: 180
     autoReview: false
+    autoAnalyze: false
     reasoningEffort: 'off'
     maxDiffCharsPerFile: 8000
 ```
@@ -302,7 +310,7 @@ The last two snippets are partial on purpose: unlisted keys keep their defaults.
 
 1. In a session, click the **Review PRs** button in the session header (or the card under the composer in an empty session).
 2. Pick a pull request at the top; with `autoReview` on, the first review starts in the background (otherwise click **Review now**).
-3. Click a file in the left column to read its diff and analysis; click a hunk for the per-segment walkthrough; switch to the full file when needed.
+3. Click a file in the left column to read its diff and analysis; with `autoAnalyze` on, files are analyzed in the background as the batch progresses, so a file you open early may still be waiting; with it off, opening a file starts its analysis. Click a hunk for the per-segment walkthrough; switch to the full file when needed.
 4. Discuss in the main conversation — for example "risk 1 doesn't hold" or "turn suggestion 2 into a blocker" — and the review data updates directly.
 5. Click **Conclude review**; if the report changes afterwards, the panel offers **Regenerate conclusion**.
 6. Click **Publish** to preview the Markdown, select the findings to include, and append the comment. Each round appends a new comment; history is never overwritten.
