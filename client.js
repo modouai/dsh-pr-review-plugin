@@ -512,13 +512,15 @@ window.__ModuleLoader__.load({
     /**
      * Text of one per-file suggestion. Model output stores plain strings, while a
      * `review_update_analysis` write stores `{ point, line }`; rendering the object itself is
-     * a React child error, so every suggestion goes through here.
+     * a React child error, so every suggestion goes through here. A blank `point` falls back to
+     * `text`, and an item with neither returns '' so the caller can drop the empty row.
      */
     function suggestionText(item) {
       if (typeof item === 'string') return item;
       if (item === null || typeof item !== 'object') return '';
-      if (typeof item.point === 'string') return item.point;
-      return typeof item.text === 'string' ? item.text : '';
+      if (typeof item.point === 'string' && item.point.trim() !== '') return item.point;
+      if (typeof item.text === 'string' && item.text.trim() !== '') return item.text;
+      return '';
     }
 
     /** Starter text the review panel inserts into the main composer ("ask in conversation"). */
@@ -2637,14 +2639,15 @@ window.__ModuleLoader__.load({
                       ),
                     ),
                   ),
-                  (group.suggestions ?? []).map((item, index) =>
-                    h(
+                  (group.suggestions ?? []).map((item, index) => {
+                    const text = suggestionText(item);
+                    return text === '' ? null : h(
                       'div',
                       { className: 'prr-rowitem', key: `suggestion-${index}` },
                       h('span', { className: 'prr-tag' }, t('suggestionTag')),
-                      h('div', { className: 'prr-rowmain prr-text' }, suggestionText(item)),
-                    ),
-                  ),
+                      h('div', { className: 'prr-rowmain prr-text' }, text),
+                    );
+                  }),
                 ),
               ),
         ),
@@ -2720,9 +2723,14 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'prr-card' },
-              detail.suggestions.map((item, index) =>
-                h('div', { className: 'prr-rowitem', key: index }, h('div', { className: 'prr-rowmain prr-text' }, suggestionText(item))),
-              ),
+              detail.suggestions.map((item, index) => {
+                const text = suggestionText(item);
+                return text === '' ? null : h(
+                  'div',
+                  { className: 'prr-rowitem', key: index },
+                  h('div', { className: 'prr-rowmain prr-text' }, text),
+                );
+              }),
             ),
           );
       return h(

@@ -964,25 +964,39 @@ test('per-file suggestions render as text whether stored as a string or an objec
     roundHistory: [makeRound(1, { conclusions: [version] })],
   });
   // Model output stores plain strings; a review_update_analysis write stores { point, line }.
-  const { textOnly } = renderOverview(client, review, {
+  // Blank and malformed entries must not render an empty suggestion row.
+  const { textOnly, elements } = renderOverview(client, review, {
     fileFindings: [
       {
         file: 'src/a.js',
         issues: [],
-        suggestions: ['模型写的建议', { point: '工具写的建议', line: 12 }],
+        suggestions: [
+          '模型写的建议',
+          { point: '工具写的建议', line: 12 },
+          { text: '只有 text 的建议' },
+          { point: '   ', text: 'point 为空时回退 text' },
+          { point: '   ' },
+          {},
+          null,
+          42,
+        ],
       },
     ],
   });
 
   assert.match(textOnly, /模型写的建议/);
   assert.match(textOnly, /工具写的建议/);
+  assert.match(textOnly, /只有 text 的建议/);
+  assert.match(textOnly, /point 为空时回退 text/);
   assert.doesNotMatch(textOnly, /\[object Object\]/);
+  const rows = elements.filter((node) => node.props.className === 'prr-rowmain prr-text');
+  assert.equal(rows.length, 4, 'blank and malformed suggestions render no row');
 });
 
 test('the file detail renders suggestion objects written by review_update_analysis', () => {
   const client = loadClient();
   const { parts, fake } = client;
-  const { textOnly } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
+  const { textOnly, elements } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
     t: translator(parts),
     filePath: 'src/a.js',
     explanation: {
@@ -993,7 +1007,7 @@ test('the file detail renders suggestion objects written by review_update_analys
         logic: '',
         changes: '',
         issues: [],
-        suggestions: ['纯文本建议', { point: '对象建议', line: 3 }],
+        suggestions: ['纯文本建议', { point: '对象建议', line: 3 }, null, { point: '  ' }],
       },
     },
     onExplain: () => {},
@@ -1001,6 +1015,8 @@ test('the file detail renders suggestion objects written by review_update_analys
 
   assert.match(textOnly, /纯文本建议/);
   assert.match(textOnly, /对象建议/);
+  const rows = elements.filter((node) => node.props.className === 'prr-rowmain prr-text');
+  assert.equal(rows.length, 2, 'blank suggestions render no row');
 });
 
 test('the detail header keeps only the pane title', () => {
