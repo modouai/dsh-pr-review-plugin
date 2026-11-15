@@ -225,6 +225,7 @@ async function setup(options = {}) {
         return () => {};
       },
       context(definition) {
+        if (options.promptContextThrows === true) throw new Error('prompt context rejected');
         promptContexts.push(definition);
         return () => {};
       },
@@ -1223,6 +1224,10 @@ test('/active binds the panel focus to the runtime-context snapshot', async () =
     // Another session has no binding, so it contributes nothing.
     assert.equal(plugin.promptContext('session-b'), '');
 
+    // A binding whose review record is not loaded (yet) has nothing to describe.
+    await plugin.call('/pr-review-api/active', 'POST', { sessionId: 'session-c', number: 42 });
+    assert.equal(plugin.promptContext('session-c'), '');
+
     // Clearing the binding removes the snapshot.
     await plugin.call('/pr-review-api/active', 'POST', { sessionId: 'session-a' });
     assert.equal(plugin.promptContext('session-a'), '');
@@ -1251,6 +1256,9 @@ test('/focus makes the snapshot follow the panel', async () => {
     });
     assert.equal(same.json.active, 1);
     assert.match(plugin.promptContext('session-a'), /当前查看：总览/);
+    // The host dedupes by comparing the contributed text, so an unchanged panel has to render
+    // byte-identical text — otherwise every step would re-emit a snapshot.
+    assert.equal(plugin.promptContext('session-a'), plugin.promptContext('session-a'));
 
     // Switching to a file changes the snapshot, so the agent learns what "this file" means.
     await plugin.call('/pr-review-api/focus', 'POST', {
@@ -1261,6 +1269,26 @@ test('/focus makes the snapshot follow the panel', async () => {
       pane: 'diff',
     });
     assert.match(plugin.promptContext('session-a'), /当前查看：文件 src\/a\.js/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a rejected runtime-context registration leaves the plugin usable', async () => {
+  const plugin = await setup({ promptContextThrows: true });
+  try {
+    assert.equal(plugin.promptContexts.length, 0);
+    // The panel and its tools keep working without a snapshot: the routes and data are the
+    // contract, the context contribution is an enhancement.
+    const bound = await plugin.call('/pr-review-api/active', 'POST', {
+      sessionId: 'session-a',
+      number: 1,
+      view: 'overview',
+    });
+    assert.equal(bound.status, 200);
+    const loaded = await plugin.call('/pr-review-api/review?number=1');
+    assert.equal(loaded.status, 200);
+    assert.notEqual(loaded.json.review, null);
   } finally {
     await plugin.dispose();
   }

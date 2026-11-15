@@ -3934,7 +3934,8 @@ window.__ModuleLoader__.load({
 
       // Report view changes (overview ↔ file, diff ↔ analysis) so the host's runtime-context
       // snapshot follows the panel on the next model step. Debounced: bursts of clicks are one
-      // report, and the host drops a section whose text did not change.
+      // report. The host compares the contributed section text and re-emits the snapshot only
+      // when it changes, so an unchanged panel costs nothing.
       React.useEffect(() => {
         if (!sidebar) return undefined;
         const sessionId = typeof props.sessionId === 'string' ? props.sessionId : '';
