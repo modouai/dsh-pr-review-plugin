@@ -3113,6 +3113,15 @@ window.__ModuleLoader__.load({
         const previewSeqRef = React.useRef(0);
         const previewRef = React.useRef(null);
         previewRef.current = preview;
+
+    // Drop a pending preview debounce when the owning view unmounts.
+    React.useEffect(() => () => {
+      if (previewTimerRef.current !== null) {
+        clearTimeout(previewTimerRef.current);
+        previewTimerRef.current = null;
+      }
+    }, []);
+
     const applyPreviewResponse = React.useCallback((data, record, previous) => {
       const rounds = roundsOf(record);
       const latest = rounds.length === 0 ? null : rounds[rounds.length - 1];
@@ -3898,14 +3907,6 @@ window.__ModuleLoader__.load({
         scrollToNewLine(diffScrollRef.current, scrollLine);
         return undefined;
       }, [fileDiff, scrollLine]);
-
-      // Drop a pending preview debounce when the view unmounts.
-      React.useEffect(() => () => {
-        if (previewTimerRef.current !== null) {
-          clearTimeout(previewTimerRef.current);
-          previewTimerRef.current = null;
-        }
-      }, []);
 
       const currentExplanation = explanationFor(filePath);
       const currentLogic =
