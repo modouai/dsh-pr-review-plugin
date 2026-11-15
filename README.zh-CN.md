@@ -38,20 +38,22 @@
 
 插件按工作区连接一个代码平台。工作区的 `git origin` 决定用哪个平台；`platform` / `baseUrl` / `repo` 设置插件的默认目标（见[仓库如何选择](#仓库如何选择)）。
 
-| 平台 | `platform` | origin 主机 | `baseUrl` 默认 | 仓库格式 | token 来源 | CLI 登录 |
+| 平台 | `platform` | origin 主机 | `baseUrl` 为空时 | 仓库格式 | token 来源 | CLI 登录 |
 |---|---|---|---|---|---|---|
 | GitHub | `github` | `github.com` | `https://api.github.com` | `owner/name` | `token`、`GITHUB_TOKEN`、`GH_TOKEN` | `gh` |
 | GitLab | `gitlab` | `gitlab.com` | `https://gitlab.com`（适配器补 `/api/v4`） | `group/subgroup/project` | `token`、`GITLAB_TOKEN`、`PR_REVIEW_TOKEN` | — |
 | Gitea / Forgejo / Codeberg | `forgejo`（别名 `gitea`） | 自建 Gitea / Forgejo 主机、`codeberg.org` | 站点根，不带 `/api/v1`（适配器补上） | `owner/name` | `token`、`GITEA_TOKEN`、`FORGEJO_TOKEN`、`PR_REVIEW_TOKEN` | `tea` |
 | Gitee | `gitee` | `gitee.com` | `https://gitee.com/api/v5`（也接受站点根） | `owner/name` | `token`、`GITEE_TOKEN`、`PR_REVIEW_TOKEN` | — |
-| GitCode | `gitcode` | `gitcode.com`、`gitcode.net` | `https://api.gitcode.com/api/v5` | `owner/name` | `token`、`GITCODE_TOKEN`、`GITEE_TOKEN`、`PR_REVIEW_TOKEN` | — |
-| AtomGit | `atomgit` | `atomgit.com` | `https://api.atomgit.com/api/v5` | `owner/name` | `token`、`ATOMGIT_TOKEN`、`GITEE_TOKEN`、`PR_REVIEW_TOKEN` | — |
+| GitCode | `gitcode` | `gitcode.com`、`gitcode.net` | `https://api.gitcode.com/api/v5`（也接受站点根） | `owner/name` | `token`、`GITCODE_TOKEN`、`GITEE_TOKEN`、`PR_REVIEW_TOKEN` | — |
+| AtomGit | `atomgit` | `atomgit.com` | `https://api.atomgit.com/api/v5`（也接受站点根） | `owner/name` | `token`、`ATOMGIT_TOKEN`、`GITEE_TOKEN`、`PR_REVIEW_TOKEN` | — |
 | Codeup | `codeup` | `codeup.aliyun.com` | `https://openapi-rdc.aliyuncs.com` | `org/group/repo` | `token`、`CODEUP_TOKEN`、`YUNXIAO_TOKEN`、`PR_REVIEW_TOKEN` | — |
 
+- `baseUrl` 字段本身默认空；表里写的是留空时适配器使用的值（Gitea / Forgejo 取工作区 origin）。
 - `gitea` 与 `forgejo` 是同一套 Gitea API 的别名，共用一份缓存。
 - GitCode 与 AtomGit 接受 `GITEE_TOKEN`，因为三者共用 Gitee v5 API。
-- Codeup 还需要 `organizationId`（留空取 origin 首段）和可选的 `projectId`（留空时调 API 解析）。
-- 自建 Gitea / Forgejo 主机由 origin 识别。自建 GitLab 与 GitHub Enterprise **不识别**：未识别主机会回退到 Gitea 适配器，面板会对它们使用 Gitea 接口。
+- `tea` 登录适用于任意 Gitea 兼容主机，包括 Codeberg。
+- Codeup 还需要 `organizationId`（留空取 `repo` 首段）和可选的 `projectId`（留空时调 API 解析）。
+- 自建 Gitea / Forgejo 主机由 origin 识别。未识别主机会回退到 Gitea 适配器，包括自建 GitLab 与 GitHub Enterprise。
 - token 需有读取 PR 与发布评论的权限；私有仓库还需仓库读权限。
 
 ## 安装
@@ -123,18 +125,18 @@ dsh --profile <name> --dump-config
 
 - 会话工作区是配置了 `origin` 的 git 仓库时，由该 remote 决定仓库与平台。主机映射见[支持的代码平台](#支持的代码平台)；未识别主机回退到 Gitea API。
 - 切换工作区即切换当前仓库、PR 列表与缓存。
-- `platform`、`baseUrl`、`repo` 设置插件的默认目标：工作区解析出仓库之前，host 轮询这个仓库。面板始终跟随工作区 origin；非 git 工作区会显示工作区错误，不会改用默认目标。
+- `platform`、`baseUrl`、`repo` 只在工作区解析出仓库之前使用：显式填写时，host 在后台轮询该目标。工作区挂上后，以它的 origin 为准，面板跟随工作区。
 
-需要在会话挂上工作区之前就开始轮询或自动审查时，才设置默认目标。自建 GitLab 与 GitHub Enterprise 的 origin 不会被识别为对应平台；插件会按 Gitea 适配器处理。
+工作区不是 git 仓库时不会激活任何仓库：面板显示工作区错误，不会回退到默认目标。自建 GitLab 与 GitHub Enterprise 的 origin 不会被识别为对应平台，见[支持的代码平台](#支持的代码平台)。
 
 ### 连接配置
 
 | 字段 | 取值 | 默认 | 作用 |
 |---|---|---|---|
 | `platform` | `github`、`gitea`、`forgejo`、`gitlab`、`gitee`、`gitcode`、`atomgit`、`codeup` | `forgejo` | 默认目标使用的 API 家族。`gitea` 与 `forgejo` 是同一套 Gitea API 的别名；`gitee`、`gitcode`、`atomgit` 共用一个适配器。 |
-| `baseUrl` | URL 或空 | 空 | 默认目标主机。各平台的默认值与可接受的写法见[支持的代码平台](#支持的代码平台)。留空表示按工作区 origin 识别。 |
+| `baseUrl` | URL 或空 | 空 | 默认目标主机。留空时使用[支持的代码平台](#支持的代码平台)里的平台默认值；Gitea / Forgejo 的默认值即工作区 origin。 |
 | `repo` | `owner/name` 或空 | 空 | 默认目标仓库。GitLab 支持子组（`group/subgroup/project`）；Codeup 用 `org/group/repo`。留空表示按工作区 origin 识别。 |
-| `organizationId` | 字符串或空 | 空 | 仅 Codeup：组织 ID。留空取工作区 origin 首段。 |
+| `organizationId` | 字符串或空 | 空 | 仅 Codeup：组织 ID。留空取 `repo` 首段（工作区提供时即 origin 路径）。 |
 | `projectId` | 字符串或空 | 空 | 仅 Codeup：数值项目 ID。留空时用组织 ID + 仓库路径调 Codeup API 解析。 |
 | `token` | token 字符串或空 | 空 | 显式 token。留空回退环境变量；GitHub 与 Gitea / Forgejo 还会尝试 CLI 登录（见下）。 |
 
@@ -249,7 +251,9 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     maxDiffCharsPerFile: 14000
 ```
 
-**固定 Codeup 仓库**：Codeup 需要组织 ID 与仓库路径，两者默认从工作区 origin 解析；`projectId` 可留空（由 Codeup API 解析）：
+该示例面向 `gitlab.com`；自建 GitLab 的 origin 不会被识别，会回退到 Gitea 适配器。
+
+**固定 Codeup 仓库**：`repo` 用 `org/group/repo`；`organizationId` 留空取首段，`projectId` 留空时由 Codeup API 解析：
 
 ```yaml
 - id: pr-review
@@ -270,6 +274,8 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     reasoningEffort: 'off'
     maxDiffCharsPerFile: 14000
 ```
+
+`repo` 用 `org/group/repo` 形式时，`organizationId` 显式填写会覆盖首段；其余部分作为仓库路径。
 
 **固定 Gitee 系仓库**：`platform` 用 `gitee`、`gitcode` 或 `atomgit`；`baseUrl` 填站点根或对应 API 根；`repo` 仍是 `owner/name`。
 

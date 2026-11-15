@@ -9,10 +9,12 @@
 
 import { heuristicOrder, diffExcerpts } from './diff.js';
 
-/** Human-readable platform name for prompts; unknown values use the default Gitea/Forgejo label. */
+/** Human-readable platform name for prompts. Unknown values stay neutral instead of being mislabelled. */
 const PLATFORM_LABELS = {
   github: 'GitHub',
   gitlab: 'GitLab',
+  gitea: 'Gitea/Forgejo',
+  forgejo: 'Gitea/Forgejo',
   gitee: 'Gitee',
   gitcode: 'GitCode',
   atomgit: 'AtomGit',
@@ -20,7 +22,9 @@ const PLATFORM_LABELS = {
 };
 
 function platformLabel(platform) {
-  return PLATFORM_LABELS[platform] ?? 'Gitea/Forgejo';
+  const raw = typeof platform === 'string' ? platform.trim() : '';
+  if (raw === '') return '未知平台';
+  return PLATFORM_LABELS[raw.toLowerCase()] ?? `未知平台（${raw}）`;
 }
 
 /** Extract the first JSON object from a model answer that may carry prose or fences. */

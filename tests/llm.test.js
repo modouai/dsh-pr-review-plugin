@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import {
   buildCommentMarkdown,
   buildConcludePrompt,
+  buildExplainPrompt,
   buildReportPrompt,
   calibrateVerdict,
   callModel,
@@ -437,24 +438,46 @@ test('buildConcludePrompt: marks truncated report/explanations explicitly', () =
   assert.match(text, /……（内容过长，已截断，剩余 \d+ 字符未提供）/);
 });
 
-test('buildReportPrompt: names the real platform', () => {
+test('prompts: name the real platform and keep unknown values neutral', () => {
   const base = {
     repo: 'group/project', number: 1, title: 't', author: 'a',
     headRef: 'h', baseRef: 'b', changedFiles: 0, additions: 0, deletions: 0, body: '',
   };
+  // Mirrors PLATFORM_LABELS in llm.js; update both together.
   const labels = {
     github: 'GitHub',
     gitlab: 'GitLab',
+    gitea: 'Gitea/Forgejo',
+    forgejo: 'Gitea/Forgejo',
     gitee: 'Gitee',
     gitcode: 'GitCode',
     atomgit: 'AtomGit',
     codeup: 'Codeup',
-    forgejo: 'Gitea/Forgejo',
   };
   for (const [platform, label] of Object.entries(labels)) {
     const prompt = buildReportPrompt({ ...base, platform }, [], new Map(), { maxDiffCharsPerFile: 14000 });
-    assert.match(prompt.messages[0].content[0].text, new RegExp(`平台：${label}；`));
+    assert.ok(prompt.messages[0].content[0].text.includes(`平台：${label}；`), platform);
   }
+
+  const mixed = buildReportPrompt({ ...base, platform: ' GitHub ' }, [], new Map(), { maxDiffCharsPerFile: 14000 });
+  assert.ok(mixed.messages[0].content[0].text.includes('平台：GitHub；'));
+
+  for (const platform of ['bitbucket', '', undefined, null]) {
+    const prompt = buildReportPrompt({ ...base, platform }, [], new Map(), { maxDiffCharsPerFile: 14000 });
+    const text = prompt.messages[0].content[0].text;
+    assert.ok(!text.includes('平台：Gitea/Forgejo；'), String(platform));
+    assert.ok(
+      text.includes(platform === 'bitbucket' ? '平台：未知平台（bitbucket）；' : '平台：未知平台；'),
+      String(platform),
+    );
+  }
+
+  const explain = buildExplainPrompt(
+    { ...base, platform: 'gitlab' },
+    { path: 'a.js', status: 'modified', additions: 1, deletions: 1 },
+    '', null, '', '',
+  );
+  assert.ok(explain.messages[0].content[0].text.includes('平台：GitLab；'));
 });
 
 test('parseFeedbackReply: regression', () => {
