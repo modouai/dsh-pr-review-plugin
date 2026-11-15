@@ -3043,9 +3043,15 @@ window.__ModuleLoader__.load({
       }
     }, [review?.headSha]);
 
-    // A new reviewed head invalidates the full files fetched for the previous snapshot.
+    // A new reviewed head invalidates the full files fetched for this pull request; other
+    // pull requests keep their entries (the cache key already contains the head).
     React.useEffect(() => {
-      fileContentCache.clear();
+      if (typeof prNumber === 'number') {
+        const prefix = `${prNumber}@`;
+        for (const key of [...fileContentCache.keys()]) {
+          if (key.startsWith(prefix)) fileContentCache.delete(key);
+        }
+      }
       setFileContent(null);
       setFileContentError('');
     }, [prNumber, review?.headSha]);

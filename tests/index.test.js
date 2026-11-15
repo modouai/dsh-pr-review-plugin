@@ -2047,6 +2047,9 @@ test('a new round cancels the batch and drops its in-flight answer', async () =>
     await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done' && current.analyzing === null);
     // Let the rejected round-1 call settle.
     await delay(50);
+    // This test covers the abort path only (the provider rejects on the signal). The
+    // epoch-only paths — a provider that ignores the abort, and a manual explain that
+    // holds no signal — are covered by the two tests below.
     assert.equal(aborted, true, 'the round-1 model call was aborted, not left running');
 
     const after = await plugin.review();
@@ -2228,6 +2231,73 @@ test('a new round reads the new head instead of the cached file content', async 
     await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js' });
     assert.ok(prompts[1].includes('const fresh = 2'), 'the new round read the new head');
     assert.equal(prompts[1].includes('const old = 1'), false, 'the previous head stayed cached');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a stale malformed answer is discarded instead of reported as a failure', async () => {
+  const reportReply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '第二轮报告',
+    risks: [],
+    order: [{ file: 'src/a.js', reason: '' }],
+    focus: {},
+  });
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    return (async function* () {
+      await delay(120);
+      yield { type: 'text-delta', text: 'not json' };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })();
+  };
+  const plugin = await setup({ fetch: roundReviewFetch, llm, reviews: { 1: unanalyzedReview() } });
+  try {
+    const pending = plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js' });
+    await delay(30);
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const answer = await pending;
+    assert.equal(answer.status, 200, 'a stale parse failure is not a failure of the new round');
+    assert.equal(answer.json.explanation, null);
+
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+    const after = await plugin.review();
+    assert.deepEqual(after.explanations, []);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('an automatic batch continues past a failed file and never retries it on polls', async () => {
+  let explainCalls = 0;
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText('{}')(options);
+    explainCalls += 1;
+    if (prompt.includes('src/b.js')) {
+      return (async function* () {
+        throw new Error('boom');
+      })();
+    }
+    return llmFromText(BATCH_EXPLANATION)(options);
+  };
+  const plugin = await setup({ fetch: batchFetch, llm, reviews: { 1: unanalyzedReview() }, autoAnalyze: true });
+  try {
+    const done = await plugin.waitFor(1, (current) => current.analyzing === null
+      && (current.explanations ?? []).length === 2);
+    const byFile = new Map(done.explanations.map((entry) => [entry.file, entry]));
+    assert.equal(byFile.get('src/a.js').status, 'done', 'the batch kept going after the failure');
+    assert.equal(byFile.get('src/b.js').status, 'error');
+    assert.match(byFile.get('src/b.js').error, /boom/);
+
+    // The panel keeps polling; the automatic path must not retry the failed file.
+    const before = explainCalls;
+    await plugin.review();
+    await plugin.review();
+    await delay(50);
+    assert.equal(explainCalls, before, 'an error entry is left for the manual retry');
   } finally {
     await plugin.dispose();
   }

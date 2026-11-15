@@ -1328,8 +1328,12 @@ export function apply(ctx, config) {
       focus,
       fileContent,
     );
+    if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
     const raw = await callModel(ctx, settings, signal === undefined || signal === null ? prompt : { ...prompt, signal });
+    // The round can switch while the model answers; drop the answer before parsing, so a
+    // late malformed reply is never reported as a failure of the round that replaced it.
+    if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     const parsed = extractJson(raw);
     if (parsed === null) throw new Error(`模型没有返回可解析的 JSON。原始输出：${raw.slice(0, 400)}`);
     const explanation = normalizeExplanation({
@@ -1337,7 +1341,6 @@ export function apply(ctx, config) {
       // A single missing verdict must not present as "pass".
       verdict: parsed.verdict ?? 'suggest',
     });
-    if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     record.explanations.set(filePath, {
       status: 'done',
       error: null,
