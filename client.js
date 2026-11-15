@@ -196,6 +196,7 @@ window.__ModuleLoader__.load({
         publishOlderHint: '当前显示的是旧版本结论；切到最新版本后才能发布。',
         appendComment: '追加评论',
         appendCommentHint: 'v{version} 已经发布；确认后会追加一条新评论。',
+        appendStaleHint: 'v{version} 已经发布；本次追加的是当前选中的结论，结论之后还有未发布的新改动。',
         publishStaleHint: '发布的是当前选中的结论；结论之后还有未发布的新改动。',
         publishConcludingHint: '正在生成新结论；此时发布的是当前选中的版本。',
         previewConfirmAppend: '仍然追加',
@@ -400,6 +401,7 @@ window.__ModuleLoader__.load({
         publishOlderHint: 'This is an older conclusion version; switch to the latest version to publish.',
         appendComment: 'Append comment',
         appendCommentHint: 'v{version} is already published; confirming appends a new comment.',
+        appendStaleHint: 'v{version} is already published; this appends the selected conclusion, which does not include the newer changes.',
         publishStaleHint: 'Publishes the selected conclusion; newer changes are not included.',
         publishConcludingHint: 'A new conclusion is being generated; this publishes the selected version.',
         previewConfirmAppend: 'Append anyway',
@@ -1623,6 +1625,11 @@ window.__ModuleLoader__.load({
      * The conflict the publish preview opens with. The dialog would otherwise let the reviewer
      * confirm a publish that the host rejects with `already-published`; opening straight in the
      * append flow says what will happen before the first click. '' means a normal publish.
+     *
+     * It always reads the newest round's newest version: the preview (and the host's publish
+     * path) renders `review.conclusion`, which is exactly that version. Selecting an older
+     * version or a historical round disables publishing, so the two never disagree in the UI.
+     * `isCurrent` is true because `latest` is the newest round by construction.
      */
     function previewConflictOf(record) {
       const rounds = roundsOf(record);
@@ -2410,7 +2417,7 @@ window.__ModuleLoader__.load({
       const publishTitle = isOlderVersion === true
         ? t('publishOlderHint')
         : selectedPublished
-          ? fill(t('appendCommentHint'), {
+          ? fill(t(staleInfo !== null ? 'appendStaleHint' : 'appendCommentHint'), {
               version: selectedVersion === null ? '?' : selectedVersion.version,
             })
           : staleInfo !== null
@@ -2429,8 +2436,9 @@ window.__ModuleLoader__.load({
           : h(Btn, {
               label: props.concludeBusy ? t('concluding') : concludeLabel,
               // Regenerating is the next step only when there is nothing to publish: a stale
-              // conclusion, or no conclusion at all.
-              primary: selectedVersion === null || staleInfo !== null,
+              // conclusion, no conclusion at all, or a historical version whose publish is
+              // disabled — the footer must never end up with no primary action.
+              primary: selectedVersion === null || staleInfo !== null || isOlderVersion === true,
               disabled: props.concludeBusy === true || props.reviewBusy === true,
               onClick: props.onConclude,
             }),
