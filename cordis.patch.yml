@@ -2,8 +2,8 @@
     - id: pr-review
       name: '@modouai/dsh-pr-review'
       config:
-        # 仓库选择：会话工作区有 git origin 时以工作区为准；以下三项是识别出工作区之前的回退值，
-        # 或在非 git 工作区里使用的回退值。需要固定仓库时仍需工作区 origin 指向该仓库。
+        # 仓库选择：会话工作区有 git origin 时以工作区为准；以下三项是工作区解析出仓库之前的默认目标，
+        # 用于启动后的轮询与自动审查。面板始终跟随工作区 origin；非 git 工作区不会使用这里的仓库。
         # platform：github / gitea / forgejo / gitlab / gitee / gitcode / atomgit / codeup
         # （gitea 与 forgejo 同一 API，二者等价）
         platform: 'forgejo'

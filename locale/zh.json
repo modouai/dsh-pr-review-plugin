@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "PR 审查",
-    "description": "审查 GitHub / Gitea（Forgejo）拉取请求：自动生成报告，按入口文件优先排序，逐文件讲解并支持继续对话。"
+    "description": "审查 GitHub、GitLab、Gitea/Forgejo、Gitee、GitCode、AtomGit 与 Codeup 的拉取请求：自动报告、入口优先排序、逐文件讲解与追问。"
   },
   "panel": {
     "title": "PR 审查",
@@ -23,7 +23,7 @@
     "conclude": "生成最终结论",
     "concluding": "汇总中…",
     "empty": "还没有加载拉取请求。",
-    "noToken": "缺少 Gitea / Forgejo token，请在插件配置里填写。",
+    "noToken": "缺少代码平台 token：请在插件配置或环境变量里填写。",
     "orderHint": "入口文件排在最前，建议按此顺序审查。",
     "changed": "修改",
     "added": "新增",

@@ -31,8 +31,28 @@
 
 - 已安装 DeepSeek Harness（DSH）Web UI，版本 0.2.2-rc.1 起、0.2 线内（见 `engines.dsh`；不满足时安装/启动会拒绝）。插件以 Cordis function-plugin 形式运行，模型调用走 Harness 的 `llm` 服务（无需单独 API key，默认用 Harness 当前模型，也可通过 `provider` / `model` 指定）。
 - 本机装有 `git` 命令行，用于解析工作区的 `origin` remote。
-- 受支持的代码平台：GitHub 走 REST API v3；GitLab 走 REST v4；Gitea、Forgejo、Codeberg 共用 Gitea API（`/api/v1`）；Gitee、GitCode、AtomGit 共用 GitHub 风格的 v5 API（`/api/v5`）；Codeup 走阿里云云效 OpenAPI。Gogs 的 API 不同，**不支持**。自建 Gitea 实例由工作区 origin 识别。
-- 代码平台的 token，需有读取 PR 与发布评论的权限（见下）。
+- 受支持的代码平台（见[支持的代码平台](#支持的代码平台)）。Gogs、Bitbucket、SVN **不支持**。
+- 代码平台的 token，需有读取 PR 与发布评论的权限。
+
+## 支持的代码平台
+
+插件按工作区连接一个代码平台。工作区的 `git origin` 决定用哪个平台；`platform` / `baseUrl` / `repo` 设置插件的默认目标（见[仓库如何选择](#仓库如何选择)）。
+
+| 平台 | `platform` | origin 主机 | `baseUrl` 默认 | 仓库格式 | token 来源 | CLI 登录 |
+|---|---|---|---|---|---|---|
+| GitHub | `github` | `github.com` | `https://api.github.com` | `owner/name` | `token`、`GITHUB_TOKEN`、`GH_TOKEN` | `gh` |
+| GitLab | `gitlab` | `gitlab.com` | `https://gitlab.com`（适配器补 `/api/v4`） | `group/subgroup/project` | `token`、`GITLAB_TOKEN`、`PR_REVIEW_TOKEN` | — |
+| Gitea / Forgejo / Codeberg | `forgejo`（别名 `gitea`） | 自建 Gitea / Forgejo 主机、`codeberg.org` | 站点根，不带 `/api/v1`（适配器补上） | `owner/name` | `token`、`GITEA_TOKEN`、`FORGEJO_TOKEN`、`PR_REVIEW_TOKEN` | `tea` |
+| Gitee | `gitee` | `gitee.com` | `https://gitee.com/api/v5`（也接受站点根） | `owner/name` | `token`、`GITEE_TOKEN`、`PR_REVIEW_TOKEN` | — |
+| GitCode | `gitcode` | `gitcode.com`、`gitcode.net` | `https://api.gitcode.com/api/v5` | `owner/name` | `token`、`GITCODE_TOKEN`、`GITEE_TOKEN`、`PR_REVIEW_TOKEN` | — |
+| AtomGit | `atomgit` | `atomgit.com` | `https://api.atomgit.com/api/v5` | `owner/name` | `token`、`ATOMGIT_TOKEN`、`GITEE_TOKEN`、`PR_REVIEW_TOKEN` | — |
+| Codeup | `codeup` | `codeup.aliyun.com` | `https://openapi-rdc.aliyuncs.com` | `org/group/repo` | `token`、`CODEUP_TOKEN`、`YUNXIAO_TOKEN`、`PR_REVIEW_TOKEN` | — |
+
+- `gitea` 与 `forgejo` 是同一套 Gitea API 的别名，共用一份缓存。
+- GitCode 与 AtomGit 接受 `GITEE_TOKEN`，因为三者共用 Gitee v5 API。
+- Codeup 还需要 `organizationId`（留空取 origin 首段）和可选的 `projectId`（留空时调 API 解析）。
+- 自建 Gitea / Forgejo 主机由 origin 识别。自建 GitLab 与 GitHub Enterprise **不识别**：未识别主机会回退到 Gitea 适配器，面板会对它们使用 Gitea 接口。
+- token 需有读取 PR 与发布评论的权限；私有仓库还需仓库读权限。
 
 ## 安装
 
@@ -44,14 +64,16 @@ dsh plugin --profile <name> add github:modouai/dsh-pr-review-plugin
 
 需要锁定实际运行的代码时，在地址后加 tag 或 commit（`…#<tag-or-sha>`）。包已发布到 npm，也可以按包名安装：`dsh plugin --profile <name> add @modouai/dsh-pr-review`。安装本地 checkout 则传路径：`dsh plugin --profile <name> add ./dsh-pr-review-plugin`（先在 checkout 里执行 `pnpm install`，链接安装保留各自独立的 `node_modules`）。
 
-启动前先验证层，再重启 Harness：
+启动 Harness 之前，先为你的平台准备 token：环境变量、配置里的 `token`，或 GitHub / Gitea 的 CLI 登录（见[支持的代码平台](#支持的代码平台)）。工作区是 git 仓库时不需要填仓库；origin 会决定仓库与平台。
+
+验证层，再启动 Harness：
 
 ```sh
 dsh --profile <name> --dump-config   # 应出现 "# == @modouai/dsh-pr-review" 层
 dsh --profile <name>
 ```
 
-包自带默认配置（[`cordis.patch.yml`](cordis.patch.yml)）。改法见[配置](#配置)：说明配置文件位置、每个键的作用与示例。
+启动后 host 会打印 `[pr-review] ready: …`，带当前平台与 API 地址。包自带默认配置（[`cordis.patch.yml`](cordis.patch.yml)）；默认目标与其余键见[配置](#配置)。
 
 ## 配置
 
@@ -99,19 +121,19 @@ dsh --profile <name> --dump-config
 
 仓库选择以工作区为准：
 
-- 会话工作区是配置了 `origin` 的 git 仓库时，由该 remote 决定仓库与平台。`github.com` 走 GitHub，`gitlab.com` 走 GitLab，`gitee.com` 走 Gitee，`gitcode.com` / `gitcode.net` 走 GitCode，`atomgit.com` 走 AtomGit，`codeup.aliyun.com` 走 Codeup；其他主机回退到 Gitea API。
+- 会话工作区是配置了 `origin` 的 git 仓库时，由该 remote 决定仓库与平台。主机映射见[支持的代码平台](#支持的代码平台)；未识别主机回退到 Gitea API。
 - 切换工作区即切换当前仓库、PR 列表与缓存。
-- `platform`、`baseUrl`、`repo` 是回退值：工作区 origin 尚未识别时（例如启动后的首次轮询、非 git 工作区）才使用。识别出工作区后，以 origin 为准。
+- `platform`、`baseUrl`、`repo` 设置插件的默认目标：工作区解析出仓库之前，host 轮询这个仓库。面板始终跟随工作区 origin；非 git 工作区会显示工作区错误，不会改用默认目标。
 
-工作区不是 git 仓库，或需要在会话挂上工作区之前先轮询一个已知仓库时，才填写回退值。
+需要在会话挂上工作区之前就开始轮询或自动审查时，才设置默认目标。自建 GitLab 与 GitHub Enterprise 的 origin 不会被识别为对应平台；插件会按 Gitea 适配器处理。
 
 ### 连接配置
 
 | 字段 | 取值 | 默认 | 作用 |
 |---|---|---|---|
-| `platform` | `github`、`gitea`、`forgejo`、`gitlab`、`gitee`、`gitcode`、`atomgit`、`codeup` | `forgejo` | 回退仓库使用的 API 家族。`gitea` 与 `forgejo` 是同一套 Gitea API 的别名；`gitee`、`gitcode`、`atomgit` 共用一个适配器。 |
-| `baseUrl` | URL 或空 | 空 | 回退地址。Gitea / Forgejo 填站点根（不带 `/api/v1`）；GitLab 填实例根（不带 `/api/v4`，默认 `https://gitlab.com`）；Gitee 填 API 根（默认 `https://gitee.com/api/v5`）；GitCode 填 `https://api.gitcode.com/api/v5`；AtomGit 填 `https://api.atomgit.com/api/v5`；Codeup 填 API 域（默认 `https://openapi-rdc.aliyuncs.com`，Region 版填组织专属的 `*.devops.aliyuncs.com` 域）。留空表示按工作区 origin 识别。 |
-| `repo` | `owner/name` 或空 | 空 | 回退仓库。GitLab 子组（`group/subgroup/project`）可用。留空表示按工作区 origin 识别。 |
+| `platform` | `github`、`gitea`、`forgejo`、`gitlab`、`gitee`、`gitcode`、`atomgit`、`codeup` | `forgejo` | 默认目标使用的 API 家族。`gitea` 与 `forgejo` 是同一套 Gitea API 的别名；`gitee`、`gitcode`、`atomgit` 共用一个适配器。 |
+| `baseUrl` | URL 或空 | 空 | 默认目标主机。各平台的默认值与可接受的写法见[支持的代码平台](#支持的代码平台)。留空表示按工作区 origin 识别。 |
+| `repo` | `owner/name` 或空 | 空 | 默认目标仓库。GitLab 支持子组（`group/subgroup/project`）；Codeup 用 `org/group/repo`。留空表示按工作区 origin 识别。 |
 | `organizationId` | 字符串或空 | 空 | 仅 Codeup：组织 ID。留空取工作区 origin 首段。 |
 | `projectId` | 字符串或空 | 空 | 仅 Codeup：数值项目 ID。留空时用组织 ID + 仓库路径调 Codeup API 解析。 |
 | `token` | token 字符串或空 | 空 | 显式 token。留空回退环境变量；GitHub 与 Gitea / Forgejo 还会尝试 CLI 登录（见下）。 |
@@ -167,7 +189,7 @@ export ATOMGIT_TOKEN=...   # AtomGit（可选覆盖）
 export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
 ```
 
-**固定 Gitea / Forgejo 仓库**：工作区不是 git 仓库，或希望在工作区挂上之前先轮询：
+**固定 Gitea / Forgejo 仓库**：用于在工作区挂上之前先轮询；git 工作区仍会把面板切到自己的 origin：
 
 ```yaml
 - id: pr-review
@@ -207,6 +229,26 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     maxDiffCharsPerFile: 14000
 ```
 
+**固定 GitLab 仓库**：`baseUrl` 填实例根，子组写进 `repo`：
+
+```yaml
+- id: pr-review
+  name: '@modouai/dsh-pr-review'
+  config:
+    platform: gitlab
+    baseUrl: https://gitlab.com
+    repo: group/subgroup/project
+    token: ''
+    pollSeconds: 60
+    autoReview: true
+    autoReconclude: false
+    commentLanguage: en
+    provider: ''
+    model: ''
+    reasoningEffort: 'off'
+    maxDiffCharsPerFile: 14000
+```
+
 **固定 Codeup 仓库**：Codeup 需要组织 ID 与仓库路径，两者默认从工作区 origin 解析；`projectId` 可留空（由 Codeup API 解析）：
 
 ```yaml
@@ -229,7 +271,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     maxDiffCharsPerFile: 14000
 ```
 
-**固定 GitLab 或 Gitee 系仓库**：`platform` 用 `gitlab` 时 `baseUrl` 填实例根；用 `gitee` / `gitcode` / `atomgit` 时填对应 API 根；`repo` 仍是 `owner/name`（GitLab 支持 `group/subgroup/project`）。
+**固定 Gitee 系仓库**：`platform` 用 `gitee`、`gitcode` 或 `atomgit`；`baseUrl` 填站点根或对应 API 根；`repo` 仍是 `owner/name`。
 
 **降低开销与等待**：少轮询、只在手动点「立即审查」时审查、少送 diff。以下键放进该行的 `config:`：
 

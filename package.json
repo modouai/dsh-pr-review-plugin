@@ -3,16 +3,21 @@
   "version": "0.3.0",
   "type": "module",
   "main": "index.js",
-  "description": "Review GitHub and Gitea/Forgejo pull requests from the DeepSeek Harness Web UI: automatic rounds, per-file analysis, conclusion history, and chat-integrated review tools.",
+  "description": "Review pull requests from GitHub, GitLab, Gitea/Forgejo, Gitee, GitCode, AtomGit and Codeup in the DeepSeek Harness Web UI: automatic rounds, per-file analysis, conclusion history, and chat-integrated review tools.",
   "keywords": [
     "dsh",
     "deepseek-harness",
     "cordis",
     "pull-request",
     "code-review",
+    "github",
+    "gitlab",
     "gitea",
     "forgejo",
-    "github"
+    "gitee",
+    "gitcode",
+    "atomgit",
+    "codeup"
   ],
   "repository": {
     "type": "git",

@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import {
   buildCommentMarkdown,
   buildConcludePrompt,
+  buildReportPrompt,
   calibrateVerdict,
   callModel,
   commentItems,
@@ -434,6 +435,26 @@ test('buildConcludePrompt: marks truncated report/explanations explicitly', () =
   );
   const text = prompt.messages[0].content[0].text;
   assert.match(text, /……（内容过长，已截断，剩余 \d+ 字符未提供）/);
+});
+
+test('buildReportPrompt: names the real platform', () => {
+  const base = {
+    repo: 'group/project', number: 1, title: 't', author: 'a',
+    headRef: 'h', baseRef: 'b', changedFiles: 0, additions: 0, deletions: 0, body: '',
+  };
+  const labels = {
+    github: 'GitHub',
+    gitlab: 'GitLab',
+    gitee: 'Gitee',
+    gitcode: 'GitCode',
+    atomgit: 'AtomGit',
+    codeup: 'Codeup',
+    forgejo: 'Gitea/Forgejo',
+  };
+  for (const [platform, label] of Object.entries(labels)) {
+    const prompt = buildReportPrompt({ ...base, platform }, [], new Map(), { maxDiffCharsPerFile: 14000 });
+    assert.match(prompt.messages[0].content[0].text, new RegExp(`平台：${label}；`));
+  }
 });
 
 test('parseFeedbackReply: regression', () => {

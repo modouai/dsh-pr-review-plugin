@@ -61,7 +61,7 @@ const PREFIX = '/pr-review-api';
 const DEFAULTS = {
   platform: 'forgejo',
   // Empty by default: a workspace session resolves its own git origin. These values are the
-  // fallback used before a workspace is recognized, or when the workspace is not a git repo.
+  // default target polled before a workspace is recognized; the panel always follows the origin.
   baseUrl: '',
   repo: '',
   token: '',
