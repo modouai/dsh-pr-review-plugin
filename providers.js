@@ -121,6 +121,31 @@ function tokenFromGhHosts(text, host) {
   return null;
 }
 
+/**
+ * gh CLI locations tried in order. A desktop app launches with the minimal
+ * `/usr/bin:/bin:/usr/sbin:/sbin` PATH, so a Homebrew or user-local install is
+ * invisible to a plain `execFile('gh')`. Windows installs add their own paths.
+ */
+export const GH_BINARIES = Object.freeze([
+  'gh',
+  '/opt/homebrew/bin/gh',
+  '/usr/local/bin/gh',
+  '/usr/bin/gh',
+  'C:\\Program Files\\GitHub CLI\\gh.exe',
+  'C:\\Program Files (x86)\\GitHub CLI\\gh.exe',
+]);
+
+/** The gh CLI may run helper commands; keep the usual install directories on PATH. */
+function ghEnv() {
+  const current = typeof process.env.PATH === 'string' ? process.env.PATH : '';
+  const extras = process.platform === 'win32'
+    ? ['C:\\Program Files\\GitHub CLI', 'C:\\Program Files (x86)\\GitHub CLI']
+    : ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin'];
+  const parts = current.split(path.delimiter).filter((part) => part !== '');
+  for (const extra of extras) if (!parts.includes(extra)) parts.push(extra);
+  return { ...process.env, PATH: parts.join(path.delimiter) };
+}
+
 /** Ask the gh CLI for a token, preferring the login of the repository owner. */
 async function ghCliToken(apiHost, owner) {
   const host = apiHost.startsWith('api.') ? apiHost.slice(4) : apiHost;
@@ -128,14 +153,31 @@ async function ghCliToken(apiHost, owner) {
   if (owner !== '') attempts.push(['auth', 'token', '--hostname', host, '--user', owner]);
   attempts.push(['auth', 'token', '--hostname', host]);
   attempts.push(['auth', 'token']);
-  for (const args of attempts) {
-    try {
-      const { stdout } = await execFileAsync('gh', args, { timeout: 8000, env: process.env });
-      const token = stdout.trim();
-      if (token !== '') return token;
-    } catch {
-      // gh absent, logged out, or without that user: try the next attempt.
+  const env = ghEnv();
+  const deadline = Date.now() + 20_000;
+  let lastError = null;
+  for (const binary of GH_BINARIES) {
+    for (const args of attempts) {
+      if (Date.now() >= deadline) {
+        console.warn('[pr-review] gh token lookup timed out');
+        return null;
+      }
+      try {
+        const { stdout } = await execFileAsync(binary, args, { timeout: 8000, env });
+        const token = stdout.trim();
+        if (token !== '') return token;
+      } catch (error) {
+        // A missing binary cannot answer the remaining attempts; move to the next candidate.
+        if (error?.code === 'ENOENT') break;
+        lastError = error;
+      }
     }
+  }
+  if (lastError !== null) {
+    const detail = typeof lastError.stderr === 'string' && lastError.stderr.trim() !== ''
+      ? lastError.stderr.trim().slice(0, 300)
+      : lastError.message;
+    console.warn('[pr-review] gh token lookup failed:', detail);
   }
   return null;
 }
