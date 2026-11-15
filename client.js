@@ -3199,10 +3199,6 @@ window.__ModuleLoader__.load({
         : [];
       return {
         markdown: typeof data?.markdown === 'string' ? data.markdown : (previous?.markdown ?? ''),
-        language: typeof data?.language === 'string'
-          ? data.language
-          : (previous?.language
-            ?? (typeof currentList?.commentLanguage === 'string' ? currentList.commentLanguage : 'zh')),
         round: latest === null ? 1 : latest.round,
         version: latestVersion === null ? 1 : latestVersion.version,
         conflict: previous?.conflict ?? '',
@@ -3257,7 +3253,6 @@ window.__ModuleLoader__.load({
             return {
               ...previous,
               markdown: next.markdown,
-              language: next.language,
               round: next.round,
               version: next.version,
             };

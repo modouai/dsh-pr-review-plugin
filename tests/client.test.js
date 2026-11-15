@@ -1432,6 +1432,7 @@ test('already-published preview offers the append-anyway path', () => {
   const { textOnly, elements } = fake.render(fake.React.createElement(parts.PublishPreviewModal, {
     preview: {
       markdown: '# PR 评论正文',
+      // The host still returns the comment language; the dialog no longer renders it.
       language: 'zh',
       round: 3,
       version: 2,
@@ -1445,7 +1446,7 @@ test('already-published preview offers the append-anyway path', () => {
   }));
 
   assert.match(textOnly, /# PR 评论正文/);
-  assert.doesNotMatch(textOnly, /语言：|Language:/);
+  assert.doesNotMatch(textOnly, /语言\s*[:：]|Language\s*[:：]/i);
   assert.match(textOnly, /已经发布过/);
   const append = elements.find(
     (node) => node.type === 'button' && /仍然追加/.test(fake.textOf(node)),
@@ -1461,6 +1462,7 @@ test('publishing conflict preview tells the user to retry later', () => {
   const { textOnly } = fake.render(fake.React.createElement(parts.PublishPreviewModal, {
     preview: {
       markdown: '# 正文',
+      // Host-returned and intentionally unused by the dialog.
       language: 'en',
       round: 1,
       version: 1,
@@ -1473,7 +1475,7 @@ test('publishing conflict preview tells the user to retry later', () => {
     onCancel: () => {},
   }));
   assert.match(textOnly, /另一个发布任务正在进行/);
-  assert.doesNotMatch(textOnly, /语言：|Language:/);
+  assert.doesNotMatch(textOnly, /语言\s*[:：]|Language\s*[:：]/i);
 });
 
 test('api surfaces host conflict codes for the publish branch', async () => {
