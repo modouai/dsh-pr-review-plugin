@@ -1039,7 +1039,11 @@ test('the file column shows batch progress and the manual analyze-all button', (
   // Automatic mode: progress replaces the file count and no button competes with it.
   const running = render({ analyzing: { total: 3, done: 1, failed: 0, current: 'src/a.js' } });
   assert.match(running.textOnly, /分析中 1\/3/);
+  assert.doesNotMatch(running.textOnly, /失败/);
   assert.equal(analyzeAllButton(running), undefined);
+
+  const failing = render({ analyzing: { total: 3, done: 2, failed: 1, current: 'src/b.js' } });
+  assert.match(failing.textOnly, /分析中 2\/3，失败 1/);
 
   // Manual mode: the count stays and the batch button appears.
   const manual = render({ manual: true, analyzeAllBusy: false, onAnalyzeAll: () => hits.push('all') });

@@ -1836,6 +1836,43 @@ const BATCH_EXPLANATION = JSON.stringify({
   suggestions: [],
 });
 
+/** Fetch fake for tests that force a new round: detail, files, diff and file contents. */
+async function roundReviewFetch(url) {
+  const target = String(url);
+  if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
+  if (target.endsWith('/pulls/1.diff')) return textResponse(200, BATCH_DIFF);
+  if (target.includes('/pulls/1/files')) {
+    return jsonResponse(200, [
+      { filename: 'src/a.js', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+      { filename: 'src/b.js', status: 'modified', additions: 1, deletions: 1, changes: 2 },
+    ]);
+  }
+  if (target.includes('/contents/')) {
+    return jsonResponse(200, {
+      encoding: 'base64',
+      content: Buffer.from('const value = 1;\n', 'utf8').toString('base64'),
+      size: 17,
+    });
+  }
+  if (/\/pulls\/1$/.test(target)) {
+    return jsonResponse(200, {
+      number: 1,
+      title: 'PR 标题',
+      body: '',
+      user: { login: 'dev' },
+      state: 'open',
+      merged: false,
+      additions: 2,
+      deletions: 1,
+      changed_files: 2,
+      head: { ref: 'feature', sha: 'newsha' },
+      base: { ref: 'main', sha: 'def456' },
+      html_url: 'https://git.example/acme/demo/pulls/1',
+    });
+  }
+  throw new Error(`unexpected fetch in test: ${target}`);
+}
+
 test('autoAnalyze explains every file of a finished round, one model call at a time', async () => {
   let active = 0;
   let peak = 0;
@@ -1945,42 +1982,7 @@ test('a new round cancels the batch and drops its in-flight answer', async () =>
       yield { type: 'finish', reason: { kind: 'stop' } };
     })();
   };
-  const fetchHandler = async (url) => {
-    const target = String(url);
-    if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
-    if (target.endsWith('/pulls/1.diff')) return textResponse(200, BATCH_DIFF);
-    if (target.includes('/pulls/1/files')) {
-      return jsonResponse(200, [
-        { filename: 'src/a.js', status: 'modified', additions: 1, deletions: 0, changes: 1 },
-        { filename: 'src/b.js', status: 'modified', additions: 1, deletions: 1, changes: 2 },
-      ]);
-    }
-    if (target.includes('/contents/')) {
-      return jsonResponse(200, {
-        encoding: 'base64',
-        content: Buffer.from('const value = 1;\n', 'utf8').toString('base64'),
-        size: 17,
-      });
-    }
-    if (/\/pulls\/1$/.test(target)) {
-      return jsonResponse(200, {
-        number: 1,
-        title: 'PR 标题',
-        body: '',
-        user: { login: 'dev' },
-        state: 'open',
-        merged: false,
-        additions: 2,
-        deletions: 1,
-        changed_files: 2,
-        head: { ref: 'feature', sha: 'newsha' },
-        base: { ref: 'main', sha: 'def456' },
-        html_url: 'https://git.example/acme/demo/pulls/1',
-      });
-    }
-    throw new Error(`unexpected fetch in test: ${target}`);
-  };
-  const plugin = await setup({ fetch: fetchHandler, llm, reviews: { 1: unanalyzedReview() } });
+  const plugin = await setup({ fetch: roundReviewFetch, llm, reviews: { 1: unanalyzedReview() } });
   try {
     const started = await plugin.call('/pr-review-api/analyze', 'POST', { number: 1 });
     assert.equal(started.json.started, true);
@@ -1996,6 +1998,47 @@ test('a new round cancels the batch and drops its in-flight answer', async () =>
     assert.equal(after.round, 2);
     assert.deepEqual(after.explanations, [], 'the round-1 answer did not land in round 2');
     assert.equal(after.analyzing, null);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a fresh explain for the new round does not join the stale in-flight call', async () => {
+  const reportReply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '第二轮报告',
+    risks: [],
+    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+    focus: {},
+  });
+  let explains = 0;
+  const llm = (options) => {
+    const prompt = JSON.stringify(options.messages);
+    if (!prompt.includes('正在审查文件')) return llmFromText(reportReply)(options);
+    explains += 1;
+    return (async function* () {
+      await delay(150);
+      yield { type: 'text-delta', text: BATCH_EXPLANATION };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })();
+  };
+  const plugin = await setup({ fetch: roundReviewFetch, llm, reviews: { 1: unanalyzedReview() } });
+  try {
+    await plugin.call('/pr-review-api/analyze', 'POST', { number: 1 });
+    await delay(30);
+
+    // The round-1 answer for src/a.js is still in flight when round 2 starts.
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+
+    const asked = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js' });
+    assert.equal(asked.status, 200);
+    assert.notEqual(asked.json.explanation, null, 'the new round answered instead of reusing the discarded call');
+    const done = await plugin.waitFor(1, (current) => (current.explanations ?? []).some(
+      (entry) => entry.file === 'src/a.js' && entry.status === 'done',
+    ));
+    assert.equal(done.round, 2);
+    assert.equal(explains, 2, 'the new round paid for its own model call');
   } finally {
     await plugin.dispose();
   }

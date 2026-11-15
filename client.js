@@ -75,6 +75,7 @@ window.__ModuleLoader__.load({
         analyzeAll: '全部分析',
         analyzeAllHint: '逐个分析还没有分析的文件；已有的分析保留，失败的文件会重试。',
         analyzingFiles: '分析中 {done}/{total}',
+        analyzingFailed: '，失败 {failed}',
         emptyPr: '没有打开的 PR',
         emptyReview: '该 PR 尚未审查，点「立即审查」开始。',
         emptyFile: '选择左侧文件查看变更与审查详情。',
@@ -280,6 +281,7 @@ window.__ModuleLoader__.load({
         analyzeAll: 'Analyze all',
         analyzeAllHint: 'Analyze every file that has no analysis yet. Existing analyses stay; failed files are retried.',
         analyzingFiles: 'Analyzing {done}/{total}',
+        analyzingFailed: ', {failed} failed',
         emptyPr: 'No open pull requests',
         emptyReview: 'This pull request has no review yet. Start one with Review now.',
         emptyFile: 'Pick a file on the left to see its diff and review.',
@@ -1123,7 +1125,8 @@ window.__ModuleLoader__.load({
         ? `${files.length} ${t('fileUnit')}`
         : t('analyzingFiles')
             .replace('{done}', String(analyzing.done))
-            .replace('{total}', String(analyzing.total));
+            .replace('{total}', String(analyzing.total))
+          + (analyzing.failed > 0 ? t('analyzingFailed').replace('{failed}', String(analyzing.failed)) : '');
       return h(
         'aside',
         { className: 'prr-files', style },

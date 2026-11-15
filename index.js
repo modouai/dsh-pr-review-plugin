@@ -181,7 +181,6 @@ function serializeReview(record) {
           done: record.analyzing.done,
           failed: record.analyzing.failed,
           current: record.analyzing.current,
-          startedAt: record.analyzing.startedAt,
         },
     report: record.report,
     explanations: [...record.explanations.entries()].map(([filePath, entry]) => ({
@@ -1265,8 +1264,9 @@ export function apply(ctx, config) {
       return { explanation: cached.explanation, cached: true };
     }
     // A double click, a panel retry or the agent tool can ask for the same file at once;
-    // they await the same promise instead of paying for two model calls.
-    const inFlightKey = `${number}:${filePath}`;
+    // they await the same promise instead of paying for two model calls. Keyed by round:
+    // a request for the new round must not join an answer the cleared round will discard.
+    const inFlightKey = `${number}:${filePath}:${record.analysisEpoch ?? 0}`;
     const running = explainInFlight.get(inFlightKey);
     if (running !== undefined) return running;
     const task = explainFileUncached(record, number, filePath, cached);
@@ -1376,7 +1376,7 @@ export function apply(ctx, config) {
       if (entry === undefined || (includeErrors && entry.status === 'error')) pending.push(file.path);
     }
     if (pending.length === 0) return false;
-    const job = { total: pending.length, done: 0, failed: 0, current: pending[0], startedAt: Date.now() };
+    const job = { total: pending.length, done: 0, failed: 0, current: pending[0] };
     record.analyzing = job;
     scheduleSave();
     void runAnalysisBatch(record, job, pending);

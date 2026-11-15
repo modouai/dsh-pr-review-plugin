@@ -12,7 +12,7 @@ AI-assisted pull request review for the DeepSeek Harness Web UI. The plugin watc
 
 - **Workspace aware**: each session's workspace `git origin` selects the repository and platform (GitHub; GitLab; Gitea / Forgejo / Codeberg; Gitee / GitCode / AtomGit; Codeup); the panel only shows pull requests from that repository, and switching workspaces switches reviews with it.
 - **Automatic rounds**: the plugin polls for open pull requests and starts a new review round whenever new commits land (`autoReview` can be turned off).
-- **Batch analysis**: every finished round analyzes all changed files in the background, one model call at a time (`autoAnalyze` can be turned off). With it off, a file is analyzed when you open it, or all at once with **Analyze all** in the file column.
+- **Batch analysis**: every finished round analyzes all changed files in the background, one file at a time (`autoAnalyze` can be turned off). With it off, a file is analyzed when you open it, or all at once with **Analyze all** in the file column.
 - **Review panel**: a right-sidebar panel inside the session — changed files, diff, and per-file analysis in three resizable columns; click any hunk in the diff for its per-segment analysis, or switch to the full file (with added lines highlighted).
 - **Final conclusion**: generated in the background with visible stages and cancel support; carries review coverage (X of Y files analyzed) and a version number. When the report or file analysis changes afterwards, the panel flags the outdated conclusion and offers regeneration (automatic with `autoReconclude`).
 - **Version history**: every conclusion version is kept, and each review round gets its own tab, so older rounds and versions stay readable.
