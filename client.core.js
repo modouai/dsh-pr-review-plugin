@@ -974,11 +974,11 @@ window.__ModuleLoader__.load({
         shortSha, roundsOf, applyRoundSelection, versionsOf, publishedOfRound, staleInfoOf,
         isRoundVersionPublished, previewConflictOf, roundPillOf, panelSizing, clampColumnWidth,
         sidebarReviewAddress, parseSidebarReviewAddress, actionsBridge, fileContentCache,
-        fileContentKey, STAGE_KEY, scrollToNewLine, fileLineLabel, previewItemOf, previewItemsOf,
+        fileContentKey, STAGE_KEY, scrollToNewLine, fileLineLabel, previewItemsOf,
         previewSelectionSupported, selectionIncludeIds, buildPreviewBody, buildPublishBody, text,
-        VERDICT_KEY, verdictTone, severityLabel, fileSeverityOf, STATUS_KEY, cleanStepTitle,
-        parseUnifiedDiff, stepTokens, guessHunkForStep, mapWalkthroughToHunks, hunkRange, CSS,
-        Pill, findingKey, FEEDBACK_LABEL_KEYS, VerdictPill, Btn, FileRow, isAnalyzing,
+        severityLabel, fileSeverityOf, STATUS_KEY, cleanStepTitle,
+        parseUnifiedDiff, mapWalkthroughToHunks, hunkRange, CSS,
+        findingKey, FEEDBACK_LABEL_KEYS, VerdictPill, Btn, FileRow, isAnalyzing,
     };
   },
 });
