@@ -17,7 +17,7 @@ window.__ModuleLoader__.load({
         staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge, shortSha,
       } = core;
       const {
-        OrderList, RiskList, RoundMeta, DeltaBlock, VersionSelector,
+        RiskList, RoundMeta, DeltaBlock, VersionSelector,
       } = components;
       const {
         ConclusionBlock, FeedbackBlock, PublishedBlock, conclusionMetaLine, overviewFooter,
@@ -708,8 +708,6 @@ window.__ModuleLoader__.load({
                   ),
                 ),
           ),
-          h('div', { className: 'prr-h2' }, t('order')),
-          h('div', { className: 'prr-card' }, h(OrderList, { order: report.order, t, onOpenFile: props.onOpenFile })),
           conclusionNode,
           h(PublishedBlock, { entries: publishedEntries, t }),
           review.concludeError === null || review.concludeError === undefined || review.concludeError === ''

@@ -2647,3 +2647,20 @@ test('an empty risk list explains whether nothing was raised or everything was f
   assert.match(textOnly, /2 条判定为误报/);
 });
 
+test('the overview no longer renders a reading-order section', () => {
+  const client = loadClient();
+  const review = makeReview({
+    report: {
+      verdict: 'suggest',
+      summary: '报告',
+      risks: [],
+      unverified: [],
+      order: [{ file: 'src/a.js', reason: '这是排序理由不该出现在总览' }],
+      focus: {},
+    },
+  });
+  const { textOnly } = renderOverview(client, review);
+  assert.doesNotMatch(textOnly, /审查顺序/);
+  assert.doesNotMatch(textOnly, /这是排序理由不该出现在总览/);
+});
+
