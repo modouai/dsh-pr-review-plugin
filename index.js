@@ -1389,33 +1389,51 @@ export function apply(ctx, config) {
   }
 
   /**
-   * Model call that must return JSON. Models occasionally answer in prose despite the
-   * contract; one corrective turn — echoing its answer back with "JSON only" — recovers
-   * most of those instead of failing the whole round.
+   * Model call that must return JSON. Models occasionally answer in prose or with a stub
+   * object despite the contract; one corrective turn — echoing its answer back with the
+   * required shape — recovers most of those instead of failing the whole round.
+   *
+   * `isUsable` decides whether a parsed answer is complete enough to keep. The corrective
+   * turn uses a user message, never an assistant one: the Host's LLM runtime expects
+   * assistant history to carry `finish.replayState`, which callModel does not collect.
    */
-  async function callModelJson(prompt, signal) {
+  async function callModelJson(prompt, signal, isUsable) {
+    const usable = typeof isUsable === 'function' ? isUsable : () => true;
     const request = signal === undefined || signal === null ? prompt : { ...prompt, signal };
     const first = await callModel(ctx, settings, request);
     const parsed = extractJson(first);
-    if (parsed !== null) return { raw: first, parsed };
+    if (parsed !== null && usable(parsed)) return { raw: first, parsed };
     const correction = {
       ...prompt,
-      // Echo the bad answer inside a user turn, never as an assistant turn: the Host's LLM
-      // runtime expects assistant history to carry `finish.replayState`, which callModel
-      // does not collect, and replaying it fails with "reading 'replayState'".
       messages: [
         ...prompt.messages,
         {
           role: 'user',
           content: [{
             type: 'text',
-            text: `上一次的输出不是合法 JSON：\n---\n${first.slice(0, 4000)}\n---\n请只输出一个 JSON 对象，不要 markdown 代码块，不要任何解释。`,
+            text: `上一次的输出不是合法的、完整的 JSON：\n---\n${first.slice(0, 4000)}\n---\n请按上面的字段约定，只输出一个完整的 JSON 对象，不要 markdown 代码块，不要任何解释。`,
           }],
         },
       ],
     };
     const retried = await callModel(ctx, settings, signal === undefined || signal === null ? correction : { ...correction, signal });
     return { raw: retried, parsed: extractJson(retried) };
+  }
+
+  /** A report answer is usable only when it carries the display fields the panel renders. */
+  function reportAnswerUsable(value) {
+    if (value === null || typeof value !== 'object') return false;
+    const summary = typeof value.summary === 'string' ? value.summary.trim() : '';
+    const concerns = Array.isArray(value.concerns) ? value.concerns : [];
+    return summary !== '' || concerns.length > 0;
+  }
+
+  /** A file analysis is usable only when it explains the file. */
+  function explanationAnswerUsable(value) {
+    if (value === null || typeof value !== 'object') return false;
+    const summary = typeof value.summary === 'string' ? value.summary.trim() : '';
+    const concerns = Array.isArray(value.concerns) ? value.concerns : [];
+    return summary !== '' || concerns.length > 0;
   }
 
   /** Fetch one pull request and produce the overall report plus reading order. */
@@ -1452,7 +1470,7 @@ export function apply(ctx, config) {
     const prompt = buildReportPrompt(pull, record.files, record.diffFiles, settings);
     let answer;
     try {
-      answer = await callModelJson(prompt);
+      answer = await callModelJson(prompt, undefined, reportAnswerUsable);
     } catch (error) {
       record.status = 'error';
       record.error = error instanceof Error ? error.message : String(error);
@@ -1462,9 +1480,9 @@ export function apply(ctx, config) {
       return;
     }
     const parsed = answer.parsed;
-    if (parsed === null) {
+    if (parsed === null || !reportAnswerUsable(parsed)) {
       record.status = 'error';
-      record.error = `模型没有返回可解析的 JSON。原始输出：${answer.raw.slice(0, 400)}`;
+      record.error = `模型没有返回完整的报告 JSON。原始输出：${answer.raw.slice(0, 400)}`;
       record.finishedAt = Date.now();
       currentRoundEntry(record).finishedAt = record.finishedAt;
       scheduleSave();
@@ -1567,12 +1585,14 @@ export function apply(ctx, config) {
     );
     if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
-    const answer = await callModelJson(prompt, signal);
+    const answer = await callModelJson(prompt, signal, explanationAnswerUsable);
     // The round can switch while the model answers; drop the answer before parsing, so a
     // late malformed reply is never reported as a failure of the round that replaced it.
     if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     const parsed = answer.parsed;
-    if (parsed === null) throw new Error(`模型没有返回可解析的 JSON。原始输出：${answer.raw.slice(0, 400)}`);
+    if (parsed === null || !explanationAnswerUsable(parsed)) {
+      throw new Error(`模型没有返回完整的分析 JSON。原始输出：${answer.raw.slice(0, 400)}`);
+    }
     const concerns = normalizeConcerns(parsed.concerns);
     let issues = [];
     let unverified = [];

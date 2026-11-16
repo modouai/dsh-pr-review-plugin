@@ -247,7 +247,7 @@ window.__ModuleLoader__.load({
 
       function RiskList(props) {
         const list = props.risks ?? [];
-        if (list.length === 0) return h('div', { className: 'prr-subtle' }, '—');
+        if (list.length === 0) return h('div', { className: 'prr-subtle' }, props.t('noInitialRisks'));
         return h(
           'div',
           null,

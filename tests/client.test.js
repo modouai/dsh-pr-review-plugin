@@ -2619,3 +2619,12 @@ test('the overview names the commit under review', () => {
   assert.doesNotMatch(renderOverview(client, missing).textOnly, /commit /);
 });
 
+test('an empty risk list says so instead of showing a dash', () => {
+  const client = loadClient();
+  const review = makeReview({
+    report: { verdict: 'pass', summary: '报告', risks: [], unverified: [], order: [], focus: {} },
+  });
+  const { textOnly } = renderOverview(client, review);
+  assert.match(textOnly, /未发现初筛风险/);
+});
+

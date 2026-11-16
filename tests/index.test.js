@@ -2754,7 +2754,30 @@ test('an answer in prose is retried once as JSON instead of failing the round', 
     // The Host's LLM runtime cannot replay assistant history without finish.replayState,
     // so the correction must echo the bad answer inside a user turn.
     assert.ok(requests[1].messages.every((message) => message.role !== 'assistant'));
-    assert.match(JSON.stringify(requests[1].messages), /不是合法 JSON/);
+    assert.match(JSON.stringify(requests[1].messages), /不是合法的、完整的 JSON/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a stub report JSON is retried, then fails the round instead of showing an empty report', async () => {
+  let calls = 0;
+  const plugin = await setup({
+    fetch: roundReviewFetch,
+    reviews: { 1: unanalyzedReview() },
+    llm: () => {
+      calls += 1;
+      return (async function* () {
+        yield { type: 'text-delta', text: JSON.stringify({ verdict: 'suggest' }) };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+      })();
+    },
+  });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const review = await plugin.waitFor(1, (current) => current.status === 'error');
+    assert.match(review.error, /完整的报告 JSON/);
+    assert.equal(calls, 2, 'the corrective turn ran once');
   } finally {
     await plugin.dispose();
   }
