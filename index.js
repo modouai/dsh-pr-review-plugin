@@ -97,6 +97,9 @@ const DEFAULTS = {
   evidenceMaxChars: 6000,
 };
 
+/** GUI launches can have a minimal PATH; try the common absolute locations too. */
+const GIT_CANDIDATES = ['git', '/usr/bin/git', '/opt/homebrew/bin/git', '/usr/local/bin/git'];
+
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_FILE_DIFF_BYTES = 400 * 1024;
 /** The poll list caps the number of open pull requests: it also bounds auto-review cost. */
@@ -667,8 +670,7 @@ export function apply(ctx, config) {
 
   /** Try `git -C <dir> remote get-url origin`, tolerating a GUI app's minimal PATH. */
   async function readGitRemote(dir) {
-    const candidates = ['git', '/usr/bin/git', '/opt/homebrew/bin/git', '/usr/local/bin/git'];
-    for (const binary of candidates) {
+    for (const binary of GIT_CANDIDATES) {
       const result = await new Promise((resolve) => {
         execFile(binary, ['-C', dir, 'remote', 'get-url', 'origin'], { timeout: 8000 }, (error, stdout, stderr) => {
           resolve({ error, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
@@ -1046,9 +1048,20 @@ export function apply(ctx, config) {
   /** Run one git command in the workspace; evidence lookup only, so failures read as null. */
   function runGit(cwd, args) {
     return new Promise((resolve) => {
-      execFile('git', ['-C', cwd, ...args], { timeout: 5000, maxBuffer: 512 * 1024 }, (error, stdout) => {
-        resolve(error === null ? String(stdout) : null);
-      });
+      const attempt = (at) => {
+        if (at >= GIT_CANDIDATES.length) {
+          resolve(null);
+          return;
+        }
+        execFile(GIT_CANDIDATES[at], ['-C', cwd, ...args], { timeout: 5000, maxBuffer: 512 * 1024 }, (error, stdout) => {
+          if (error !== null && error !== undefined && error.code === 'ENOENT') {
+            attempt(at + 1);
+            return;
+          }
+          resolve(error === null ? String(stdout) : null);
+        });
+      };
+      attempt(0);
     });
   }
 
@@ -1066,7 +1079,8 @@ export function apply(ctx, config) {
 
   /** Candidate paths: files in the workspace that contain the symbol. */
   async function grepWorkspaceSymbol(cwd, symbol, limit) {
-    const stdout = await runGit(cwd, ['grep', '-l', '-F', '-e', symbol]);
+    // --full-name keeps paths repo-root-relative even when the workspace is a subdirectory.
+    const stdout = await runGit(cwd, ['grep', '--full-name', '-l', '-F', '-e', symbol]);
     if (stdout === null) return [];
     return stdout
       .split('\n')
@@ -1124,11 +1138,19 @@ export function apply(ctx, config) {
     return { text: chunk, note };
   }
 
+  /** A fence longer than any backtick run inside the evidence, so Markdown cannot close it. */
+  function fenceFor(text) {
+    const runs = String(text).match(/`{3,}/g);
+    const longest = runs === null ? 0 : Math.max(...runs.map((run) => run.length));
+    return '`'.repeat(Math.max(3, longest + 1));
+  }
+
   function evidenceBlock(index, need, filePath, content, maxChars) {
     const meta = [need.kind, need.symbol === '' ? '' : `symbol=${need.symbol}`].filter((item) => item !== '').join(' · ');
     const sliced = sliceEvidence(content, need.symbol, maxChars);
     const scope = sliced.note === '' ? '' : `；${sliced.note}`;
-    return `## 证据 ${index}：${filePath}（${meta}${scope}）\n\n\`\`\`\n${sliced.text}\n\`\`\``;
+    const fence = fenceFor(sliced.text);
+    return `## 证据 ${index}：${filePath}（${meta}${scope}）\n\n${fence}text\n${sliced.text}\n${fence}`;
   }
 
   /**
@@ -1158,9 +1180,11 @@ export function apply(ctx, config) {
       }
       let covered = false;
       for (const candidate of candidates) {
-        // An already-used file still covers this need, but later candidates may offer a
-        // better match, so keep trying instead of stopping at the first duplicate.
-        if (used.has(candidate)) {
+        // Dedupe per (file, symbol): the same file can hold several symbols, and each
+        // needs its own window. An existing key still covers this need; keep trying later
+        // candidates because one may offer a better match.
+        const cacheKey = `${candidate}::${need.symbol}`;
+        if (used.has(cacheKey)) {
           covered = true;
           continue;
         }
@@ -1168,7 +1192,7 @@ export function apply(ctx, config) {
           const content = await ensureFileContent(record, candidate);
           index += 1;
           blocks.push(evidenceBlock(index, need, candidate, content.content, maxChars));
-          used.add(candidate);
+          used.add(cacheKey);
           covered = true;
           break;
         } catch (error) {
@@ -1184,7 +1208,7 @@ export function apply(ctx, config) {
    * Score the triage pass's concerns against the evidence. A verifier failure never fails the
    * review: the candidates become unverified notes instead of findings.
    */
-  async function verifyConcerns(record, concerns, rawNeeds, buildPrompt, epoch) {
+  async function verifyConcerns(record, concerns, rawNeeds, buildPrompt, epoch, signal) {
     const needs = normalizeEvidenceNeeds(rawNeeds);
     const evidence = await collectEvidence(
       record,
@@ -1195,11 +1219,23 @@ export function apply(ctx, config) {
     if (epoch !== null && (record.analysisEpoch ?? 0) !== epoch) {
       return { discarded: true, issues: [], unverified: [] };
     }
+    if (signal !== undefined && signal !== null && signal.aborted) {
+      return { discarded: true, issues: [], unverified: [] };
+    }
     let answer;
     try {
-      answer = await callModelJson(buildPrompt(evidence.blocks, evidence.missing));
+      answer = await callModelJson(
+        buildPrompt(evidence.blocks, evidence.missing),
+        signal,
+        // A reply without a results array is a stub, not a verdict.
+        (value) => value !== null && typeof value === 'object' && Array.isArray(value.results),
+      );
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      // A cancelled batch must not persist its cancellation as "unverified" findings.
+      if ((signal !== undefined && signal !== null && signal.aborted) || reason.includes('已取消')) {
+        return { discarded: true, issues: [], unverified: [] };
+      }
       console.warn('[pr-review] 复审调用失败，候选问题转入未验证项：', error);
       return {
         discarded: false,
@@ -1625,8 +1661,9 @@ export function apply(ctx, config) {
       throw new Error(`模型没有返回完整的分析 JSON。原始输出：${answer.raw.slice(0, 400)}`);
     }
     const concerns = normalizeConcerns(parsed.concerns);
+    // Same filter the verify prompt applies, so suggestion indices line up.
     const rawSuggestions = Array.isArray(parsed.suggestions)
-      ? parsed.suggestions.filter((item) => typeof item === 'string')
+      ? parsed.suggestions.filter((item) => typeof item === 'string' && item.trim() !== '')
       : [];
     let issues = [];
     let unverified = [];
@@ -1647,6 +1684,7 @@ export function apply(ctx, config) {
             diffText,
           }),
           epoch,
+          signal,
         );
         if (verdicts.discarded) return { explanation: null, cached: false, discarded: true };
         issues = verdicts.issues.map(({ severity, point, line }) => ({ severity, point, line }));
@@ -1656,13 +1694,17 @@ export function apply(ctx, config) {
         }
       }
     }
+    // A confirmed blocker must not sit under a "pass" pill; mirror the report's reconciliation.
+    const baseVerdict = parsed.verdict ?? 'suggest';
+    const verdict = issues.some((item) => item.severity === 'block')
+      ? 'block'
+      : (issues.length > 0 && baseVerdict === 'pass' ? 'suggest' : baseVerdict);
     const explanation = normalizeExplanation({
       ...parsed,
       issues,
       unverified,
       suggestions,
-      // A single missing verdict must not present as "pass".
-      verdict: parsed.verdict ?? 'suggest',
+      verdict,
     });
     // Repeat the check at the write point: an await added between parse and store must
     // not reopen the stale-write window.

@@ -2880,3 +2880,51 @@ test('a suggestion the diff already implements is dropped by the verifier', asyn
     await plugin.dispose();
   }
 });
+
+test('a confirmed blocker raises the file verdict', async () => {
+  const plugin = await setup({
+    fetch: batchFetch,
+    llm: llmTriageThenVerify({
+      verdict: 'pass',
+      summary: '讲解',
+      logic: '逻辑',
+      changes: '改动',
+      concerns: [{ severity: 'suggest', point: '空指针风险', line: 2 }],
+      evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
+      suggestions: [],
+    }, {
+      results: [{ index: 1, confidence: 90, severity: 'block', point: '空指针风险', line: 2 }],
+      extraIssues: [],
+    }),
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.json.explanation.verdict, 'block');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a verifier reply with no results leaves every candidate visible', async () => {
+  const plugin = await setup({
+    fetch: batchFetch,
+    llm: llmTriageThenVerify({
+      verdict: 'suggest',
+      summary: '讲解',
+      logic: '逻辑',
+      changes: '改动',
+      concerns: [{ severity: 'suggest', point: '空指针风险', line: 2 }],
+      evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
+      suggestions: [],
+    }, {}),
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.deepEqual(result.json.explanation.issues, []);
+    assert.deepEqual(result.json.explanation.unverified, [
+      { point: '空指针风险', missing: '复审未返回该候选的判定' },
+    ]);
+  } finally {
+    await plugin.dispose();
+  }
+});

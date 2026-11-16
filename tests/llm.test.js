@@ -602,7 +602,7 @@ test('conclude prompt: names residual risks and follows the comment language', (
   );
   const text = prompt.messages[0].content[0].text;
   assert.match(text, /未发现阻塞项/);
-  assert.match(text, /未验证项与需要补的测试/);
+  assert.match(text, /只写要执行的动作与要补的测试/);
   assert.match(prompt.system, /Write every human-readable field in English/);
 
   // The Chinese default carries the same contract, just in the other language.
@@ -851,4 +851,42 @@ test('the verifier prompt carries suggestions and the diff when given', () => {
   assert.match(text, /1\. 补齐三行配置/);
   assert.match(text, /## 该文件的 diff/);
   assert.match(text, /"suggestionResults"/);
+});
+
+test('a candidate the verifier did not answer becomes an unverified note', () => {
+  const { issues, unverified } = partitionVerdicts({
+    results: [{ index: 1, confidence: 90, point: 'A2' }],
+  }, [
+    { severity: 'suggest', file: 'a.js', point: 'A', line: 0 },
+    { severity: 'suggest', file: 'b.js', point: 'B', line: 0 },
+  ]);
+  assert.deepEqual(issues.map((item) => item.point), ['A2']);
+  assert.deepEqual(unverified, [{ point: 'B', missing: '复审未返回该候选的判定' }]);
+});
+
+test('a zero-based results array is shifted instead of misattributed', () => {
+  const { issues } = partitionVerdicts({
+    results: [{ index: 0, confidence: 90, point: 'A2' }],
+  }, [{ severity: 'block', file: 'a.js', point: 'A', line: 0 }]);
+  assert.equal(issues[0].file, 'a.js');
+  assert.equal(issues[0].severity, 'block');
+});
+
+test('an out-of-range result is dropped, not published', () => {
+  const { issues, dropped } = partitionVerdicts({
+    results: [
+      { index: 9, confidence: 95, point: '越界问题' },
+      { index: 1, confidence: 95, point: '正常问题' },
+    ],
+  }, [{ severity: 'suggest', file: 'a.js', point: 'A', line: 0 }]);
+  assert.deepEqual(issues.map((item) => item.point), ['正常问题']);
+  assert.equal(dropped, 1);
+});
+
+test('English self-doubt is treated like Chinese', () => {
+  const { unverified, issues } = partitionVerdicts({
+    results: [{ index: 1, confidence: 95, point: 'Could not verify the caller contract' }],
+  }, [{ severity: 'suggest', file: 'a.js', point: 'A', line: 0 }]);
+  assert.deepEqual(issues, []);
+  assert.equal(unverified.length, 1);
 });

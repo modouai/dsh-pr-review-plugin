@@ -170,7 +170,7 @@ async function collectEvidence(record, needs, settings) // → { blocks: string,
 
 ```json
 {
-  "results": [{ "index": 0, "confidence": 85, "severity": "block | suggest", "point": "...", "line": 12, "missing": "" }],
+  "results": [{ "index": 1, "confidence": 85, "severity": "block | suggest", "point": "...", "line": 12, "missing": "" }],
   "extraIssues": [{ "confidence": 90, "severity": "suggest", "point": "...", "line": 0 }]
 }
 ```

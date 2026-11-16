@@ -377,7 +377,9 @@ function verifyPromptBody(header, concerns, evidence, missing, language, extra =
     '- 0-24：经不起推敲、属于既有问题或误报；写入 results 并给低分，不要写成高分。',
     '每条候选都必须返回一条 result，index 用上面列表的编号（从 1 开始）；index 越界或缺失的结果会被丢弃。',
     '证据块可能只显示文件的一部分（标题里标注了行范围）。只看到片段时，不要断言文件里不存在某段内容；需要完整文件才能判断的，按未验证处理。',
-    '如果 point 里出现「无法确认 / 无法核实 / 证据不足 / 证据被截断」这类措辞，confidence 必须低于 80，否则该条会被降级为未验证项。',
+    language === 'en'
+      ? 'If the point says "could not confirm / cannot verify / insufficient evidence", confidence must stay below 80 or the item becomes an unverified note.'
+      : '如果 point 里出现「无法确认 / 无法核实 / 证据不足 / 证据被截断」这类措辞，confidence 必须低于 80，否则该条会被降级为未验证项。',
     '只看候选与证据，不要引用第一轮的推理，也不要重新审查整个文件。',
     '如果证据里发现了新的、可确认的问题，写进 extraIssues，带上 confidence 并确保能引用证据中的代码；否则不要输出。',
     '规范类问题必须引用规范原文（如「CLAUDE.md 要求……」），没有原文就按未验证处理。',
@@ -635,7 +637,7 @@ export function buildConcludePrompt(pull, report, explanations, currentConclusio
     '  "summary": "3-5 句最终结论：改动的价值、实现是否匹配 PR 描述、遗留风险与测试空白、是否可合并；没有阻塞项时明确写「未发现阻塞项」",',
     '  "blockers": [{ "id": "可选：沿用上一轮条目的 id", "file": "路径", "line": 0, "point": "问题 + 影响 + 修法（一条只写一个核心问题）" }],',
     '  "suggestions": [{ "id": "可选：沿用上一轮条目的 id", "file": "路径", "line": 0, "point": "问题 + 影响 + 修法（一条只写一个核心问题）" }],',
-    '  "nextSteps": ["合并前要做的事，按顺序；未验证项与需要补的测试写进来"]',
+    '  "nextSteps": ["合并前要做的事，按顺序；只写要执行的动作与要补的测试，不要写未验证项"]',
     '}',
   );
   const user = lines.filter((line) => line !== '').join('\n');
@@ -686,7 +688,15 @@ export const CONFIDENCE_FINDING = 80;
 export const CONFIDENCE_UNVERIFIED = 25;
 
 /** Wording that means the model itself did not verify the claim, whatever score it gave. */
-const DOUBT_PATTERNS = [/无法确认/, /无法核实/, /无法判断/, /未能确认/, /证据不足/, /证据被截断/, /不足以确认/, /不确定/];
+const DOUBT_PATTERNS = [
+  /无法确认/, /无法核实/, /无法判断/, /未能确认/, /证据不足/, /证据被截断/, /不足以确认/, /不确定/,
+  /could not (?:confirm|verify)/i,
+  /cannot (?:confirm|verify)/i,
+  /unable to (?:confirm|verify)/i,
+  /insufficient evidence/i,
+  /not (?:been )?verified/i,
+  /\buncertain\b/i,
+];
 
 function selfReportedDoubt(point) {
   return DOUBT_PATTERNS.some((pattern) => pattern.test(point));
@@ -724,12 +734,22 @@ export function partitionVerdicts(raw, concerns) {
       file: typeof item?.file === 'string' ? item.file : (fallback?.file ?? ''),
     });
   };
-  for (const item of Array.isArray(raw?.results) ? raw.results : []) {
-    if (item === null || typeof item !== 'object') continue;
-    // The candidate list is numbered from 1 (same as evidenceNeeds.concern), so index 1 is
-    // the first concern. A 0-based index from a confused model is treated as out of range.
-    const index = Number.isInteger(item.index) && item.index >= 1 ? item.index : 0;
-    const concern = index > 0 ? (candidates[index - 1] ?? null) : null;
+  const results = (Array.isArray(raw?.results) ? raw.results : []).filter((item) => item !== null && typeof item === 'object');
+  // The contract numbers candidates from 1; a reply numbered from 0 is a common slip and
+  // is shifted as a whole rather than mis-attributed one slot down.
+  const zeroBased = results.some((item) => item.index === 0) && !results.some((item) => item.index === 1);
+  const answered = new Set();
+  for (const item of results) {
+    const rawIndex = Number.isInteger(item.index) ? item.index : -1;
+    const index = zeroBased ? rawIndex + 1 : rawIndex;
+    // An out-of-range result cannot be attached to a candidate. The prompt promises such
+    // results are dropped; publishing an unanchored finding would break that promise.
+    if (index < 1 || index > candidates.length) {
+      dropped += 1;
+      continue;
+    }
+    answered.add(index);
+    const concern = candidates[index - 1] ?? null;
     const point = typeof item.point === 'string' && item.point.trim() !== ''
       ? item.point.trim()
       : (concern?.point ?? '');
@@ -756,6 +776,14 @@ export function partitionVerdicts(raw, concerns) {
       dropped += 1;
     }
   }
+  // A candidate the verifier never answered must not vanish: an empty or partial reply
+  // would otherwise look like "raised 3, filtered 0, nothing found".
+  candidates.forEach((concern, offset) => {
+    if (answered.has(offset + 1)) return;
+    const point = typeof concern?.point === 'string' ? concern.point.trim() : '';
+    if (point === '') return;
+    unverified.push({ point, missing: '复审未返回该候选的判定' });
+  });
   for (const item of Array.isArray(raw?.extraIssues) ? raw.extraIssues : []) {
     if (item === null || typeof item !== 'object') continue;
     // Evidence-triggered findings skip the candidate index but not the confidence bar;
