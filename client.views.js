@@ -251,6 +251,42 @@ window.__ModuleLoader__.load({
         );
       }
 
+      /**
+       * Points the verifier could not confirm: they get their own block so they are never
+       * mistaken for findings. Malformed entries are dropped instead of leaking "undefined".
+       */
+      function UnverifiedBlock(props) {
+        const { t } = props;
+        const list = (Array.isArray(props.items) ? props.items : []).filter(
+          (item) => item !== null && typeof item === 'object' && typeof item.point === 'string' && item.point.trim() !== '',
+        );
+        if (list.length === 0) return null;
+        return h(
+          'div',
+          null,
+          h('div', { className: 'prr-h2' }, t('unverified')),
+          h(
+            'div',
+            { className: 'prr-card prr-unverified' },
+            h('div', { className: 'prr-subtle' }, t('unverifiedHint')),
+            list.map((item, index) =>
+              h(
+                'div',
+                { className: 'prr-rowitem', key: index },
+                h(
+                  'div',
+                  { className: 'prr-rowmain' },
+                  h('div', { className: 'prr-text' }, item.point),
+                  typeof item.missing === 'string' && item.missing !== ''
+                    ? h('div', { className: 'prr-subtle' }, `${t('unverifiedMissing')}${item.missing}`)
+                    : null,
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+
       /** Per-file review detail: logic, walkthrough, changes, findings, suggestions. */
       function FileDetailPanel(props) {
         const { t, filePath, explanation } = props;
@@ -304,32 +340,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
             );
-        const unverified = (detail.unverified ?? []).length === 0
-          ? null
-          : h(
-              'div',
-              null,
-              h('div', { className: 'prr-h2' }, t('unverified')),
-              h(
-                'div',
-                { className: 'prr-card prr-unverified' },
-                h('div', { className: 'prr-subtle' }, t('unverifiedHint')),
-                detail.unverified.map((item, index) =>
-                  h(
-                    'div',
-                    { className: 'prr-rowitem', key: index },
-                    h(
-                      'div',
-                      { className: 'prr-rowmain' },
-                      h('div', { className: 'prr-text' }, item.point),
-                      item.missing === ''
-                        ? null
-                        : h('div', { className: 'prr-subtle' }, `${t('unverifiedMissing')}${item.missing}`),
-                    ),
-                  ),
-                ),
-              ),
-            );
+        const unverified = h(UnverifiedBlock, { t, items: detail.unverified });
         const suggestions = (detail.suggestions ?? []).length === 0
           ? null
           : h(
@@ -625,38 +636,17 @@ window.__ModuleLoader__.load({
           h('div', { className: 'prr-h2' }, t('initialRisks')),
           h('div', { className: 'prr-card' }, h(RiskList, {
             risks: report.risks,
-            raised: report.raised ?? 0,
-            discarded: report.discarded ?? 0,
-            unverifiedCount: (report.unverified ?? []).length,
+            emptyLabel: (report.raised ?? 0) > 0
+              ? fill(t('noInitialRisksDetail'), {
+                  raised: report.raised ?? 0,
+                  unverified: (report.unverified ?? []).length,
+                  discarded: report.discarded ?? 0,
+                })
+              : t('noInitialRisks'),
             t,
             onOpenFile: props.onOpenFile,
           })),
-          (report.unverified ?? []).length === 0
-            ? null
-            : h(
-                'div',
-                null,
-                h('div', { className: 'prr-h2' }, t('unverified')),
-                h(
-                  'div',
-                  { className: 'prr-card prr-unverified' },
-                  h('div', { className: 'prr-subtle' }, t('unverifiedHint')),
-                  report.unverified.map((item, index) =>
-                    h(
-                      'div',
-                      { className: 'prr-rowitem', key: index },
-                      h(
-                        'div',
-                        { className: 'prr-rowmain' },
-                        h('div', { className: 'prr-text' }, item.point),
-                        item.missing === ''
-                          ? null
-                          : h('div', { className: 'prr-subtle' }, `${t('unverifiedMissing')}${item.missing}`),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
+          h(UnverifiedBlock, { t, items: report.unverified }),
           h(
             'div',
             { className: 'prr-h2' },

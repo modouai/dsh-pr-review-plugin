@@ -2809,3 +2809,47 @@ test('the report records how many triage concerns the verifier discarded', async
     await plugin.dispose();
   }
 });
+
+test('evidence blocks say which lines they show', async () => {
+  const longFile = Array.from({ length: 300 }, (_, index) => `line ${index + 1}`).join('\n');
+  const fetchHandler = async (url) => {
+    const target = String(url);
+    if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
+    if (target.includes('/pulls/1.diff')) return textResponse(200, BATCH_DIFF);
+    if (target.includes('/contents/')) {
+      return jsonResponse(200, {
+        encoding: 'base64',
+        content: Buffer.from(longFile, 'utf8').toString('base64'),
+        size: longFile.length,
+      });
+    }
+    throw new Error(`unexpected fetch in test: ${target}`);
+  };
+  const prompts = [];
+  const answers = llmTriageThenVerify({
+    verdict: 'suggest',
+    summary: '讲解',
+    logic: '逻辑',
+    changes: '改动',
+    concerns: [{ severity: 'suggest', point: '长文件里的问题', line: 250 }],
+    evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
+    suggestions: [],
+  }, {
+    results: [{ index: 1, confidence: 85, point: '长文件里的问题', line: 250 }],
+    extraIssues: [],
+  });
+  const plugin = await setup({
+    fetch: fetchHandler,
+    llm: (options) => {
+      prompts.push(promptTextOf(options));
+      return answers(options);
+    },
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    assert.match(prompts[1], /前 200 行（共 300 行）/);
+  } finally {
+    await plugin.dispose();
+  }
+});

@@ -1088,25 +1088,46 @@ export function apply(ctx, config) {
     return `${need.kind} ${target}${need.reason === '' ? '' : `（${need.reason}）`}`;
   }
 
-  /** Around the first symbol occurrence when there is one, else the file's head. */
+  /**
+   * Around the first symbol occurrence when there is one, else the file's head. The note
+   * states which lines were shown: a verifier that sees only part of a file must know it,
+   * or it will report "this file lacks X" from a truncated view.
+   */
   function sliceEvidence(content, symbol, maxChars) {
     const text = String(content ?? '');
-    let chunk = text;
+    const lines = text.split('\n');
+    const total = lines.length;
+    let start = 0;
+    let end = total;
+    let note = '';
     if (symbol !== '') {
       const at = text.indexOf(symbol);
       if (at !== -1) {
-        const lines = text.split('\n');
         const lineIndex = text.slice(0, at).split('\n').length - 1;
-        chunk = lines.slice(Math.max(0, lineIndex - 40), Math.min(lines.length, lineIndex + 41)).join('\n');
+        start = Math.max(0, lineIndex - 40);
+        end = Math.min(total, lineIndex + 41);
+        note = `第 ${start + 1}–${end} 行（共 ${total} 行）`;
+      } else {
+        end = Math.min(total, 200);
+        note = `未找到 ${symbol}，显示前 ${end} 行（共 ${total} 行）`;
       }
+    } else if (total > 200) {
+      end = 200;
+      note = `前 ${end} 行（共 ${total} 行）`;
     }
-    if (chunk.length <= maxChars) return chunk;
-    return `${chunk.slice(0, maxChars)}\n…（已截断）`;
+    let chunk = lines.slice(start, end).join('\n');
+    if (chunk.length > maxChars) {
+      chunk = `${chunk.slice(0, maxChars)}\n…（已按字符上限截断）`;
+      note = note === '' ? '内容超过字符上限，已截断' : `${note}，且超过字符上限已截断`;
+    }
+    return { text: chunk, note };
   }
 
   function evidenceBlock(index, need, filePath, content, maxChars) {
     const meta = [need.kind, need.symbol === '' ? '' : `symbol=${need.symbol}`].filter((item) => item !== '').join(' · ');
-    return `## 证据 ${index}：${filePath}（${meta}）\n\n\`\`\`\n${sliceEvidence(content, need.symbol, maxChars)}\n\`\`\``;
+    const sliced = sliceEvidence(content, need.symbol, maxChars);
+    const scope = sliced.note === '' ? '' : `；${sliced.note}`;
+    return `## 证据 ${index}：${filePath}（${meta}${scope}）\n\n\`\`\`\n${sliced.text}\n\`\`\``;
   }
 
   /**
@@ -1134,24 +1155,26 @@ export function apply(ctx, config) {
         missing.push(`${describeNeed(need)}：没有可读取的文件路径`);
         continue;
       }
-      let settled = false;
+      let covered = false;
       for (const candidate of candidates) {
+        // An already-used file still covers this need, but later candidates may offer a
+        // better match, so keep trying instead of stopping at the first duplicate.
         if (used.has(candidate)) {
-          settled = true;
-          break;
+          covered = true;
+          continue;
         }
         try {
           const content = await ensureFileContent(record, candidate);
           index += 1;
           blocks.push(evidenceBlock(index, need, candidate, content.content, maxChars));
           used.add(candidate);
-          settled = true;
+          covered = true;
           break;
         } catch (error) {
           console.warn('[pr-review] 读取证据失败:', candidate, error);
         }
       }
-      if (!settled) missing.push(`${describeNeed(need)}：无法读取 ${candidates[0]}`);
+      if (!covered) missing.push(`${describeNeed(need)}：无法读取 ${candidates[0]}`);
     }
     return { blocks: blocks.join('\n\n'), missing };
   }
@@ -1420,16 +1443,12 @@ export function apply(ctx, config) {
     return { raw: retried, parsed: extractJson(retried) };
   }
 
-  /** A report answer is usable only when it carries the display fields the panel renders. */
-  function reportAnswerUsable(value) {
-    if (value === null || typeof value !== 'object') return false;
-    const summary = typeof value.summary === 'string' ? value.summary.trim() : '';
-    const concerns = Array.isArray(value.concerns) ? value.concerns : [];
-    return summary !== '' || concerns.length > 0;
-  }
-
-  /** A file analysis is usable only when it explains the file. */
-  function explanationAnswerUsable(value) {
+  /**
+   * Both the report and the per-file prompt require a summary or at least one candidate
+   * concern; an answer with neither is a stub, not a review. Shared so the two paths cannot
+   * drift apart.
+   */
+  function answerHasContent(value) {
     if (value === null || typeof value !== 'object') return false;
     const summary = typeof value.summary === 'string' ? value.summary.trim() : '';
     const concerns = Array.isArray(value.concerns) ? value.concerns : [];
@@ -1470,7 +1489,7 @@ export function apply(ctx, config) {
     const prompt = buildReportPrompt(pull, record.files, record.diffFiles, settings);
     let answer;
     try {
-      answer = await callModelJson(prompt, undefined, reportAnswerUsable);
+      answer = await callModelJson(prompt, undefined, answerHasContent);
     } catch (error) {
       record.status = 'error';
       record.error = error instanceof Error ? error.message : String(error);
@@ -1480,7 +1499,7 @@ export function apply(ctx, config) {
       return;
     }
     const parsed = answer.parsed;
-    if (parsed === null || !reportAnswerUsable(parsed)) {
+    if (parsed === null || !answerHasContent(parsed)) {
       record.status = 'error';
       record.error = `模型没有返回完整的报告 JSON。原始输出：${answer.raw.slice(0, 400)}`;
       record.finishedAt = Date.now();
@@ -1594,12 +1613,12 @@ export function apply(ctx, config) {
     );
     if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
-    const answer = await callModelJson(prompt, signal, explanationAnswerUsable);
+    const answer = await callModelJson(prompt, signal, answerHasContent);
     // The round can switch while the model answers; drop the answer before parsing, so a
     // late malformed reply is never reported as a failure of the round that replaced it.
     if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     const parsed = answer.parsed;
-    if (parsed === null || !explanationAnswerUsable(parsed)) {
+    if (parsed === null || !answerHasContent(parsed)) {
       throw new Error(`模型没有返回完整的分析 JSON。原始输出：${answer.raw.slice(0, 400)}`);
     }
     const concerns = normalizeConcerns(parsed.concerns);

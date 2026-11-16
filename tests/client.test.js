@@ -2664,3 +2664,28 @@ test('the overview no longer renders a reading-order section', () => {
   assert.doesNotMatch(textOnly, /这是排序理由不该出现在总览/);
 });
 
+test('malformed unverified entries are dropped instead of leaking into the panel', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const { textOnly } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t: translator(parts),
+    filePath: 'src/a.js',
+    explanation: {
+      status: 'done',
+      explanation: {
+        verdict: 'suggest',
+        summary: '摘要',
+        logic: '',
+        changes: '',
+        issues: [],
+        unverified: [null, {}, { point: '   ' }, { point: '有效疑点', missing: null }],
+        suggestions: [],
+      },
+    },
+    onExplain: () => {},
+  }));
+  assert.match(textOnly, /有效疑点/);
+  assert.doesNotMatch(textOnly, /undefined/);
+  assert.doesNotMatch(textOnly, /缺少证据/);
+});
+

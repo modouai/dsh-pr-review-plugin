@@ -363,7 +363,9 @@ function verifyPromptBody(header, concerns, evidence, missing, language) {
     '- 80-100：证据确认问题存在，或高置信度会在实践中命中；写入 results，并给出最终的 severity、point、line。',
     '- 25-79：只能部分验证；写入 results 并在 missing 里说明还缺哪份证据。',
     '- 0-24：经不起推敲、属于既有问题或误报；写入 results 并给低分，不要写成高分。',
-    '每条候选都必须返回一条 result，index 用上面列表的编号（从 1 开始）。',
+    '每条候选都必须返回一条 result，index 用上面列表的编号（从 1 开始）；index 越界或缺失的结果会被丢弃。',
+    '证据块可能只显示文件的一部分（标题里标注了行范围）。只看到片段时，不要断言文件里不存在某段内容；需要完整文件才能判断的，按未验证处理。',
+    '如果 point 里出现「无法确认 / 无法核实 / 证据不足 / 证据被截断」这类措辞，confidence 必须低于 80，否则该条会被降级为未验证项。',
     '只看候选问题与证据，不要引用第一轮的推理，也不要重新审查整个文件。',
     '如果证据里发现了新的、可确认的问题，写进 extraIssues，带上 confidence 并确保能引用证据中的代码；否则不要输出。',
     '规范类问题必须引用规范原文（如「CLAUDE.md 要求……」），没有原文就按未验证处理。',
@@ -605,7 +607,7 @@ export function buildConcludePrompt(pull, report, explanations, currentConclusio
   }
   lines.push(
     '',
-    '输出要求：沿用上一轮条目的 id（未变化的条目必须复用原 id）；人工锁定 id 必须原样保留；新增条目不要编造 id；已修复的旧条目可以不再输出。',
+    '输出要求：沿用上一轮条目的 id（未变化的条目必须复用原 id）；人工锁定 id 必须原样保留；新增条目不要编造 id；只有本次逐文件分析或 diff 明确表明问题已消失时，才可以不输出旧条目——无法确认是否修复时必须保留。',
     'line 为 PR head 新文件行号，可选：填整数（未知填 0）；文件路径必须与变更文件清单一致。',
     '请输出严格 JSON，作为合并前的最终审查结论：',
     '{',
@@ -659,6 +661,17 @@ export function normalizeUnverified(raw) {
     .filter((item) => item.point !== '');
 }
 
+/** Confidence thresholds shared by the candidate and extra-issue paths. */
+export const CONFIDENCE_FINDING = 80;
+export const CONFIDENCE_UNVERIFIED = 25;
+
+/** Wording that means the model itself did not verify the claim, whatever score it gave. */
+const DOUBT_PATTERNS = [/无法确认/, /无法核实/, /无法判断/, /未能确认/, /证据不足/, /证据被截断/, /不足以确认/, /不确定/];
+
+function selfReportedDoubt(point) {
+  return DOUBT_PATTERNS.some((pattern) => pattern.test(point));
+}
+
 /**
  * Turn the verifier's confidence scores into publishable findings and unverified notes.
  * 80+ is a finding, 25-79 is kept as an unverified note, below 25 is a false positive.
@@ -707,14 +720,17 @@ export function partitionVerdicts(raw, concerns) {
     const confidence = typeof item.confidence === 'number' && Number.isFinite(item.confidence)
       ? Math.max(0, Math.min(100, item.confidence))
       : 0;
-    if (confidence >= 80) {
+    // A high score cannot override the model's own wording: "I could not confirm" is an
+    // unverified note even if it also said 90.
+    const doubt = selfReportedDoubt(point);
+    if (confidence >= CONFIDENCE_FINDING && !doubt) {
       addIssue({ ...item, point }, concern);
-    } else if (confidence >= 25) {
+    } else if (confidence >= CONFIDENCE_UNVERIFIED || doubt) {
       unverified.push({
         point,
         missing: typeof item.missing === 'string' && item.missing.trim() !== ''
           ? item.missing.trim()
-          : '证据不足以确认',
+          : (doubt ? '模型自述证据不足' : '证据不足以确认'),
       });
     } else {
       dropped += 1;
@@ -726,16 +742,17 @@ export function partitionVerdicts(raw, concerns) {
     // a model that omits the score still gets the benefit of the doubt.
     const confidence = typeof item.confidence === 'number' && Number.isFinite(item.confidence)
       ? Math.max(0, Math.min(100, item.confidence))
-      : 80;
+      : CONFIDENCE_FINDING;
     const point = typeof item.point === 'string' ? item.point.trim() : '';
     if (point === '') {
       dropped += 1;
       continue;
     }
-    if (confidence >= 80) {
+    const doubt = selfReportedDoubt(point);
+    if (confidence >= CONFIDENCE_FINDING && !doubt) {
       addIssue(item, null);
-    } else if (confidence >= 25) {
-      unverified.push({ point, missing: '证据不足以确认' });
+    } else if (confidence >= CONFIDENCE_UNVERIFIED || doubt) {
+      unverified.push({ point, missing: doubt ? '模型自述证据不足' : '证据不足以确认' });
     } else {
       dropped += 1;
     }

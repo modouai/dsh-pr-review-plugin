@@ -796,3 +796,30 @@ test('the review framework states the exclusion list and the call-chain rule', (
   assert.match(system, /调用链/);
   assert.match(system, /evidenceNeeds/);
 });
+
+test('a self-reported doubt is never a finding, whatever the score', () => {
+  const { issues, unverified, dropped } = partitionVerdicts({
+    results: [
+      { index: 1, confidence: 95, point: '无法确认该调用方是否兼容' },
+      { index: 2, confidence: 95, point: '缺测试' },
+    ],
+    extraIssues: [
+      { confidence: 95, point: '证据不足，无法判断' },
+      { confidence: 10, point: '低置信' },
+      { point: '缺 confidence 但引用证据' },
+    ],
+  }, [
+    { severity: 'suggest', file: 'a.js', point: 'A', line: 0 },
+    { severity: 'suggest', file: 'b.js', point: 'B', line: 0 },
+  ]);
+  assert.deepEqual(issues.map((item) => item.point), ['缺测试', '缺 confidence 但引用证据']);
+  assert.deepEqual(unverified.map((item) => item.point), ['无法确认该调用方是否兼容', '证据不足，无法判断']);
+  assert.equal(dropped, 1);
+});
+
+test('normalizeEvidenceNeeds accepts every documented kind', () => {
+  for (const kind of ['callers', 'definition', 'callee', 'schema', 'test', 'file']) {
+    const [need] = normalizeEvidenceNeeds([{ kind, path: 'a.js' }]);
+    assert.equal(need.kind, kind);
+  }
+});

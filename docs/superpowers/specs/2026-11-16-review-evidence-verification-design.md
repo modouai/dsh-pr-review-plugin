@@ -42,20 +42,22 @@ evidenceNeeds: [{ concern: number /* 1-based */, kind, path?, symbol?, reason? }
 // kind: 'callers' | 'definition' | 'callee' | 'schema' | 'test' | 'file'
 
 // 第二轮输出
-results: [{ index: number /* 对应 concerns 下标，0-based */, confidence: 0-100, severity, point, line }]
-extraIssues: [{ severity, point, line }]   // 取证过程中新发现且已验证的问题
+results: [{ index: number /* 对应 concerns 序号，1-based，与 evidenceNeeds.concern 同基准 */, confidence: 0-100, severity, point, line }]
+extraIssues: [{ confidence: 0-100, severity, point, line }]   // 取证过程中新发现的问题
 ```
 
 ### 3.3 分档规则（纯函数，可单测）
 
 ```js
-export function partitionVerdicts(results) // → { issues, unverified }
+export const CONFIDENCE_FINDING = 80;
+export const CONFIDENCE_UNVERIFIED = 25;
+export function partitionVerdicts(raw, concerns) // → { issues, unverified, dropped }
 ```
 
-- `confidence >= 80` 且 `point` 非空 → `issues`
-- `25 <= confidence < 80` → `unverified`，`missing` 取模型给出的 `missing`，缺省为「证据不足以确认」
-- `confidence < 25` → 丢弃
-- `extraIssues` 一律进 `issues`（它们在第二轮由取证触发，视为已验证）
+- `confidence >= 80` 且 `point` 非空、且 `point` 不含自述不确定措辞 → `issues`
+- `25 <= confidence < 80`，或 `point` 自述「无法确认 / 证据不足」→ `unverified`，`missing` 取模型给出的 `missing`，缺省为「证据不足以确认」
+- `confidence < 25` → 丢弃并计入 `dropped`
+- `extraIssues` 同样走置信度分档（缺省按 `CONFIDENCE_FINDING`，因为它在看证据时产生），不再无条件进入 `issues`
 
 ## 4. 两轮流程
 
@@ -68,6 +70,7 @@ export function partitionVerdicts(results) // → { issues, unverified }
    - `buildReportVerifyPrompt(pull, concerns, blocks, missing, { language })` → `results / extraIssues`
    - `partitionVerdicts` → `risks`、`unverified`
 4. `verdict` 按最终 `risks` 修正：存在 block → `block`；否则保留第一轮取值。
+5. 复审失败时（模型错误或 JSON 无法解析）：`risks = []`，所有 concerns 进 `unverified`，`missing = '复审未完成：<原因>'`，`console.warn` 记录；报告其余字段照常保存，与逐文件阶段的降级一致。
 
 ### 4.2 逐文件阶段（`explainFileUncached`）
 
@@ -97,6 +100,8 @@ async function collectEvidence(record, needs, settings) // → { blocks: string,
 3. 否则若 need 指向 diff 中出现的 import/require 路径 → 使用；
 4. 都不满足 → 记入 `missing`。
 
+本地工作区不可用时（origin 解析失败、非 git 目录、remote 不可识别），跳过第 2 步，退回模型声明与 diff 路径；仍找不到的记入 `missing`，不抛错。
+
 本地工作区可用性的判定：`state.workspaceCwd` 非空，且该目录经 `git remote get-url origin` 解析出的 `platform:repo` 与 `provider` 一致。`state.workspaceCwd` 在 `/context` 路由成功激活仓库时写入。
 
 ### 5.2 取正文
@@ -107,6 +112,7 @@ async function collectEvidence(record, needs, settings) // → { blocks: string,
 
 - need 带 `symbol`：从正文定位首次出现，取前后各 40 行；
 - 否则取前 200 行；
+- 证据块标题必须标注实际显示的行范围（如「第 40–120 行（共 300 行）」）或字符截断说明，让裁判知道自己在看片段；
 - 单文件上限 `settings.evidenceMaxChars`（默认 6000）；
 - 每轮最多 `settings.evidenceMaxFiles`（默认 6）个文件；超出时按 need 顺序截断并记入 `missing`。
 
@@ -152,7 +158,7 @@ async function collectEvidence(record, needs, settings) // → { blocks: string,
 }
 ```
 
-`concerns` 每条必须关联至少一个 `evidenceNeeds`（除非该问题仅凭 diff 即可确认——此时直接给 `evidenceNeeds` 空数组并在 `reason` 写「diff 自证」）。无问题时两个数组均为 `[]`。
+`concerns` 每条必须关联至少一个 `evidenceNeeds`；仅凭 diff 即可确认时，给一个 `kind=file`、`path` 指向该改动文件本身的 need（宿主会读取该文件作为证据），不要留空。无问题时两个数组均为 `[]`。
 
 ### 6.3 `buildExplainPrompt`
 
@@ -165,11 +171,11 @@ async function collectEvidence(record, needs, settings) // → { blocks: string,
 ```json
 {
   "results": [{ "index": 0, "confidence": 85, "severity": "block | suggest", "point": "...", "line": 12, "missing": "" }],
-  "extraIssues": [{ "severity": "suggest", "point": "...", "line": 0 }]
+  "extraIssues": [{ "confidence": 90, "severity": "suggest", "point": "...", "line": 0 }]
 }
 ```
 
-角色设定为「裁判」：只看候选与证据，不得引用第一轮的推理；规范类问题必须引用规范原文。`extraIssues` 必须引用某个证据块中的代码，否则不得输出。`maxTokens` 8000，`timeoutMs` 300 000。
+角色设定为「裁判」：只看候选与证据，不得引用第一轮的推理；规范类问题必须引用规范原文。`extraIssues` 必须引用某个证据块中的代码，且同样给出 `confidence`（按 3.3 分档），否则不得输出。证据块只显示文件片段时，不得据此断言文件里不存在某段内容。`maxTokens` 8000，`timeoutMs` 300 000。
 
 ## 7. 配置
 
