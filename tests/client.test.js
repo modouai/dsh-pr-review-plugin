@@ -2607,3 +2607,15 @@ test('the zh and en tables expose the same keys', () => {
   assert.deepEqual(Object.keys(DICT.zh).sort(), Object.keys(DICT.en).sort());
 });
 
+test('the overview names the commit under review', () => {
+  const client = loadClient();
+  const review = makeReview({});
+  review.headSha = '5233a50abcdef0123456789';
+  const { textOnly } = renderOverview(client, review);
+  assert.match(textOnly, /commit 5233a50/);
+
+  const missing = makeReview({});
+  missing.headSha = '';
+  assert.doesNotMatch(renderOverview(client, missing).textOnly, /commit /);
+});
+

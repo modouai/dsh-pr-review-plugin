@@ -14,7 +14,7 @@ window.__ModuleLoader__.load({
       const {
         Btn, FileRow, VerdictPill, isAnalyzing, fill, text, suggestionText, cleanStepTitle,
         parseUnifiedDiff, hunkRange, mapWalkthroughToHunks, publishedOfRound, roundsOf,
-        staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge,
+        staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge, shortSha,
       } = core;
       const {
         OrderList, RiskList, RoundMeta, DeltaBlock, VersionSelector,
@@ -618,7 +618,7 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'prr-subtle', style: { marginBottom: '8px' } },
-              `${text(pull.author)} · ${text(pull.headRef)} → ${text(pull.baseRef)} · +${pull.additions ?? 0} / -${pull.deletions ?? 0} · ${pull.changedFiles ?? 0}`,
+              `${text(pull.author)} · ${text(pull.headRef)} → ${text(pull.baseRef)} · +${pull.additions ?? 0} / -${pull.deletions ?? 0} · ${pull.changedFiles ?? 0}${typeof review.headSha === 'string' && review.headSha !== '' ? ` · commit ${shortSha(review.headSha)}` : ''}`,
             ),
             h('div', { className: 'prr-text' }, report.summary),
           ),
