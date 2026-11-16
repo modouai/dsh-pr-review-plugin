@@ -784,6 +784,7 @@ export function normalizeReportDraft(raw, fallbackOrder) {
  */
 export function normalizeReport(raw, fallbackOrder) {
   const draft = normalizeReportDraft(raw, fallbackOrder);
+  const countOf = (value) => (typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0);
   const risks = Array.isArray(raw?.risks)
     ? raw.risks.filter((risk) => risk !== null && typeof risk === 'object').map((risk) => ({
         severity: risk.severity === 'block' ? 'block' : 'suggest',
@@ -796,6 +797,10 @@ export function normalizeReport(raw, fallbackOrder) {
     summary: draft.summary,
     risks,
     unverified: normalizeUnverified(raw?.unverified),
+    // Triage volume and how many candidates the verifier threw away: the panel uses these
+    // to tell "nothing was raised" from "everything raised was judged a false positive".
+    raised: countOf(raw?.raised),
+    discarded: countOf(raw?.discarded),
     order: draft.order,
     focus: draft.focus,
   };

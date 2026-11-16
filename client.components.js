@@ -247,7 +247,17 @@ window.__ModuleLoader__.load({
 
       function RiskList(props) {
         const list = props.risks ?? [];
-        if (list.length === 0) return h('div', { className: 'prr-subtle' }, props.t('noInitialRisks'));
+        if (list.length === 0) {
+          // An empty list has three different meanings; say which one so "no risks found"
+          // cannot hide triage work that the verifier threw away.
+          const raised = typeof props.raised === 'number' ? props.raised : 0;
+          const discarded = typeof props.discarded === 'number' ? props.discarded : 0;
+          const unverifiedCount = typeof props.unverifiedCount === 'number' ? props.unverifiedCount : 0;
+          const label = raised > 0
+            ? fill(props.t('noInitialRisksDetail'), { raised, unverified: unverifiedCount, discarded })
+            : props.t('noInitialRisks');
+          return h('div', { className: 'prr-subtle' }, label);
+        }
         return h(
           'div',
           null,

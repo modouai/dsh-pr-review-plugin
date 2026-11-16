@@ -623,7 +623,14 @@ window.__ModuleLoader__.load({
             h('div', { className: 'prr-text' }, report.summary),
           ),
           h('div', { className: 'prr-h2' }, t('initialRisks')),
-          h('div', { className: 'prr-card' }, h(RiskList, { risks: report.risks, t, onOpenFile: props.onOpenFile })),
+          h('div', { className: 'prr-card' }, h(RiskList, {
+            risks: report.risks,
+            raised: report.raised ?? 0,
+            discarded: report.discarded ?? 0,
+            unverifiedCount: (report.unverified ?? []).length,
+            t,
+            onOpenFile: props.onOpenFile,
+          })),
           (report.unverified ?? []).length === 0
             ? null
             : h(

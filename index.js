@@ -1492,6 +1492,7 @@ export function apply(ctx, config) {
     const draft = normalizeReportDraft(parsed, order);
     let risks = [];
     let unverified = [];
+    let discarded = 0;
     if (draft.concerns.length > 0) {
       if (settings.evidenceVerify === false) {
         risks = draft.concerns.map((item) => ({ severity: item.severity, file: item.file, point: item.point }));
@@ -1505,13 +1506,21 @@ export function apply(ctx, config) {
         );
         risks = verdicts.issues.map((item) => ({ severity: item.severity, file: item.file, point: item.point }));
         unverified = verdicts.unverified;
+        discarded = verdicts.dropped ?? 0;
       }
     }
     // A confirmed blocker outranks the triage verdict; a confirmed finding never leaves a "pass".
     const verdict = risks.some((risk) => risk.severity === 'block')
       ? 'block'
       : (risks.length > 0 && draft.verdict === 'pass' ? 'suggest' : draft.verdict);
-    record.report = normalizeReport({ ...draft, verdict, risks, unverified }, order);
+    record.report = normalizeReport({
+      ...draft,
+      verdict,
+      risks,
+      unverified,
+      raised: draft.concerns.length,
+      discarded,
+    }, order);
     record.reportUpdatedAt = 0;
     record.status = 'done';
     record.finishedAt = Date.now();

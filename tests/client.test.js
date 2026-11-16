@@ -2628,3 +2628,22 @@ test('an empty risk list says so instead of showing a dash', () => {
   assert.match(textOnly, /未发现初筛风险/);
 });
 
+test('an empty risk list explains whether nothing was raised or everything was filtered', () => {
+  const client = loadClient();
+  const review = makeReview({
+    report: {
+      verdict: 'pass',
+      summary: '报告',
+      risks: [],
+      unverified: [],
+      raised: 3,
+      discarded: 2,
+      order: [],
+      focus: {},
+    },
+  });
+  const { textOnly } = renderOverview(client, review);
+  assert.match(textOnly, /初筛 3 条疑点/);
+  assert.match(textOnly, /2 条判定为误报/);
+});
+

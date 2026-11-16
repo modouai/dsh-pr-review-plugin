@@ -2782,3 +2782,30 @@ test('a stub report JSON is retried, then fails the round instead of showing an 
     await plugin.dispose();
   }
 });
+
+test('the report records how many triage concerns the verifier discarded', async () => {
+  const plugin = await setup({
+    fetch: roundReviewFetch,
+    reviews: { 1: unanalyzedReview() },
+    llm: llmTriageThenVerify({
+      verdict: 'suggest',
+      summary: '报告',
+      concerns: [{ severity: 'suggest', file: 'src/a.js', point: '可能是误报' }],
+      evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
+      order: [],
+      focus: [],
+    }, {
+      results: [{ index: 1, confidence: 10, point: '可能是误报' }],
+      extraIssues: [],
+    }),
+  });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const review = await plugin.waitFor(1, (current) => current.status === 'done' && current.report !== null);
+    assert.deepEqual(review.report.risks, []);
+    assert.equal(review.report.raised, 1);
+    assert.equal(review.report.discarded, 1);
+  } finally {
+    await plugin.dispose();
+  }
+});

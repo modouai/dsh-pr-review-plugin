@@ -751,8 +751,17 @@ test('partitionVerdicts dedupes confirmed points and tolerates junk', () => {
 });
 
 test('normalizeReport and normalizeExplanation keep unverified notes', () => {
-  const report = normalizeReport({ verdict: 'suggest', summary: 's', risks: [], unverified: [{ point: 'x', missing: 'y' }] }, []);
+  const report = normalizeReport({
+    verdict: 'suggest',
+    summary: 's',
+    risks: [],
+    unverified: [{ point: 'x', missing: 'y' }],
+    raised: 3,
+    discarded: 2,
+  }, []);
   assert.deepEqual(report.unverified, [{ point: 'x', missing: 'y' }]);
+  assert.equal(report.raised, 3);
+  assert.equal(report.discarded, 2);
   const explanation = normalizeExplanation({ issues: [], unverified: [{ point: 'z', missing: '' }] });
   assert.deepEqual(explanation.unverified, [{ point: 'z', missing: '' }]);
 });
