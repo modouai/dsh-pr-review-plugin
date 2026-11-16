@@ -12,8 +12,10 @@ import {
   buildCommentMarkdown,
   buildConcludePrompt,
   buildExplainPrompt,
+  buildExplainVerifyPrompt,
   buildFeedbackPrompt,
   buildReportPrompt,
+  buildReportVerifyPrompt,
   calibrateVerdict,
   callModel,
   commentItems,
@@ -22,8 +24,14 @@ import {
   extractJson,
   itemId,
   mergeConclusion,
+  normalizeConcerns,
   normalizeConclusion,
+  normalizeEvidenceNeeds,
+  normalizeExplanation,
+  normalizeReport,
+  normalizeUnverified,
   normalizeVerdict,
+  partitionVerdicts,
   parseFeedbackReply,
   platformLabel,
   textSimilarity,
@@ -562,10 +570,13 @@ test('the report prompt keeps the output contract even though its wording change
     [], new Map(), { maxDiffCharsPerFile: 1000 },
   );
   const text = prompt.messages[0].content[0].text;
-  for (const field of ['"verdict"', '"summary"', '"risks"', '"order"', '"focus"']) {
+  for (const field of ['"verdict"', '"summary"', '"concerns"', '"evidenceNeeds"', '"order"', '"focus"']) {
     assert.ok(text.includes(field), `missing ${field}`);
   }
   assert.match(text, /block \| suggest \| pass/);
+  // The old "uncertain" escape hatch is gone: unverified points belong in their own field.
+  assert.ok(!text.includes('（不确定：'));
+  assert.ok(!prompt.system.includes('（不确定：'));
 });
 
 test('the feedback prompt uses the compact system, not the full framework', () => {
@@ -679,4 +690,99 @@ test('index.js re-exports buildCommentMarkdown from llm.js', async () => {
   const actual = index.buildCommentMarkdown(conclusion, { number: 1, title: 't' }, 1, { language: 'zh' });
   // The timestamp differs between calls; compare the stable prefix.
   assert.equal(actual.split(' · ')[0], expected.split(' · ')[0]);
+});
+
+test('normalizeConcerns / normalizeEvidenceNeeds drop malformed entries', () => {
+  assert.deepEqual(
+    normalizeConcerns([{ point: '  p  ', severity: 'block', file: 'a.js' }, { point: '   ' }, null]),
+    [{ severity: 'block', file: 'a.js', point: 'p', line: 0 }],
+  );
+  assert.deepEqual(
+    normalizeEvidenceNeeds([
+      { concern: 2, kind: 'callers', path: '  x.js  ' },
+      { kind: 'not-a-kind' },
+      { concern: 1, kind: 'definition', symbol: ' startReview ' },
+    ]),
+    [
+      { concern: 2, kind: 'callers', path: 'x.js', symbol: '', reason: '' },
+      { concern: 1, kind: 'definition', path: '', symbol: 'startReview', reason: '' },
+    ],
+  );
+});
+
+test('normalizeUnverified keeps only points with text', () => {
+  assert.deepEqual(
+    normalizeUnverified([{ point: ' a ', missing: ' m ' }, { point: '   ' }, null]),
+    [{ point: 'a', missing: 'm' }],
+  );
+});
+
+test('partitionVerdicts: 80 is a finding, 25-79 is unverified, below 25 is dropped', () => {
+  const concerns = [
+    { severity: 'block', file: 'a.js', point: 'A', line: 3 },
+    { severity: 'suggest', file: 'b.js', point: 'B', line: 0 },
+    { severity: 'suggest', file: 'c.js', point: 'C', line: 1 },
+  ];
+  const raw = {
+    results: [
+      { index: 0, confidence: 80, severity: 'block', point: 'A2', line: 5 },
+      { index: 1, confidence: 79, point: 'B2', missing: '缺调用方' },
+      { index: 2, confidence: 24, point: 'C2' },
+    ],
+    extraIssues: [{ severity: 'suggest', point: 'D', line: 9 }],
+  };
+  const { issues, unverified } = partitionVerdicts(raw, concerns);
+  assert.deepEqual(issues.map((item) => item.point), ['A2', 'D']);
+  // Missing fields fall back to the candidate the verifier was scoring.
+  assert.equal(issues[0].file, 'a.js');
+  assert.equal(issues[0].severity, 'block');
+  assert.deepEqual(unverified, [{ point: 'B2', missing: '缺调用方' }]);
+});
+
+test('partitionVerdicts dedupes confirmed points and tolerates junk', () => {
+  const concerns = [{ severity: 'suggest', file: '', point: 'same', line: 0 }];
+  const { issues, unverified } = partitionVerdicts({
+    results: [{ index: 0, confidence: 90 }, { index: 9, confidence: 90, point: 'same' }],
+    extraIssues: [{ point: 'same' }, null, { point: '   ' }],
+  }, concerns);
+  assert.deepEqual(issues.map((item) => item.point), ['same']);
+  assert.deepEqual(unverified, []);
+});
+
+test('normalizeReport and normalizeExplanation keep unverified notes', () => {
+  const report = normalizeReport({ verdict: 'suggest', summary: 's', risks: [], unverified: [{ point: 'x', missing: 'y' }] }, []);
+  assert.deepEqual(report.unverified, [{ point: 'x', missing: 'y' }]);
+  const explanation = normalizeExplanation({ issues: [], unverified: [{ point: 'z', missing: '' }] });
+  assert.deepEqual(explanation.unverified, [{ point: 'z', missing: '' }]);
+});
+
+test('the verifier prompt carries candidates and evidence, not a second review', () => {
+  const prompt = buildExplainVerifyPrompt(
+    { repo: 'group/project', number: 1, title: 't', platform: 'github' },
+    { path: 'a.js', status: 'changed', additions: 1, deletions: 2 },
+    [{ severity: 'block', file: 'a.js', point: 'A', line: 3 }],
+    '## 证据 1：x.js（callers）\n\n```\nstartReview()\n```',
+    ['callers y.js：无法读取'],
+    { language: 'zh' },
+  );
+  const text = prompt.messages[0].content[0].text;
+  assert.match(prompt.system, /裁判/);
+  assert.match(text, /## 候选问题/);
+  assert.match(text, /0\. \[block\] \[a\.js:3\] A/);
+  assert.match(text, /## 证据 1/);
+  assert.match(text, /无法读取/);
+  assert.doesNotMatch(text, /walkthrough/);
+  assert.doesNotMatch(prompt.system, /六个维度/);
+  assert.match(buildReportVerifyPrompt({ repo: 'r', number: 2, title: 't' }, [], '', [], { language: 'en' }).system, /English/);
+});
+
+test('the review framework states the exclusion list and the call-chain rule', () => {
+  const system = buildReportPrompt(
+    { repo: 'r', number: 1, title: 't', body: '', author: '', headRef: 'h', baseRef: 'b', changedFiles: 0, additions: 0, deletions: 0 },
+    [], new Map(), {},
+  ).system;
+  assert.match(system, /误报排除/);
+  assert.match(system, /本次未修改行/);
+  assert.match(system, /调用链/);
+  assert.match(system, /evidenceNeeds/);
 });

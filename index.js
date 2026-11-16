@@ -39,15 +39,21 @@ import {
   parseChatReply,
   parseFeedbackReply,
   buildExplainPrompt,
+  buildExplainVerifyPrompt,
   buildReportPrompt,
+  buildReportVerifyPrompt,
   callModel,
   extractJson,
   itemId,
   mergeConclusion,
+  normalizeConcerns,
   normalizeConclusion,
+  normalizeEvidenceNeeds,
   normalizeExplanation,
   normalizeReport,
+  normalizeReportDraft,
   normalizeVerdict,
+  partitionVerdicts,
 } from './llm.js';
 
 /** Cordis function-plugin name. */
@@ -83,6 +89,11 @@ const DEFAULTS = {
   maxDiffCharsPerFile: 14000,
   commentLanguage: 'zh',
   autoReconclude: false,
+  // Two-pass review: triage proposes concerns, the host collects evidence, a verifier scores
+  // them. On by default (quality first); turn it off to spend one call per file as before.
+  evidenceVerify: true,
+  evidenceMaxFiles: 6,
+  evidenceMaxChars: 6000,
 };
 
 const MAX_BODY_BYTES = 64 * 1024;
@@ -113,6 +124,9 @@ export const Config = Schema.object({
   maxDiffCharsPerFile: Schema.number().min(1000).default(DEFAULTS.maxDiffCharsPerFile),
   commentLanguage: Schema.union(['zh', 'en']).default(DEFAULTS.commentLanguage),
   autoReconclude: Schema.boolean().default(DEFAULTS.autoReconclude),
+  evidenceVerify: Schema.boolean().default(DEFAULTS.evidenceVerify),
+  evidenceMaxFiles: Schema.number().min(1).max(20).default(DEFAULTS.evidenceMaxFiles),
+  evidenceMaxChars: Schema.number().min(500).default(DEFAULTS.evidenceMaxChars),
 });
 
 /** Stable tool failure codes: the tool registry keeps `error.code` for HarnessError only. */
@@ -533,6 +547,8 @@ export function apply(ctx, config) {
     cacheError: '',
     saveError: '',
     saveTimer: null,
+    // Last workspace directory that activated a repository; evidence lookup greps there.
+    workspaceCwd: '',
   };
 
   let cachePath = cacheFile(provider);
@@ -1024,6 +1040,160 @@ export function apply(ctx, config) {
     return result;
   }
 
+  // ---------- evidence for the verifier ----------
+
+  /** Run one git command in the workspace; evidence lookup only, so failures read as null. */
+  function runGit(cwd, args) {
+    return new Promise((resolve) => {
+      execFile('git', ['-C', cwd, ...args], { timeout: 5000, maxBuffer: 512 * 1024 }, (error, stdout) => {
+        resolve(error === null ? String(stdout) : null);
+      });
+    });
+  }
+
+  /**
+   * Workspace directory whose origin is the repository under review, or '' when unusable.
+   * The directory may be on another branch, so it only ever supplies candidate paths.
+   */
+  function evidenceWorkspace() {
+    const cwd = state.workspaceCwd;
+    if (typeof cwd !== 'string' || cwd === '') return '';
+    const known = repoByCwd.get(cwd);
+    if (known === undefined || known.supported !== true) return '';
+    return known.repo === provider.repo && known.platform === provider.platform ? cwd : '';
+  }
+
+  /** Candidate paths: files in the workspace that contain the symbol. */
+  async function grepWorkspaceSymbol(cwd, symbol, limit) {
+    const stdout = await runGit(cwd, ['grep', '-l', '-F', '-e', symbol]);
+    if (stdout === null) return [];
+    return stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '')
+      .slice(0, limit);
+  }
+
+  /** Fallback candidates: changed files whose diff mentions the symbol. */
+  function diffSymbolCandidates(record, symbol) {
+    const paths = [];
+    for (const [filePath, diff] of record.diffFiles ?? new Map()) {
+      if (typeof diff?.text === 'string' && diff.text.includes(symbol)) paths.push(filePath);
+    }
+    return paths.slice(0, 3);
+  }
+
+  function describeNeed(need) {
+    const target = need.path !== '' ? need.path : (need.symbol !== '' ? need.symbol : '?');
+    return `${need.kind} ${target}${need.reason === '' ? '' : `（${need.reason}）`}`;
+  }
+
+  /** Around the first symbol occurrence when there is one, else the file's head. */
+  function sliceEvidence(content, symbol, maxChars) {
+    const text = String(content ?? '');
+    let chunk = text;
+    if (symbol !== '') {
+      const at = text.indexOf(symbol);
+      if (at !== -1) {
+        const lines = text.split('\n');
+        const lineIndex = text.slice(0, at).split('\n').length - 1;
+        chunk = lines.slice(Math.max(0, lineIndex - 40), Math.min(lines.length, lineIndex + 41)).join('\n');
+      }
+    }
+    if (chunk.length <= maxChars) return chunk;
+    return `${chunk.slice(0, maxChars)}\n…（已截断）`;
+  }
+
+  function evidenceBlock(index, need, filePath, content, maxChars) {
+    const meta = [need.kind, need.symbol === '' ? '' : `symbol=${need.symbol}`].filter((item) => item !== '').join(' · ');
+    return `## 证据 ${index}：${filePath}（${meta}）\n\n\`\`\`\n${sliceEvidence(content, need.symbol, maxChars)}\n\`\`\``;
+  }
+
+  /**
+   * Fetch what the triage pass asked for. Local files only nominate candidates; the bytes in
+   * the prompt always come from the PR head, so a stale worktree can never turn into evidence.
+   */
+  async function collectEvidence(record, needs, maxFiles, maxChars) {
+    const blocks = [];
+    const missing = [];
+    const used = new Set();
+    const cwd = evidenceWorkspace();
+    let index = 0;
+    for (const need of needs) {
+      if (blocks.length >= maxFiles) {
+        missing.push(`${describeNeed(need)}：证据超过上限（${maxFiles} 个文件），未读取`);
+        continue;
+      }
+      const candidates = [];
+      if (need.path !== '') candidates.push(need.path);
+      if (need.symbol !== '') {
+        if (cwd !== '') candidates.push(...await grepWorkspaceSymbol(cwd, need.symbol, 3));
+        if (candidates.length === 0) candidates.push(...diffSymbolCandidates(record, need.symbol));
+      }
+      if (candidates.length === 0) {
+        missing.push(`${describeNeed(need)}：没有可读取的文件路径`);
+        continue;
+      }
+      let settled = false;
+      for (const candidate of candidates) {
+        if (used.has(candidate)) {
+          settled = true;
+          break;
+        }
+        try {
+          const content = await ensureFileContent(record, candidate);
+          index += 1;
+          blocks.push(evidenceBlock(index, need, candidate, content.content, maxChars));
+          used.add(candidate);
+          settled = true;
+          break;
+        } catch (error) {
+          console.warn('[pr-review] 读取证据失败:', candidate, error);
+        }
+      }
+      if (!settled) missing.push(`${describeNeed(need)}：无法读取 ${candidates[0]}`);
+    }
+    return { blocks: blocks.join('\n\n'), missing };
+  }
+
+  /**
+   * Score the triage pass's concerns against the evidence. A verifier failure never fails the
+   * review: the candidates become unverified notes instead of findings.
+   */
+  async function verifyConcerns(record, concerns, rawNeeds, buildPrompt, epoch) {
+    const needs = normalizeEvidenceNeeds(rawNeeds);
+    const evidence = await collectEvidence(
+      record,
+      needs,
+      settings.evidenceMaxFiles ?? DEFAULTS.evidenceMaxFiles,
+      settings.evidenceMaxChars ?? DEFAULTS.evidenceMaxChars,
+    );
+    if (epoch !== null && (record.analysisEpoch ?? 0) !== epoch) {
+      return { discarded: true, issues: [], unverified: [] };
+    }
+    let raw;
+    try {
+      raw = await callModel(ctx, settings, buildPrompt(evidence.blocks, evidence.missing));
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.warn('[pr-review] 复审调用失败，候选问题转入未验证项：', error);
+      return {
+        discarded: false,
+        issues: [],
+        unverified: concerns.map((item) => ({ point: item.point, missing: `复审未完成：${reason}` })),
+      };
+    }
+    const parsed = extractJson(raw);
+    if (parsed === null) {
+      return {
+        discarded: false,
+        issues: [],
+        unverified: concerns.map((item) => ({ point: item.point, missing: '复审未完成：模型没有返回可解析的 JSON' })),
+      };
+    }
+    return { discarded: false, ...partitionVerdicts(parsed, concerns) };
+  }
+
   // ---------- pull list ----------
 
   /**
@@ -1264,7 +1434,29 @@ export function apply(ctx, config) {
       return;
     }
     const order = Array.isArray(files) ? files.map((file) => file.path) : [];
-    record.report = normalizeReport(parsed, order);
+    const draft = normalizeReportDraft(parsed, order);
+    let risks = [];
+    let unverified = [];
+    if (draft.concerns.length > 0) {
+      if (settings.evidenceVerify === false) {
+        risks = draft.concerns.map((item) => ({ severity: item.severity, file: item.file, point: item.point }));
+      } else {
+        const verdicts = await verifyConcerns(
+          record,
+          draft.concerns,
+          parsed.evidenceNeeds,
+          (evidence, missing) => buildReportVerifyPrompt(pull, draft.concerns, evidence, missing, { language: commentLanguage() }),
+          null,
+        );
+        risks = verdicts.issues.map((item) => ({ severity: item.severity, file: item.file, point: item.point }));
+        unverified = verdicts.unverified;
+      }
+    }
+    // A confirmed blocker outranks the triage verdict; a confirmed finding never leaves a "pass".
+    const verdict = risks.some((risk) => risk.severity === 'block')
+      ? 'block'
+      : (risks.length > 0 && draft.verdict === 'pass' ? 'suggest' : draft.verdict);
+    record.report = normalizeReport({ ...draft, verdict, risks, unverified }, order);
     record.reportUpdatedAt = 0;
     record.status = 'done';
     record.finishedAt = Date.now();
@@ -1326,8 +1518,9 @@ export function apply(ctx, config) {
     } catch (error) {
       console.warn('[pr-review] 读取文件完整内容失败，讲解退化为仅 diff：', error);
     }
+    const pull = record.pull ?? { number, title: '', repo: provider.repo, platform: provider.platform };
     const prompt = buildExplainPrompt(
-      record.pull ?? { number, title: '', repo: provider.repo, platform: provider.platform },
+      pull,
       file,
       diffText,
       record.report,
@@ -1343,8 +1536,29 @@ export function apply(ctx, config) {
     if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     const parsed = extractJson(raw);
     if (parsed === null) throw new Error(`模型没有返回可解析的 JSON。原始输出：${raw.slice(0, 400)}`);
+    const concerns = normalizeConcerns(parsed.concerns);
+    let issues = [];
+    let unverified = [];
+    if (concerns.length > 0) {
+      if (settings.evidenceVerify === false) {
+        issues = concerns.map(({ severity, point, line }) => ({ severity, point, line }));
+      } else {
+        const verdicts = await verifyConcerns(
+          record,
+          concerns,
+          parsed.evidenceNeeds,
+          (evidence, missing) => buildExplainVerifyPrompt(pull, file, concerns, evidence, missing, { language: commentLanguage() }),
+          epoch,
+        );
+        if (verdicts.discarded) return { explanation: null, cached: false, discarded: true };
+        issues = verdicts.issues.map(({ severity, point, line }) => ({ severity, point, line }));
+        unverified = verdicts.unverified;
+      }
+    }
     const explanation = normalizeExplanation({
       ...parsed,
+      issues,
+      unverified,
       // A single missing verdict must not present as "pass".
       verdict: parsed.verdict ?? 'suggest',
     });
@@ -1686,6 +1900,8 @@ export function apply(ctx, config) {
         repo: info.repo,
         baseUrl: info.baseUrl,
       }));
+      // Only a workspace whose origin matches the active repository may seed evidence lookups.
+      state.workspaceCwd = typeof info.cwd === 'string' && info.repo === provider.repo ? info.cwd : '';
       sendJson(res, 200, {
         ok: true,
         supported: true,

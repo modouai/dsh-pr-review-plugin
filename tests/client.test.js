@@ -2536,3 +2536,68 @@ test('dragged columns are clamped to usable ranges and can be reset', () => {
   assert.equal(parts.clampColumnWidth('detail', 2000), 760);
 });
 
+// ---------- unverified notes (evidence verification) ----------
+
+test('the file detail breaks unverified points out of the findings', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const { textOnly, elements } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t: translator(parts),
+    filePath: 'src/a.js',
+    explanation: {
+      status: 'done',
+      explanation: {
+        verdict: 'suggest',
+        summary: '文件摘要',
+        logic: '',
+        changes: '',
+        issues: [{ severity: 'suggest', point: '已确认问题', line: 1 }],
+        unverified: [{ point: '可疑调用方', missing: '缺少 callers 证据' }],
+        suggestions: [],
+      },
+    },
+    onExplain: () => {},
+  }));
+
+  assert.match(textOnly, /审查意见/);
+  assert.match(textOnly, /已确认问题/);
+  assert.match(textOnly, /未验证项/);
+  assert.match(textOnly, /可疑调用方/);
+  assert.match(textOnly, /缺少证据：缺少 callers 证据/);
+  assert.ok(elements.some((node) => node.props.className === 'prr-card prr-unverified'));
+});
+
+test('no unverified notes means no unverified section', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const { textOnly } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t: translator(parts),
+    filePath: 'src/a.js',
+    explanation: {
+      status: 'done',
+      explanation: { verdict: 'pass', summary: '文件摘要', logic: '', changes: '', issues: [], suggestions: [] },
+    },
+    onExplain: () => {},
+  }));
+  assert.doesNotMatch(textOnly, /未验证项/);
+});
+
+test('the overview shows report unverified notes after the initial risks', () => {
+  const client = loadClient();
+  const review = makeReview({
+    report: {
+      verdict: 'suggest',
+      summary: '报告',
+      risks: [{ severity: 'suggest', file: 'src/a.js', point: '已确认风险' }],
+      unverified: [{ point: '可能的并发问题', missing: '缺调用方' }],
+      order: [],
+      focus: {},
+    },
+  });
+  const { textOnly } = renderOverview(client, review);
+  assert.match(textOnly, /已确认风险/);
+  assert.match(textOnly, /未验证项/);
+  assert.match(textOnly, /可能的并发问题/);
+  assert.match(textOnly, /缺少证据：缺调用方/);
+});
+

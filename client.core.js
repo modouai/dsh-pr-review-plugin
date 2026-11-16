@@ -789,6 +789,7 @@ window.__ModuleLoader__.load({
 .prr-notice{margin:0 0 10px;padding:6px 9px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 12%,transparent);color:var(--dsw-alias-state-success-primary);font-size:12px}
 .prr-walk-title{font-weight:600;font-size:12px}
 .prr-subtle{font-size:11.5px;color:var(--dsw-alias-label-secondary)}
+.prr-unverified{opacity:.78;border-style:dashed}
 .prr-spacer{flex:1}
 .prr-row[data-walk="true"]{cursor:pointer}
 .prr-row[data-kind="hunk"][data-walk="true"]:hover{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,var(--dsw-alias-bg-layer-2))}

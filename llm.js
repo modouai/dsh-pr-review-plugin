@@ -167,7 +167,9 @@ const REVIEW_FRAMEWORK = [
   '5. 性能：循环内同步 IO 或逐条查询；N+1；列表是否缺分页或无界加载。',
   '6. 跨平台：路径分隔符与大小写、换行符与编码、平台分支是否三态齐全且有兜底。',
   '常见缺陷专项：静默吞错（空 catch 或丢掉错误）必须指出；多布尔位状态堆积；格式变更未迁移；无分页/无界加载。',
-  '证据要求：报阻塞前先自问是否已有证据（调用方、基类或 wrapper、常量、schema 与数据库约束、测试）；只依据给出的 diff 与上下文，不臆测未提供的文件；无法验证的怀疑降级为建议，并在 point 末尾用「（不确定：……」写明不确定在哪里。',
+  '证据要求：报阻塞前先自问是否已有证据（调用方、基类或 wrapper、常量、schema 与数据库约束、测试）；只依据给出的 diff 与上下文，不臆测未提供的文件。无法验证的怀疑不得写进 issues/risks：候选问题放进 concerns，并在 evidenceNeeds 里写明还需要哪份证据；复审时按证据给出 confidence，证据不足的写进 unverified。',
+  '调用链：判断改动影响前，先列举「谁调用它、它调用了谁、哪些状态被读写」；列不出的写进 evidenceNeeds，不得据此报 block。',
+  '误报排除（命中任一条就不要输出）：本次改动之前就存在的问题；看起来像 bug 实际不是；资深工程师不会在评审里提的挑剔；linter、类型检查或编译器能直接抓到的（缺 import、类型错误、格式）；泛泛的质量问题（缺测试、缺文档、泛泛的安全担忧），除非仓库规范明确要求；被 lint-ignore 之类注释显式压制的问题；明显是本次有意为之的行为变更；落在本次未修改行上的真实问题。',
   '每条问题写清「问题 + 影响 + 修法」，一条只写一个核心问题；不要凑数，也不要只写「建议检查 X」。',
   '先做一轮化简审查：重复分支、兼容回退、单次使用的包装层、过早抽象是否可删；规模超标时提出拆分（软阈值：单函数 > 80 行、组件 > 300 行、文件 > 500 行、嵌套 > 3 层）。不理解旧代码为何存在前不要建议删除。',
 ];
@@ -251,11 +253,14 @@ export function buildReportPrompt(pull, files, diffFiles, config) {
     '{',
     '  "verdict": "block | suggest | pass",',
     '  "summary": "2-4 句总体评价：这个 PR 做了什么、实现是否匹配 PR 描述、风险在哪、能否合并；没有阻塞项时明确写「未发现阻塞项」",',
-    '  "risks": [{ "severity": "block | suggest", "file": "路径", "point": "问题 + 影响 + 修法（一条只写一个核心问题）" }],',
+    '  "concerns": [{ "severity": "block | suggest", "file": "路径", "point": "问题 + 影响 + 修法（一条只写一个核心问题）", "line": 0 }],',
+    '  "evidenceNeeds": [{ "concern": 1, "kind": "callers | definition | callee | schema | test | file", "path": "文件路径", "symbol": "符号名", "reason": "为什么需要它" }],',
     '  "order": [{ "file": "路径", "reason": "为什么先看它（它是什么入口、被谁调用、为什么值得先读）" }],',
     '  "focus": [{ "file": "路径", "point": "审查这个文件时重点看什么" }]',
     '}',
-    '先核对改动是否匹配 PR 描述与验收标准；描述与实现不一致时写进 risks。',
+    'concerns 是候选问题，不是最终结论：每条都会经过取证复审；没有问题就输出空数组。',
+    'evidenceNeeds 必须覆盖每个 concern（concern 是 1-based 序号）：kind=file 指向改动文件本身也算取证；仍然无法核实的，复审会把它放进未验证项。',
+    '先核对改动是否匹配 PR 描述与验收标准；描述与实现不一致时写进 concerns。',
     'order 必须覆盖大部分变更文件，按「入口/协议层 → 核心逻辑 → 数据与存储 → UI → 测试 → 文档」排列；文件路径必须与清单完全一致。',
   ]
     .filter((line) => line !== '')
@@ -300,17 +305,119 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
     '  "logic": "整体逻辑分析（只写全局）：这个文件原来做什么 → 现在整体变成怎样 → 函数/模块的上下游调用关系 → 数据与状态怎么流动 → 关键边界条件与错误路径。不要复述 walkthrough 中各段落的具体改动细节。篇幅随改动规模自适应：大改动 400-800 字，小改动 200-400 字即可，不要为凑字数填充。",',
     '  "walkthrough": [{ "title": "段落/函数名 + 一句话作用（如「cleanupInterruptedMacInstall：启动时清理中断残留」），不要写 hunk 编号", "detail": "用人话讲清：这段做了什么、为什么需要它、影响谁、有什么风险；2-5 句；不要复述 logic 的整体链路，不要把审查意见写进来", "hunk": 1, "context": { "label": "所属函数/类名", "startLine": 230, "endLine": 275 } }],',
     '  "changes": "逐类说明具体变化：新增了什么、删除了什么、重命名/移动了什么",',
-    '  "issues": [{ "severity": "block | suggest", "point": "问题 + 影响 + 修法（一条只写一个核心问题；无法验证时降级为 suggest，并在末尾用「（不确定：……」说明）", "line": 0 }],',
+    '  "concerns": [{ "severity": "block | suggest", "point": "问题 + 影响 + 修法（一条只写一个核心问题）", "line": 0 }],',
+    '  "evidenceNeeds": [{ "concern": 1, "kind": "callers | definition | callee | schema | test | file", "path": "文件路径", "symbol": "符号名", "reason": "为什么需要它" }],',
     '  "suggestions": ["可执行的修改建议"],',
     '  "verdict": "block | suggest | pass"',
     '}',
-    'logic 只写全局、walkthrough 只写局部，两者不得互相复述；walkthrough 按 diff 规模 1-3 条（改动很小时 1 条即可）、按 diff 的 hunk 顺序覆盖主要改动；hunk 是该条分析对应的 diff hunk 序号（从 1 开始，按 @@ 出现顺序计数），不确定写 0；title 禁止出现「hunk」「第 N 段」这类编号；detail 面向第一次读这段代码的人，术语首次出现要顺带解释，问题与建议写到 issues/suggestions，不要写进 walkthrough；',
+    'logic 只写全局、walkthrough 只写局部，两者不得互相复述；walkthrough 按 diff 规模 1-3 条（改动很小时 1 条即可）、按 diff 的 hunk 顺序覆盖主要改动；hunk 是该条分析对应的 diff hunk 序号（从 1 开始，按 @@ 出现顺序计数），不确定写 0；title 禁止出现「hunk」「第 N 段」这类编号；detail 面向第一次读这段代码的人，术语首次出现要顺带解释，问题与建议写到 concerns/suggestions，不要写进 walkthrough；',
     'context 用于在 diff 里展开这段改动所属的完整函数/类：label 写函数/类名，startLine/endLine 是它在上面「完整内容」里的起止行号（用给出的行号，1-based，跨语言通用）；该段改动不在任何函数/类内（如 Markdown、配置文件）或你不确定时，context 写 null。',
     '同时看测试：这次改动需要补充或更新哪些测试；如果只给了实现、没有相关测试，在 summary 里点明这个测试空白。',
     '如果这次改动引入重复分支、兼容回退或单次使用的包装层，用 suggest 指出可化简之处。',
-    'issues 为空数组表示没有发现问题；line 用 diff 中的新文件行号，不确定写 0。',
+    'concerns 为空数组表示没有发现问题；line 用 diff 中的新文件行号，不确定写 0。',
+    'evidenceNeeds 必须覆盖每个 concern（concern 是 1-based 序号）：kind=file 指向本文件也算取证；无法核实的由复审放进未验证项，不要写进 point。',
   ].join('\n');
   return { system: reviewerSystem(language), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 12000, timeoutMs: 600_000 };
+}
+
+/**
+ * The verifier's system prompt: it is a judge, not a second reviewer. Scoring is the only job,
+ * and the evidence block is its only source of truth.
+ */
+function verifierSystem(language) {
+  return [
+    '你是一名代码审查裁判：只根据给出的候选问题与证据判断，不重新审查代码，不臆测证据之外的内容。',
+    '证据不足时给低置信度并写明缺什么，不要为了凑数给出高分。',
+    language === 'en'
+      ? 'Write every human-readable field in English; keep code identifiers, paths and quoted code verbatim.'
+      : '所有输出（代码标识符、路径与原文引用除外）使用简体中文。',
+  ].join('\n');
+}
+
+/** Shared body for both verifier prompts: candidates, collected evidence, unreadable items. */
+function verifyPromptBody(header, concerns, evidence, missing, language) {
+  const candidateLines = concerns.length === 0
+    ? ['（无候选问题）']
+    : concerns.map((item, index) => {
+        const where = item.file === '' ? '' : ` [${item.file}${item.line > 0 ? `:${item.line}` : ''}]`;
+        return `${index}. [${item.severity}]${where} ${item.point}`;
+      });
+  const missingLines = missing.length === 0 ? ['（无）'] : missing.map((item) => `- ${item}`);
+  return [
+    header,
+    '',
+    '## 候选问题（index 从 0 开始）',
+    ...candidateLines,
+    '',
+    '## 宿主取回的证据',
+    evidence.trim() === '' ? '（没有取到任何证据）' : evidence,
+    '',
+    '## 无法读取的证据',
+    ...missingLines,
+    '',
+    '## 判定规则',
+    '对每条候选问题给出 confidence（0-100）：',
+    '- 80-100：证据确认问题存在，或高置信度会在实践中命中；写入 results，并给出最终的 severity、point、line。',
+    '- 25-79：只能部分验证；写入 results 并在 missing 里说明还缺哪份证据。',
+    '- 0-24：经不起推敲、属于既有问题或误报；写入 results 并给低分，不要写成高分。',
+    '每条候选都必须返回一条 result（index 对应上面的序号）。',
+    '只看候选问题与证据，不要引用第一轮的推理，也不要重新审查整个文件。',
+    '如果证据里发现了新的、可确认的问题，写进 extraIssues，并确保能引用证据中的代码；否则不要输出。',
+    '规范类问题必须引用规范原文（如「CLAUDE.md 要求……」），没有原文就按未验证处理。',
+    '',
+    '请输出严格 JSON（不要输出 JSON 以外的解释）：',
+    '{',
+    '  "results": [{ "index": 0, "confidence": 85, "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0, "missing": "" }],',
+    '  "extraIssues": [{ "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0 }]',
+    '}',
+    language === 'en' ? 'Write the human-readable fields in English.' : '',
+  ].filter((line) => line !== '').join('\n');
+}
+
+/** Verifier for the whole-PR report: turns report concerns into risks or unverified notes. */
+export function buildReportVerifyPrompt(pull, concerns, evidence, missing, options = {}) {
+  const language = languageOf(options);
+  return {
+    system: verifierSystem(language),
+    messages: [{
+      role: 'user',
+      content: [{
+        type: 'text',
+        text: verifyPromptBody(
+          `平台：${platformLabel(pull?.platform)}；仓库：${pull?.repo ?? ''}\nPR #${pull?.number ?? 0}：${pull?.title ?? ''}`,
+          concerns,
+          evidence,
+          missing,
+          language,
+        ),
+      }],
+    }],
+    maxTokens: 8000,
+    timeoutMs: 300_000,
+  };
+}
+
+/** Verifier for one file: turns file concerns into findings or unverified notes. */
+export function buildExplainVerifyPrompt(pull, file, concerns, evidence, missing, options = {}) {
+  const language = languageOf(options);
+  return {
+    system: verifierSystem(language),
+    messages: [{
+      role: 'user',
+      content: [{
+        type: 'text',
+        text: verifyPromptBody(
+          `平台：${platformLabel(pull?.platform)}；仓库：${pull?.repo ?? ''}\nPR #${pull?.number ?? 0}：${pull?.title ?? ''}\n正在复审文件：${file?.path ?? ''}（${file?.status ?? ''}，+${file?.additions ?? 0} / -${file?.deletions ?? 0}）`,
+          concerns,
+          evidence,
+          missing,
+          language,
+        ),
+      }],
+    }],
+    maxTokens: 8000,
+    timeoutMs: 300_000,
+  };
 }
 
 /** Follow-up conversation about one file (or the whole PR when file is null). */
@@ -510,16 +617,108 @@ export function buildConcludePrompt(pull, report, explanations, currentConclusio
   return { system: reviewerSystem(languageOf(options)), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 8000, timeoutMs: 300_000 };
 }
 
-/** Normalize a report object so the browser half can trust the fields. */
-export function normalizeReport(raw, fallbackOrder) {
+/** Candidate problems from the triage pass; none of them is a finding until the verifier scores it. */
+export function normalizeConcerns(raw) {
+  return (Array.isArray(raw) ? raw : [])
+    .filter((item) => item !== null && typeof item === 'object')
+    .map((item) => ({
+      severity: item.severity === 'block' ? 'block' : 'suggest',
+      file: typeof item.file === 'string' ? item.file : '',
+      point: typeof item.point === 'string' ? item.point.trim() : '',
+      line: typeof item.line === 'number' && Number.isFinite(item.line) ? Math.floor(item.line) : 0,
+    }))
+    .filter((item) => item.point !== '');
+}
+
+/** Evidence the triage pass wants before a concern can become a finding. */
+export function normalizeEvidenceNeeds(raw) {
+  const kinds = new Set(['callers', 'definition', 'callee', 'schema', 'test', 'file']);
+  return (Array.isArray(raw) ? raw : [])
+    .filter((item) => item !== null && typeof item === 'object')
+    .map((item) => ({
+      concern: Number.isInteger(item.concern) && item.concern > 0 ? item.concern : 0,
+      kind: kinds.has(item.kind) ? item.kind : 'file',
+      path: typeof item.path === 'string' ? item.path.trim() : '',
+      symbol: typeof item.symbol === 'string' ? item.symbol.trim() : '',
+      reason: typeof item.reason === 'string' ? item.reason.trim() : '',
+    }))
+    .filter((item) => item.path !== '' || item.symbol !== '');
+}
+
+/** Points the verifier could not confirm; shown broken out, never as a finding. */
+export function normalizeUnverified(raw) {
+  return (Array.isArray(raw) ? raw : [])
+    .filter((item) => item !== null && typeof item === 'object')
+    .map((item) => ({
+      point: typeof item.point === 'string' ? item.point.trim() : '',
+      missing: typeof item.missing === 'string' ? item.missing.trim() : '',
+    }))
+    .filter((item) => item.point !== '');
+}
+
+/**
+ * Turn the verifier's confidence scores into publishable findings and unverified notes.
+ * 80+ is a finding, 25-79 is kept as an unverified note, below 25 is a false positive.
+ */
+export function partitionVerdicts(raw, concerns) {
+  const candidates = Array.isArray(concerns) ? concerns : [];
+  const issues = [];
+  const unverified = [];
+  const seen = new Set();
+  const severityOf = (item, fallback) => {
+    if (item !== null && item !== undefined) {
+      if (item.severity === 'block') return 'block';
+      if (item.severity === 'suggest') return 'suggest';
+    }
+    return fallback?.severity === 'block' ? 'block' : 'suggest';
+  };
+  const addIssue = (item, fallback) => {
+    const point = typeof item?.point === 'string' && item.point.trim() !== ''
+      ? item.point.trim()
+      : (fallback?.point ?? '');
+    if (point === '' || seen.has(point)) return;
+    seen.add(point);
+    issues.push({
+      severity: severityOf(item, fallback),
+      point,
+      line: typeof item?.line === 'number' && Number.isFinite(item.line)
+        ? Math.floor(item.line)
+        : (fallback?.line ?? 0),
+      file: typeof item?.file === 'string' ? item.file : (fallback?.file ?? ''),
+    });
+  };
+  for (const item of Array.isArray(raw?.results) ? raw.results : []) {
+    if (item === null || typeof item !== 'object') continue;
+    const index = Number.isInteger(item.index) ? item.index : -1;
+    const concern = candidates[index] ?? null;
+    const point = typeof item.point === 'string' && item.point.trim() !== ''
+      ? item.point.trim()
+      : (concern?.point ?? '');
+    if (point === '') continue;
+    const confidence = typeof item.confidence === 'number' && Number.isFinite(item.confidence)
+      ? Math.max(0, Math.min(100, item.confidence))
+      : 0;
+    if (confidence >= 80) {
+      addIssue({ ...item, point }, concern);
+    } else if (confidence >= 25) {
+      unverified.push({
+        point,
+        missing: typeof item.missing === 'string' && item.missing.trim() !== ''
+          ? item.missing.trim()
+          : '证据不足以确认',
+      });
+    }
+  }
+  for (const item of Array.isArray(raw?.extraIssues) ? raw.extraIssues : []) {
+    if (item === null || typeof item !== 'object') continue;
+    addIssue(item, null);
+  }
+  return { issues, unverified };
+}
+
+/** The triage pass output: display fields plus candidate problems, before any verification. */
+export function normalizeReportDraft(raw, fallbackOrder) {
   const verdict = ['block', 'suggest', 'pass'].includes(raw?.verdict) ? raw.verdict : 'suggest';
-  const risks = Array.isArray(raw?.risks)
-    ? raw.risks.filter((risk) => risk !== null && typeof risk === 'object').map((risk) => ({
-        severity: risk.severity === 'block' ? 'block' : 'suggest',
-        file: typeof risk.file === 'string' ? risk.file : '',
-        point: typeof risk.point === 'string' ? risk.point : '',
-      }))
-    : [];
   const seen = new Set();
   const order = [];
   if (Array.isArray(raw?.order)) {
@@ -545,9 +744,29 @@ export function normalizeReport(raw, fallbackOrder) {
   return {
     verdict,
     summary: typeof raw?.summary === 'string' ? raw.summary : '',
-    risks,
     order,
     focus: Object.fromEntries(focus.entries()),
+    concerns: normalizeConcerns(raw?.concerns),
+  };
+}
+
+/** Normalize a report object so the browser half can trust the fields. */
+export function normalizeReport(raw, fallbackOrder) {
+  const draft = normalizeReportDraft(raw, fallbackOrder);
+  const risks = Array.isArray(raw?.risks)
+    ? raw.risks.filter((risk) => risk !== null && typeof risk === 'object').map((risk) => ({
+        severity: risk.severity === 'block' ? 'block' : 'suggest',
+        file: typeof risk.file === 'string' ? risk.file : '',
+        point: typeof risk.point === 'string' ? risk.point : '',
+      })).filter((risk) => risk.point !== '')
+    : [];
+  return {
+    verdict: draft.verdict,
+    summary: draft.summary,
+    risks,
+    unverified: normalizeUnverified(raw?.unverified),
+    order: draft.order,
+    focus: draft.focus,
   };
 }
 
@@ -582,6 +801,7 @@ export function normalizeExplanation(raw) {
     walkthrough,
     changes: typeof raw?.changes === 'string' ? raw.changes : '',
     issues,
+    unverified: normalizeUnverified(raw?.unverified),
     suggestions: Array.isArray(raw?.suggestions) ? raw.suggestions.filter((item) => typeof item === 'string') : [],
   };
 }

@@ -260,6 +260,7 @@ async function setup(options = {}) {
     pollSeconds: 3600,
     commentLanguage: options.commentLanguage ?? 'zh',
     autoReconclude: options.autoReconclude === true,
+    evidenceVerify: options.evidenceVerify !== false,
     // Batch analysis is opt-in per test: its background model calls would otherwise race
     // the assertions of the review/conclusion tests. The schema default is `true`;
     // `useDefaultAutoAnalyze` omits the key to exercise that default end to end.
@@ -2568,5 +2569,153 @@ test('gitea is an alias for the Forgejo adapter and keeps the same cache slug', 
     else process.env.GITEA_TOKEN = previous.gitea;
     if (previous.forgejo === undefined) delete process.env.FORGEJO_TOKEN;
     else process.env.FORGEJO_TOKEN = previous.forgejo;
+  }
+});
+
+// ---------- evidence verification (two-pass review) ----------
+
+/** Prompt text of one model request, however many content blocks it carries. */
+function promptTextOf(options) {
+  return (options?.messages ?? [])
+    .flatMap((message) => message.content ?? [])
+    .map((block) => String(block.text ?? ''))
+    .join('\n');
+}
+
+/** One fake LLM answer: triage for the first call, verifier output for the second. */
+function llmTriageThenVerify(triage, verify) {
+  let call = 0;
+  return () => {
+    call += 1;
+    const text = call === 1 ? JSON.stringify(triage) : (typeof verify === 'string' ? verify : JSON.stringify(verify));
+    return (async function* () {
+      yield { type: 'text-delta', text };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })();
+  };
+}
+
+test('a concern becomes a finding only after the verifier scores it against evidence', async () => {
+  const prompts = [];
+  const answers = llmTriageThenVerify({
+    verdict: 'suggest',
+    summary: '讲解',
+    logic: '逻辑',
+    changes: '改动',
+    concerns: [{ severity: 'block', point: '空指针风险', line: 2 }],
+    evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
+    suggestions: [],
+  }, {
+    results: [{ index: 0, confidence: 90, severity: 'block', point: '空指针风险', line: 2 }],
+    extraIssues: [],
+  });
+  const recording = (options) => {
+    prompts.push(promptTextOf(options));
+    return answers(options);
+  };
+  const plugin = await setup({ fetch: batchFetch, llm: recording });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.json.explanation.issues, [{ severity: 'block', point: '空指针风险', line: 2 }]);
+    assert.deepEqual(result.json.explanation.unverified, []);
+    assert.equal(prompts.length, 2, 'triage + verifier');
+    assert.match(prompts[1], /## 候选问题/);
+    assert.match(prompts[1], /## 证据 1：src\/a\.js/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a verifier that returns junk turns every concern into an unverified note', async () => {
+  const plugin = await setup({
+    fetch: batchFetch,
+    llm: llmTriageThenVerify({
+      verdict: 'suggest',
+      summary: '讲解',
+      logic: '逻辑',
+      changes: '改动',
+      concerns: [{ severity: 'block', point: '可疑空指针', line: 3 }],
+      evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
+      suggestions: [],
+    }, 'not json at all'),
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.json.explanation.issues, []);
+    assert.deepEqual(result.json.explanation.unverified, [
+      { point: '可疑空指针', missing: '复审未完成：模型没有返回可解析的 JSON' },
+    ]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('evidenceVerify off keeps the single-pass contract', async () => {
+  let calls = 0;
+  const plugin = await setup({
+    fetch: batchFetch,
+    evidenceVerify: false,
+    llm: () => (async function* () {
+      calls += 1;
+      yield {
+        type: 'text-delta',
+        text: JSON.stringify({
+          verdict: 'suggest',
+          summary: '讲解',
+          logic: '逻辑',
+          changes: '改动',
+          concerns: [{ severity: 'suggest', point: '命名不清', line: 4 }],
+          evidenceNeeds: [],
+          suggestions: [],
+        }),
+      };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })(),
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(calls, 1, 'no verifier call when evidenceVerify is off');
+    assert.deepEqual(result.json.explanation.issues, [{ severity: 'suggest', point: '命名不清', line: 4 }]);
+    assert.deepEqual(result.json.explanation.unverified, []);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the report verifier decides risks; unconfirmed points stay out of risks', async () => {
+  const plugin = await setup({
+    fetch: roundReviewFetch,
+    reviews: { 1: unanalyzedReview() },
+    llm: llmTriageThenVerify({
+      verdict: 'suggest',
+      summary: '报告',
+      concerns: [
+        { severity: 'block', file: 'src/a.js', point: '并发写入' },
+        { severity: 'suggest', file: 'src/b.js', point: '命名不清' },
+      ],
+      evidenceNeeds: [
+        { concern: 1, kind: 'file', path: 'src/a.js' },
+        { concern: 2, kind: 'file', path: 'src/b.js' },
+      ],
+      order: [],
+      focus: [],
+    }, {
+      results: [
+        { index: 0, confidence: 88, severity: 'block', point: '并发写入' },
+        { index: 1, confidence: 40, point: '命名不清', missing: '缺调用方' },
+      ],
+      extraIssues: [],
+    }),
+  });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const review = await plugin.waitFor(1, (current) => current.status === 'done' && current.report !== null);
+    assert.deepEqual(review.report.risks, [{ severity: 'block', file: 'src/a.js', point: '并发写入' }]);
+    assert.deepEqual(review.report.unverified, [{ point: '命名不清', missing: '缺调用方' }]);
+    assert.equal(review.report.verdict, 'block', 'a confirmed blocker outranks the triage verdict');
+  } finally {
+    await plugin.dispose();
   }
 });
