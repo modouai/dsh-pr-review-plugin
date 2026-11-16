@@ -90,6 +90,12 @@ test('every destructured dependency is exported by the chunk that produces it', 
   }
 });
 
+test('the stamp is independent of the working tree line endings', () => {
+  const lf = stampOf(['client.core.js'], () => 'a\nb\n');
+  const crlf = stampOf(['client.core.js'], () => 'a\r\nb\r\n');
+  assert.equal(lf, crlf, 'a CRLF checkout must not produce a different stamp');
+});
+
 test('the entry stamp covers every shipped chunk', () => {
   const stamps = ENTRY.match(/^\/\/ pr-review chunks: [0-9a-f]{12}$/gm) ?? [];
   assert.equal(stamps.length, 1, 'client.js carries exactly one chunk stamp');

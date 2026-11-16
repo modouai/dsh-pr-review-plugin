@@ -2459,7 +2459,7 @@ test('the workspace view renders the open file in the narrow sidebar layout', ()
     setMode: () => {},
     sidebarPane: 'diff',
     setSidebarPane: () => {},
-    sidebarWidth: 800,
+    sidebarWidth: 700,
     filesWidth: 0,
     setFilesWidth: () => {},
     detailWidth: 0,
@@ -2511,11 +2511,18 @@ test('the workspace view renders the open file in the narrow sidebar layout', ()
   };
 
   const view = fake.render(fake.React.createElement(parts.WorkspaceView, { model }));
-  assert.ok(view.html.includes('prr-subseg'), 'a narrow sidebar offers the diff/analysis toggle');
-  assert.ok(view.html.includes('prr-diffcol'), 'the open file renders its diff column');
-  assert.ok(view.html.includes('src/a.js'), 'the diff head names the open file');
-  assert.ok(view.html.includes('+12') && view.html.includes('-3'), 'the diff head shows the file stats');
-  assert.ok(!view.html.includes('class="prr-detail"'), 'the narrow layout skips the analysis aside');
+  // 700px is below the 780px threshold, so this must be the collapsed-analysis layout.
+  // Assert on rendered elements, not on the HTML: the inline stylesheet contains the same
+  // class names as text, and the fake renderer emits `className`, not `class`.
+  const classes = new Set(view.elements.flatMap((element) => (
+    typeof element.props?.className === 'string' ? element.props.className.split(' ') : []
+  )));
+  assert.ok(classes.has('prr-subseg'), 'a narrow sidebar offers the diff/analysis toggle');
+  assert.ok(classes.has('prr-diffcol'), 'the open file renders its diff column');
+  assert.ok(classes.has('prr-overview-pane'), 'the narrow layout keeps one content pane');
+  assert.ok(!classes.has('prr-detail'), 'the narrow layout skips the analysis aside');
+  assert.ok(view.textOnly.includes('src/a.js'), 'the diff head names the open file');
+  assert.ok(view.textOnly.includes('+12') && view.textOnly.includes('-3'), 'the diff head shows the file stats');
   assert.ok(view.textOnly.includes(t('wrapOn')), 'the wrap toggle uses the active locale');
 });
 

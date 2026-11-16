@@ -30,11 +30,13 @@ export function chunkFiles() {
 }
 
 /** Content hash stamped into the entry. */
-export function stampOf(files = chunkFiles()) {
+export function stampOf(files = chunkFiles(), read = (file) => readFileSync(join(ROOT, file), 'utf8')) {
   const hash = createHash('sha1');
   hash.update('pr-review-chunks\0');
   for (const file of files) {
-    const body = readFileSync(join(ROOT, file));
+    // Normalize line endings: a CRLF working tree (core.autocrlf on Windows) must stamp the
+    // same digest as the LF checkout the committed entry was stamped on.
+    const body = Buffer.from(String(read(file)).replace(/\r\n/g, '\n'), 'utf8');
     hash.update(`${file}\0${body.length}\0`);
     hash.update(body);
   }

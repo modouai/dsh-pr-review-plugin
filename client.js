@@ -146,8 +146,9 @@ window.__ModuleLoader__.load({
         // so registration runs once the chunks arrive.
         let sidebarRegistered = false;
         let sidebarTimer = null;
+        let disposed = false;
         const registerSidebar = () => {
-          if (sidebarRegistered) return true;
+          if (disposed || sidebarRegistered) return true;
           const modules = app.modules;
           if (modules === null) return false;
           try {
@@ -177,6 +178,7 @@ window.__ModuleLoader__.load({
         // Client module ordering covers the normal case (dsh.client.inject); these fallbacks
         // cover a cold boot where the sidebar services appear after this plugin activated.
         const startSidebarRegistration = () => {
+          if (disposed) return;
           if (registerSidebar()) return;
           if (typeof ctx.inject === 'function') {
             try {
@@ -191,14 +193,18 @@ window.__ModuleLoader__.load({
           let attempts = 0;
           const retry = () => {
             sidebarTimer = null;
+            if (disposed) return;
             if (registerSidebar()) return;
             attempts += 1;
             if (attempts < 20) sidebarTimer = setTimeout(retry, 500);
           };
           sidebarTimer = setTimeout(retry, 500);
         };
-        // A pending retry must not outlive this plugin's scope.
+        // A pending retry must not outlive this plugin's scope: the cleanup flips `disposed`
+        // before clearing the timer, so a `ready` that resolves after unload cannot schedule a
+        // new one against the inactive context.
         ctx.effect(() => () => {
+          disposed = true;
           if (sidebarTimer !== null) {
             clearTimeout(sidebarTimer);
             sidebarTimer = null;
