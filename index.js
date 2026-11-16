@@ -39,15 +39,22 @@ import {
   parseChatReply,
   parseFeedbackReply,
   buildExplainPrompt,
+  buildExplainVerifyPrompt,
   buildReportPrompt,
+  buildReportVerifyPrompt,
   callModel,
   extractJson,
   itemId,
   mergeConclusion,
+  normalizeConcerns,
   normalizeConclusion,
+  normalizeEvidenceNeeds,
   normalizeExplanation,
   normalizeReport,
+  normalizeReportDraft,
   normalizeVerdict,
+  partitionSuggestions,
+  partitionVerdicts,
 } from './llm.js';
 
 /** Cordis function-plugin name. */
@@ -83,7 +90,15 @@ const DEFAULTS = {
   maxDiffCharsPerFile: 14000,
   commentLanguage: 'zh',
   autoReconclude: false,
+  // Two-pass review: triage proposes concerns, the host collects evidence, a verifier scores
+  // them. On by default (quality first); turn it off to spend one call per file as before.
+  evidenceVerify: true,
+  evidenceMaxFiles: 6,
+  evidenceMaxChars: 6000,
 };
+
+/** GUI launches can have a minimal PATH; try the common absolute locations too. */
+const GIT_CANDIDATES = ['git', '/usr/bin/git', '/opt/homebrew/bin/git', '/usr/local/bin/git'];
 
 const MAX_BODY_BYTES = 64 * 1024;
 const MAX_FILE_DIFF_BYTES = 400 * 1024;
@@ -113,6 +128,9 @@ export const Config = Schema.object({
   maxDiffCharsPerFile: Schema.number().min(1000).default(DEFAULTS.maxDiffCharsPerFile),
   commentLanguage: Schema.union(['zh', 'en']).default(DEFAULTS.commentLanguage),
   autoReconclude: Schema.boolean().default(DEFAULTS.autoReconclude),
+  evidenceVerify: Schema.boolean().default(DEFAULTS.evidenceVerify),
+  evidenceMaxFiles: Schema.number().min(1).max(20).default(DEFAULTS.evidenceMaxFiles),
+  evidenceMaxChars: Schema.number().min(500).default(DEFAULTS.evidenceMaxChars),
 });
 
 /** Stable tool failure codes: the tool registry keeps `error.code` for HarnessError only. */
@@ -533,6 +551,8 @@ export function apply(ctx, config) {
     cacheError: '',
     saveError: '',
     saveTimer: null,
+    // Last workspace directory that activated a repository; evidence lookup greps there.
+    workspaceCwd: '',
   };
 
   let cachePath = cacheFile(provider);
@@ -650,8 +670,7 @@ export function apply(ctx, config) {
 
   /** Try `git -C <dir> remote get-url origin`, tolerating a GUI app's minimal PATH. */
   async function readGitRemote(dir) {
-    const candidates = ['git', '/usr/bin/git', '/opt/homebrew/bin/git', '/usr/local/bin/git'];
-    for (const binary of candidates) {
+    for (const binary of GIT_CANDIDATES) {
       const result = await new Promise((resolve) => {
         execFile(binary, ['-C', dir, 'remote', 'get-url', 'origin'], { timeout: 8000 }, (error, stdout, stderr) => {
           resolve({ error, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
@@ -1024,6 +1043,226 @@ export function apply(ctx, config) {
     return result;
   }
 
+  // ---------- evidence for the verifier ----------
+
+  /** Run one git command in the workspace; evidence lookup only, so failures read as null. */
+  function runGit(cwd, args) {
+    return new Promise((resolve) => {
+      const attempt = (at) => {
+        if (at >= GIT_CANDIDATES.length) {
+          resolve(null);
+          return;
+        }
+        execFile(GIT_CANDIDATES[at], ['-C', cwd, ...args], { timeout: 5000, maxBuffer: 512 * 1024 }, (error, stdout) => {
+          if (error !== null && error !== undefined && error.code === 'ENOENT') {
+            attempt(at + 1);
+            return;
+          }
+          resolve(error === null ? String(stdout) : null);
+        });
+      };
+      attempt(0);
+    });
+  }
+
+  /**
+   * Workspace directory whose origin is the repository under review, or '' when unusable.
+   * The directory may be on another branch, so it only ever supplies candidate paths.
+   */
+  function evidenceWorkspace() {
+    const cwd = state.workspaceCwd;
+    if (typeof cwd !== 'string' || cwd === '') return '';
+    const known = repoByCwd.get(cwd);
+    if (known === undefined || known.supported !== true) return '';
+    return known.repo === provider.repo && known.platform === provider.platform ? cwd : '';
+  }
+
+  /** Candidate paths: files in the workspace that contain the symbol. */
+  async function grepWorkspaceSymbol(cwd, symbol, limit) {
+    // --full-name keeps paths repo-root-relative even when the workspace is a subdirectory.
+    const stdout = await runGit(cwd, ['grep', '--full-name', '-l', '-F', '-e', symbol]);
+    if (stdout === null) return [];
+    return stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '')
+      .slice(0, limit);
+  }
+
+  /** Fallback candidates: changed files whose diff mentions the symbol. */
+  function diffSymbolCandidates(record, symbol) {
+    const paths = [];
+    for (const [filePath, diff] of record.diffFiles ?? new Map()) {
+      if (typeof diff?.text === 'string' && diff.text.includes(symbol)) paths.push(filePath);
+    }
+    return paths.slice(0, 3);
+  }
+
+  function describeNeed(need) {
+    const target = need.path !== '' ? need.path : (need.symbol !== '' ? need.symbol : '?');
+    return `${need.kind} ${target}${need.reason === '' ? '' : `（${need.reason}）`}`;
+  }
+
+  /**
+   * Around the first symbol occurrence when there is one, else the file's head. The note
+   * states which lines were shown: a verifier that sees only part of a file must know it,
+   * or it will report "this file lacks X" from a truncated view.
+   */
+  function sliceEvidence(content, symbol, maxChars) {
+    const text = String(content ?? '');
+    const lines = text.split('\n');
+    const total = lines.length;
+    let start = 0;
+    let end = total;
+    let note = '';
+    if (symbol !== '') {
+      const at = text.indexOf(symbol);
+      if (at !== -1) {
+        const lineIndex = text.slice(0, at).split('\n').length - 1;
+        start = Math.max(0, lineIndex - 40);
+        end = Math.min(total, lineIndex + 41);
+        note = `第 ${start + 1}–${end} 行（共 ${total} 行）`;
+      } else {
+        end = Math.min(total, 200);
+        note = `未找到 ${symbol}，显示前 ${end} 行（共 ${total} 行）`;
+      }
+    } else if (total > 200) {
+      end = 200;
+      note = `前 ${end} 行（共 ${total} 行）`;
+    }
+    let chunk = lines.slice(start, end).join('\n');
+    if (chunk.length > maxChars) {
+      chunk = `${chunk.slice(0, maxChars)}\n…（已按字符上限截断）`;
+      note = note === '' ? '内容超过字符上限，已截断' : `${note}，且超过字符上限已截断`;
+    }
+    return { text: chunk, note };
+  }
+
+  /** A fence longer than any backtick run inside the evidence, so Markdown cannot close it. */
+  function fenceFor(text) {
+    const runs = String(text).match(/`{3,}/g);
+    const longest = runs === null ? 0 : Math.max(...runs.map((run) => run.length));
+    return '`'.repeat(Math.max(3, longest + 1));
+  }
+
+  function evidenceBlock(index, need, filePath, content, maxChars) {
+    const meta = [need.kind, need.symbol === '' ? '' : `symbol=${need.symbol}`].filter((item) => item !== '').join(' · ');
+    const sliced = sliceEvidence(content, need.symbol, maxChars);
+    const scope = sliced.note === '' ? '' : `；${sliced.note}`;
+    const fence = fenceFor(sliced.text);
+    return `## 证据 ${index}：${filePath}（${meta}${scope}）\n\n${fence}text\n${sliced.text}\n${fence}`;
+  }
+
+  /**
+   * Fetch what the triage pass asked for. Local files only nominate candidates; the bytes in
+   * the prompt always come from the PR head, so a stale worktree can never turn into evidence.
+   */
+  async function collectEvidence(record, needs, maxFiles, maxChars) {
+    const blocks = [];
+    const missing = [];
+    const used = new Set();
+    const cwd = evidenceWorkspace();
+    let index = 0;
+    for (const need of needs) {
+      if (blocks.length >= maxFiles) {
+        missing.push(`${describeNeed(need)}：证据超过上限（${maxFiles} 个文件），未读取`);
+        continue;
+      }
+      const candidates = [];
+      if (need.path !== '') candidates.push(need.path);
+      if (need.symbol !== '') {
+        if (cwd !== '') candidates.push(...await grepWorkspaceSymbol(cwd, need.symbol, 3));
+        if (candidates.length === 0) candidates.push(...diffSymbolCandidates(record, need.symbol));
+      }
+      if (candidates.length === 0) {
+        missing.push(`${describeNeed(need)}：没有可读取的文件路径`);
+        continue;
+      }
+      let covered = false;
+      for (const candidate of candidates) {
+        // Dedupe per (file, symbol): the same file can hold several symbols, and each
+        // needs its own window. An existing key still covers this need; keep trying later
+        // candidates because one may offer a better match.
+        const cacheKey = `${candidate}::${need.symbol}`;
+        if (used.has(cacheKey)) {
+          covered = true;
+          continue;
+        }
+        try {
+          const content = await ensureFileContent(record, candidate);
+          index += 1;
+          blocks.push(evidenceBlock(index, need, candidate, content.content, maxChars));
+          used.add(cacheKey);
+          covered = true;
+          break;
+        } catch (error) {
+          console.warn('[pr-review] 读取证据失败:', candidate, error);
+        }
+      }
+      if (!covered) missing.push(`${describeNeed(need)}：无法读取 ${candidates[0]}`);
+    }
+    return { blocks: blocks.join('\n\n'), missing };
+  }
+
+  /**
+   * Score the triage pass's concerns against the evidence. A verifier failure never fails the
+   * review: the candidates become unverified notes instead of findings.
+   */
+  async function verifyConcerns(record, concerns, rawNeeds, buildPrompt, epoch, signal) {
+    const needs = normalizeEvidenceNeeds(rawNeeds);
+    const evidence = await collectEvidence(
+      record,
+      needs,
+      settings.evidenceMaxFiles ?? DEFAULTS.evidenceMaxFiles,
+      settings.evidenceMaxChars ?? DEFAULTS.evidenceMaxChars,
+    );
+    if (epoch !== null && (record.analysisEpoch ?? 0) !== epoch) {
+      return { discarded: true, issues: [], unverified: [] };
+    }
+    if (signal !== undefined && signal !== null && signal.aborted) {
+      return { discarded: true, issues: [], unverified: [] };
+    }
+    let answer;
+    try {
+      answer = await callModelJson(
+        buildPrompt(evidence.blocks, evidence.missing),
+        signal,
+        // A reply without a results array is a stub, not a verdict.
+        (value) => value !== null && typeof value === 'object' && Array.isArray(value.results),
+      );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      // A cancelled batch must not persist its cancellation as "unverified" findings.
+      if ((signal !== undefined && signal !== null && signal.aborted) || reason.includes('已取消')) {
+        return { discarded: true, issues: [], unverified: [] };
+      }
+      console.warn('[pr-review] 复审调用失败，候选问题转入未验证项：', error);
+      return {
+        discarded: false,
+        issues: [],
+        unverified: concerns.map((item) => ({ point: item.point, missing: `复审未完成：${reason}` })),
+        dropped: 0,
+        raw: null,
+      };
+    }
+    if (answer.parsed === null) {
+      return {
+        discarded: false,
+        issues: [],
+        unverified: concerns.map((item) => ({ point: item.point, missing: '复审未完成：模型没有返回可解析的 JSON' })),
+        dropped: 0,
+        raw: null,
+      };
+    }
+    const verdicts = partitionVerdicts(answer.parsed, concerns);
+    // Dropped candidates are neither findings nor unverified notes; keep the count visible
+    // so a model that stopped answering in range does not look like "no problems found".
+    if (verdicts.dropped > 0) {
+      console.warn(`[pr-review] 复审丢弃 ${verdicts.dropped} 条候选（无法归位或置信度 < 25）`);
+    }
+    return { discarded: false, raw: answer.parsed, ...verdicts };
+  }
+
   // ---------- pull list ----------
 
   /**
@@ -1211,6 +1450,50 @@ export function apply(ctx, config) {
     return true;
   }
 
+  /**
+   * Model call that must return JSON. Models occasionally answer in prose or with a stub
+   * object despite the contract; one corrective turn — echoing its answer back with the
+   * required shape — recovers most of those instead of failing the whole round.
+   *
+   * `isUsable` decides whether a parsed answer is complete enough to keep. The corrective
+   * turn uses a user message, never an assistant one: the Host's LLM runtime expects
+   * assistant history to carry `finish.replayState`, which callModel does not collect.
+   */
+  async function callModelJson(prompt, signal, isUsable) {
+    const usable = typeof isUsable === 'function' ? isUsable : () => true;
+    const request = signal === undefined || signal === null ? prompt : { ...prompt, signal };
+    const first = await callModel(ctx, settings, request);
+    const parsed = extractJson(first);
+    if (parsed !== null && usable(parsed)) return { raw: first, parsed };
+    const correction = {
+      ...prompt,
+      messages: [
+        ...prompt.messages,
+        {
+          role: 'user',
+          content: [{
+            type: 'text',
+            text: `上一次的输出不是合法的、完整的 JSON：\n---\n${first.slice(0, 4000)}\n---\n请按上面的字段约定，只输出一个完整的 JSON 对象，不要 markdown 代码块，不要任何解释。`,
+          }],
+        },
+      ],
+    };
+    const retried = await callModel(ctx, settings, signal === undefined || signal === null ? correction : { ...correction, signal });
+    return { raw: retried, parsed: extractJson(retried) };
+  }
+
+  /**
+   * Both the report and the per-file prompt require a summary or at least one candidate
+   * concern; an answer with neither is a stub, not a review. Shared so the two paths cannot
+   * drift apart.
+   */
+  function answerHasContent(value) {
+    if (value === null || typeof value !== 'object') return false;
+    const summary = typeof value.summary === 'string' ? value.summary.trim() : '';
+    const concerns = Array.isArray(value.concerns) ? value.concerns : [];
+    return summary !== '' || concerns.length > 0;
+  }
+
   /** Fetch one pull request and produce the overall report plus reading order. */
   async function runReview(record) {
     const client = await ensureClient();
@@ -1243,9 +1526,9 @@ export function apply(ctx, config) {
       record.files = [...fileMap.values()];
     }
     const prompt = buildReportPrompt(pull, record.files, record.diffFiles, settings);
-    let raw;
+    let answer;
     try {
-      raw = await callModel(ctx, settings, prompt);
+      answer = await callModelJson(prompt, undefined, answerHasContent);
     } catch (error) {
       record.status = 'error';
       record.error = error instanceof Error ? error.message : String(error);
@@ -1254,17 +1537,48 @@ export function apply(ctx, config) {
       scheduleSave();
       return;
     }
-    const parsed = extractJson(raw);
-    if (parsed === null) {
+    const parsed = answer.parsed;
+    if (parsed === null || !answerHasContent(parsed)) {
       record.status = 'error';
-      record.error = `模型没有返回可解析的 JSON。原始输出：${raw.slice(0, 400)}`;
+      record.error = `模型没有返回完整的报告 JSON。原始输出：${answer.raw.slice(0, 400)}`;
       record.finishedAt = Date.now();
       currentRoundEntry(record).finishedAt = record.finishedAt;
       scheduleSave();
       return;
     }
     const order = Array.isArray(files) ? files.map((file) => file.path) : [];
-    record.report = normalizeReport(parsed, order);
+    const draft = normalizeReportDraft(parsed, order);
+    let risks = [];
+    let unverified = [];
+    let discarded = 0;
+    if (draft.concerns.length > 0) {
+      if (settings.evidenceVerify === false) {
+        risks = draft.concerns.map((item) => ({ severity: item.severity, file: item.file, point: item.point }));
+      } else {
+        const verdicts = await verifyConcerns(
+          record,
+          draft.concerns,
+          parsed.evidenceNeeds,
+          (evidence, missing) => buildReportVerifyPrompt(pull, draft.concerns, evidence, missing, { language: commentLanguage() }),
+          null,
+        );
+        risks = verdicts.issues.map((item) => ({ severity: item.severity, file: item.file, point: item.point }));
+        unverified = verdicts.unverified;
+        discarded = verdicts.dropped ?? 0;
+      }
+    }
+    // A confirmed blocker outranks the triage verdict; a confirmed finding never leaves a "pass".
+    const verdict = risks.some((risk) => risk.severity === 'block')
+      ? 'block'
+      : (risks.length > 0 && draft.verdict === 'pass' ? 'suggest' : draft.verdict);
+    record.report = normalizeReport({
+      ...draft,
+      verdict,
+      risks,
+      unverified,
+      raised: draft.concerns.length,
+      discarded,
+    }, order);
     record.reportUpdatedAt = 0;
     record.status = 'done';
     record.finishedAt = Date.now();
@@ -1326,8 +1640,9 @@ export function apply(ctx, config) {
     } catch (error) {
       console.warn('[pr-review] 读取文件完整内容失败，讲解退化为仅 diff：', error);
     }
+    const pull = record.pull ?? { number, title: '', repo: provider.repo, platform: provider.platform };
     const prompt = buildExplainPrompt(
-      record.pull ?? { number, title: '', repo: provider.repo, platform: provider.platform },
+      pull,
       file,
       diffText,
       record.report,
@@ -1337,16 +1652,59 @@ export function apply(ctx, config) {
     );
     if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
-    const raw = await callModel(ctx, settings, signal === undefined || signal === null ? prompt : { ...prompt, signal });
+    const answer = await callModelJson(prompt, signal, answerHasContent);
     // The round can switch while the model answers; drop the answer before parsing, so a
     // late malformed reply is never reported as a failure of the round that replaced it.
     if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
-    const parsed = extractJson(raw);
-    if (parsed === null) throw new Error(`模型没有返回可解析的 JSON。原始输出：${raw.slice(0, 400)}`);
+    const parsed = answer.parsed;
+    if (parsed === null || !answerHasContent(parsed)) {
+      throw new Error(`模型没有返回完整的分析 JSON。原始输出：${answer.raw.slice(0, 400)}`);
+    }
+    const concerns = normalizeConcerns(parsed.concerns);
+    // Same filter the verify prompt applies, so suggestion indices line up.
+    const rawSuggestions = Array.isArray(parsed.suggestions)
+      ? parsed.suggestions.filter((item) => typeof item === 'string' && item.trim() !== '')
+      : [];
+    let issues = [];
+    let unverified = [];
+    let suggestions = rawSuggestions;
+    // Suggestions go through the verifier too: a suggestion the diff already implements is
+    // noise, and the triage pass cannot tell on its own.
+    if (concerns.length > 0 || rawSuggestions.length > 0) {
+      if (settings.evidenceVerify === false) {
+        issues = concerns.map(({ severity, point, line }) => ({ severity, point, line }));
+      } else {
+        const verdicts = await verifyConcerns(
+          record,
+          concerns,
+          parsed.evidenceNeeds,
+          (evidence, missing) => buildExplainVerifyPrompt(pull, file, concerns, evidence, missing, {
+            language: commentLanguage(),
+            suggestions: rawSuggestions,
+            diffText,
+          }),
+          epoch,
+          signal,
+        );
+        if (verdicts.discarded) return { explanation: null, cached: false, discarded: true };
+        issues = verdicts.issues.map(({ severity, point, line }) => ({ severity, point, line }));
+        unverified = verdicts.unverified;
+        if (verdicts.raw !== null) {
+          suggestions = partitionSuggestions(verdicts.raw, rawSuggestions).kept;
+        }
+      }
+    }
+    // A confirmed blocker must not sit under a "pass" pill; mirror the report's reconciliation.
+    const baseVerdict = parsed.verdict ?? 'suggest';
+    const verdict = issues.some((item) => item.severity === 'block')
+      ? 'block'
+      : (issues.length > 0 && baseVerdict === 'pass' ? 'suggest' : baseVerdict);
     const explanation = normalizeExplanation({
       ...parsed,
-      // A single missing verdict must not present as "pass".
-      verdict: parsed.verdict ?? 'suggest',
+      issues,
+      unverified,
+      suggestions,
+      verdict,
     });
     // Repeat the check at the write point: an await added between parse and store must
     // not reopen the stale-write window.
@@ -1686,6 +2044,8 @@ export function apply(ctx, config) {
         repo: info.repo,
         baseUrl: info.baseUrl,
       }));
+      // Only a workspace whose origin matches the active repository may seed evidence lookups.
+      state.workspaceCwd = typeof info.cwd === 'string' && info.repo === provider.repo ? info.cwd : '';
       sendJson(res, 200, {
         ok: true,
         supported: true,

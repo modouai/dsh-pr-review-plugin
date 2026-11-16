@@ -247,7 +247,9 @@ window.__ModuleLoader__.load({
 
       function RiskList(props) {
         const list = props.risks ?? [];
-        if (list.length === 0) return h('div', { className: 'prr-subtle' }, '—');
+        // The caller owns the empty-state wording: it knows whether nothing was raised or
+        // every candidate was filtered, and the list does not.
+        if (list.length === 0) return h('div', { className: 'prr-subtle' }, props.emptyLabel ?? '');
         return h(
           'div',
           null,
@@ -278,41 +280,8 @@ window.__ModuleLoader__.load({
         );
       }
 
-      function OrderList(props) {
-        const list = props.order ?? [];
-        if (list.length === 0) return h('div', { className: 'prr-subtle' }, '—');
-        return h(
-          'div',
-          null,
-          list.map((item, index) =>
-            h(
-              'div',
-              { className: 'prr-rowitem', key: item.file + index },
-              h('span', { className: 'prr-ford' }, String(index + 1)),
-              h(
-                'div',
-                { className: 'prr-rowmain' },
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'prr-linklike prr-filetag',
-                    onClick: () => props.onOpenFile(item.file),
-                    title: item.file,
-                  },
-                  item.file,
-                ),
-                item.reason === ''
-                  ? null
-                  : h('div', { className: 'prr-subtle prr-text' }, item.reason),
-              ),
-            ),
-          ),
-        );
-      }
-
       return {
-        DetailHeader, TopBar, RoundPills, VersionSelector, RoundMeta, DeltaBlock, RiskList, OrderList,
+        DetailHeader, TopBar, RoundPills, VersionSelector, RoundMeta, DeltaBlock, RiskList,
       };
     };
   },

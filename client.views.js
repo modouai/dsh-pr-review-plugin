@@ -14,10 +14,10 @@ window.__ModuleLoader__.load({
       const {
         Btn, FileRow, VerdictPill, isAnalyzing, fill, text, suggestionText, cleanStepTitle,
         parseUnifiedDiff, hunkRange, mapWalkthroughToHunks, publishedOfRound, roundsOf,
-        staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge,
+        staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge, shortSha,
       } = core;
       const {
-        OrderList, RiskList, RoundMeta, DeltaBlock, VersionSelector,
+        RiskList, RoundMeta, DeltaBlock, VersionSelector,
       } = components;
       const {
         ConclusionBlock, FeedbackBlock, PublishedBlock, conclusionMetaLine, overviewFooter,
@@ -251,6 +251,42 @@ window.__ModuleLoader__.load({
         );
       }
 
+      /**
+       * Points the verifier could not confirm: they get their own block so they are never
+       * mistaken for findings. Malformed entries are dropped instead of leaking "undefined".
+       */
+      function UnverifiedBlock(props) {
+        const { t } = props;
+        const list = (Array.isArray(props.items) ? props.items : []).filter(
+          (item) => item !== null && typeof item === 'object' && typeof item.point === 'string' && item.point.trim() !== '',
+        );
+        if (list.length === 0) return null;
+        return h(
+          'div',
+          null,
+          h('div', { className: 'prr-h2' }, t('unverified')),
+          h(
+            'div',
+            { className: 'prr-card prr-unverified' },
+            h('div', { className: 'prr-subtle' }, t('unverifiedHint')),
+            list.map((item, index) =>
+              h(
+                'div',
+                { className: 'prr-rowitem', key: index },
+                h(
+                  'div',
+                  { className: 'prr-rowmain' },
+                  h('div', { className: 'prr-text' }, item.point),
+                  typeof item.missing === 'string' && item.missing !== ''
+                    ? h('div', { className: 'prr-subtle' }, `${t('unverifiedMissing')}${item.missing}`)
+                    : null,
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+
       /** Per-file review detail: logic, walkthrough, changes, findings, suggestions. */
       function FileDetailPanel(props) {
         const { t, filePath, explanation } = props;
@@ -304,6 +340,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
             );
+        const unverified = h(UnverifiedBlock, { t, items: detail.unverified });
         const suggestions = (detail.suggestions ?? []).length === 0
           ? null
           : h(
@@ -345,6 +382,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'prr-card prr-text' }, detail.summary),
           section(t('changes'), detail.changes),
           issues,
+          unverified,
           suggestions,
         );
       }
@@ -591,12 +629,24 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'prr-subtle', style: { marginBottom: '8px' } },
-              `${text(pull.author)} · ${text(pull.headRef)} → ${text(pull.baseRef)} · +${pull.additions ?? 0} / -${pull.deletions ?? 0} · ${pull.changedFiles ?? 0}`,
+              `${text(pull.author)} · ${text(pull.headRef)} → ${text(pull.baseRef)} · +${pull.additions ?? 0} / -${pull.deletions ?? 0} · ${pull.changedFiles ?? 0}${typeof review.headSha === 'string' && review.headSha !== '' ? ` · commit ${shortSha(review.headSha)}` : ''}`,
             ),
             h('div', { className: 'prr-text' }, report.summary),
           ),
           h('div', { className: 'prr-h2' }, t('initialRisks')),
-          h('div', { className: 'prr-card' }, h(RiskList, { risks: report.risks, t, onOpenFile: props.onOpenFile })),
+          h('div', { className: 'prr-card' }, h(RiskList, {
+            risks: report.risks,
+            emptyLabel: (report.raised ?? 0) > 0
+              ? fill(t('noInitialRisksDetail'), {
+                  raised: report.raised ?? 0,
+                  unverified: (report.unverified ?? []).length,
+                  discarded: report.discarded ?? 0,
+                })
+              : t('noInitialRisks'),
+            t,
+            onOpenFile: props.onOpenFile,
+          })),
+          h(UnverifiedBlock, { t, items: report.unverified }),
           h(
             'div',
             { className: 'prr-h2' },
@@ -648,8 +698,6 @@ window.__ModuleLoader__.load({
                   ),
                 ),
           ),
-          h('div', { className: 'prr-h2' }, t('order')),
-          h('div', { className: 'prr-card' }, h(OrderList, { order: report.order, t, onOpenFile: props.onOpenFile })),
           conclusionNode,
           h(PublishedBlock, { entries: publishedEntries, t }),
           review.concludeError === null || review.concludeError === undefined || review.concludeError === ''

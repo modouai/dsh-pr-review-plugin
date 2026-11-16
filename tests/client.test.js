@@ -2536,3 +2536,156 @@ test('dragged columns are clamped to usable ranges and can be reset', () => {
   assert.equal(parts.clampColumnWidth('detail', 2000), 760);
 });
 
+// ---------- unverified notes (evidence verification) ----------
+
+test('the file detail breaks unverified points out of the findings', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const { textOnly, elements } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t: translator(parts),
+    filePath: 'src/a.js',
+    explanation: {
+      status: 'done',
+      explanation: {
+        verdict: 'suggest',
+        summary: '文件摘要',
+        logic: '',
+        changes: '',
+        issues: [{ severity: 'suggest', point: '已确认问题', line: 1 }],
+        unverified: [{ point: '可疑调用方', missing: '缺少 callers 证据' }],
+        suggestions: [],
+      },
+    },
+    onExplain: () => {},
+  }));
+
+  assert.match(textOnly, /审查意见/);
+  assert.match(textOnly, /已确认问题/);
+  assert.match(textOnly, /未验证项/);
+  assert.match(textOnly, /可疑调用方/);
+  assert.match(textOnly, /缺少证据：缺少 callers 证据/);
+  assert.ok(elements.some((node) => node.props.className === 'prr-card prr-unverified'));
+});
+
+test('no unverified notes means no unverified section', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const { textOnly } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t: translator(parts),
+    filePath: 'src/a.js',
+    explanation: {
+      status: 'done',
+      explanation: { verdict: 'pass', summary: '文件摘要', logic: '', changes: '', issues: [], suggestions: [] },
+    },
+    onExplain: () => {},
+  }));
+  assert.doesNotMatch(textOnly, /未验证项/);
+});
+
+test('the overview shows report unverified notes after the initial risks', () => {
+  const client = loadClient();
+  const review = makeReview({
+    report: {
+      verdict: 'suggest',
+      summary: '报告',
+      risks: [{ severity: 'suggest', file: 'src/a.js', point: '已确认风险' }],
+      unverified: [{ point: '可能的并发问题', missing: '缺调用方' }],
+      order: [],
+      focus: {},
+    },
+  });
+  const { textOnly } = renderOverview(client, review);
+  assert.match(textOnly, /已确认风险/);
+  assert.match(textOnly, /未验证项/);
+  assert.match(textOnly, /可能的并发问题/);
+  assert.match(textOnly, /缺少证据：缺调用方/);
+});
+
+test('the zh and en tables expose the same keys', () => {
+  const client = loadClient();
+  const { DICT } = client.parts;
+  assert.deepEqual(Object.keys(DICT.zh).sort(), Object.keys(DICT.en).sort());
+});
+
+test('the overview names the commit under review', () => {
+  const client = loadClient();
+  const review = makeReview({});
+  review.headSha = '5233a50abcdef0123456789';
+  const { textOnly } = renderOverview(client, review);
+  assert.match(textOnly, /commit 5233a50/);
+
+  const missing = makeReview({});
+  missing.headSha = '';
+  assert.doesNotMatch(renderOverview(client, missing).textOnly, /commit /);
+});
+
+test('an empty risk list says so instead of showing a dash', () => {
+  const client = loadClient();
+  const review = makeReview({
+    report: { verdict: 'pass', summary: '报告', risks: [], unverified: [], order: [], focus: {} },
+  });
+  const { textOnly } = renderOverview(client, review);
+  assert.match(textOnly, /未发现初筛风险/);
+});
+
+test('an empty risk list explains whether nothing was raised or everything was filtered', () => {
+  const client = loadClient();
+  const review = makeReview({
+    report: {
+      verdict: 'pass',
+      summary: '报告',
+      risks: [],
+      unverified: [],
+      raised: 3,
+      discarded: 2,
+      order: [],
+      focus: {},
+    },
+  });
+  const { textOnly } = renderOverview(client, review);
+  assert.match(textOnly, /初筛 3 条疑点/);
+  assert.match(textOnly, /2 条判定为误报/);
+});
+
+test('the overview no longer renders a reading-order section', () => {
+  const client = loadClient();
+  const review = makeReview({
+    report: {
+      verdict: 'suggest',
+      summary: '报告',
+      risks: [],
+      unverified: [],
+      order: [{ file: 'src/a.js', reason: '这是排序理由不该出现在总览' }],
+      focus: {},
+    },
+  });
+  const { textOnly } = renderOverview(client, review);
+  assert.doesNotMatch(textOnly, /审查顺序/);
+  assert.doesNotMatch(textOnly, /这是排序理由不该出现在总览/);
+});
+
+test('malformed unverified entries are dropped instead of leaking into the panel', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const { textOnly } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t: translator(parts),
+    filePath: 'src/a.js',
+    explanation: {
+      status: 'done',
+      explanation: {
+        verdict: 'suggest',
+        summary: '摘要',
+        logic: '',
+        changes: '',
+        issues: [],
+        unverified: [null, {}, { point: '   ' }, { point: '有效疑点', missing: null }],
+        suggestions: [],
+      },
+    },
+    onExplain: () => {},
+  }));
+  assert.match(textOnly, /有效疑点/);
+  assert.doesNotMatch(textOnly, /undefined/);
+  assert.doesNotMatch(textOnly, /缺少证据/);
+});
+

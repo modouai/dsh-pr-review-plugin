@@ -106,6 +106,9 @@ The file is a top-level YAML array. Keep one entry for this row; `dsh plugin add
     autoReview: true
     autoAnalyze: true
     autoReconclude: false
+    evidenceVerify: true
+    evidenceMaxFiles: 6
+    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''
@@ -150,6 +153,7 @@ A workspace that is not a git repository activates no repository: the panel show
 | `autoReview` | boolean | `true` | Start a round automatically when a pull request first appears or its head SHA changes. Set `false` to review only when you click **Review now**. A failed round is retried after 5 minutes. |
 | `autoAnalyze` | boolean | `true` | Analyze every changed file of a finished round in the background, one model call per file, so a round costs one call per changed file (100 files, 100 calls). Set `false` to analyze a file only when you open it, or on demand with **Analyze all**. The automatic pass does not retry failed files; **Analyze all** does, costing about one call per unfinished or failed file. Starting a new round cancels a batch still running from the previous one. A failed file shows its error in the file panel and stays out of the analyzed coverage until it succeeds. |
 | `autoReconclude` | boolean | `false` | Regenerate the conclusion when the report or per-file analysis changes after it. Runs at most once every 5 minutes, never during a running round, and only while the conclusion is stale. |
+| `evidenceVerify` | boolean | `true` | Two-pass review: the first pass only proposes concerns and the evidence they need, the host fetches callers, definitions and tests, and a verifier scores each concern against that evidence (80+ becomes a finding, 25-79 becomes an unverified note, below 25 is dropped). No concerns still costs one call; with concerns each file costs one extra verifier call. Set `false` to fall back to the single pass, where concerns become findings directly. |
 | `commentLanguage` | `zh`, `en` | `zh` | Language of the published comment (labels, headings, appendix, footer) and the language the built-in prompts ask the model to write in: per-file analysis, conclusion, discussion answers and feedback parsing. It defaults to `zh`, so an English repository needs `commentLanguage: en` explicitly. The setting applies when text is generated; content generated earlier is not rewritten. |
 
 ### Model and limits
@@ -158,6 +162,8 @@ A workspace that is not a git repository activates no repository: the panel show
 |---|---|---|---|
 | `provider` / `model` | strings, or empty | empty | Both must be set to take effect. Otherwise the plugin uses the current Harness default model. Setting only one falls back to the default. |
 | `reasoningEffort` | `off`, `low`, `high`, `max` | `off` | Reasoning effort for report, per-file, and conclusion calls. If the selected model rejects the level, the plugin retries the call without it. |
+| `evidenceMaxFiles` | number, 1-20 | `6` | Most files the verifier may read; overflow is reported as unverified. |
+| `evidenceMaxChars` | number ≥ 500 | `6000` | Character cap per evidence file, truncated at line boundaries. |
 | `maxDiffCharsPerFile` | number ≥ 1000 | `14000` | Maximum diff characters per file sent to the model. The report call uses at most 2,200 characters per file and 120,000 characters of excerpts in total. |
 
 ### Token resolution
@@ -208,6 +214,9 @@ export CODEUP_TOKEN=...    # Codeup (YUNXIAO_TOKEN works too)
     autoReview: true
     autoAnalyze: true
     autoReconclude: false
+    evidenceVerify: true
+    evidenceMaxFiles: 6
+    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''
@@ -275,6 +284,9 @@ This example targets `gitlab.com`; a self-hosted GitLab origin is not detected a
     autoReview: true
     autoAnalyze: true
     autoReconclude: false
+    evidenceVerify: true
+    evidenceMaxFiles: 6
+    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''
