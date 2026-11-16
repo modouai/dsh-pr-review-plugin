@@ -329,6 +329,31 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
 - 发布的评论带插件署名行，语言跟随 `commentLanguage`；模型写出的正文同样跟随。
 - 评论超出平台 60000 字符上限时依次收缩：先精简附录、再省略条目，截断处会指向审查面板查看完整内容。
 
+## 开发
+
+浏览器侧是薄入口（`client.js`）+ 若干区域 chunk（`client.<area>.js`）。Harness 客户端加载器按包解析一个模块，并把每个 `require.async('./client.<area>.js')` 脚本放在独立作用域里执行，所以各区域是真正的模块——没有打包器，也没有构建步骤：
+
+| 文件 | 内容 |
+|---|---|
+| `client.js` | 注册、chunk 加载、装配、slot 注册 |
+| `client.i18n.js` | 界面文案与 locale |
+| `client.core.js` | host API、审查记录辅助、渲染原语、样式、跨区域单例 |
+| `client.components.js` | 顶栏、轮次条、版本控件、列表 |
+| `client.conclusion.js` | 结论/反馈/覆盖率渲染、markdown |
+| `client.preview.js` | 发布预览弹窗 |
+| `client.hooks.js` | 有状态的工作区 hook |
+| `client.views.js` | 文件列表、diff 视图、总览、diff 内容区 |
+| `client.workspace.js` | 工作区容器、布局、dock、浮层 |
+| `client.sidebar.js` | 右侧栏标签页 |
+| `client.entries.js` | 会话头部与空状态的入口胶囊 |
+
+宿主只根据入口文件推导包 revision，而所有 chunk URL 都带这个 revision，因此改动 chunk 后要运行 `pnpm stamp`：它把各 chunk 的内容哈希写进入口注释，否则浏览器可能继续使用缓存中的旧 chunk。`pnpm test` 会在戳过期时失败。
+
+```sh
+pnpm test    # 校验 chunk 戳 + 单元测试
+pnpm stamp   # 改动 chunk 后重写入口里的戳
+```
+
 ## License
 
 [MIT](LICENSE)

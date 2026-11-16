@@ -329,6 +329,31 @@ Review results are cached per repository under `~/.dsh/pr-review/<platform>-<rep
 - Published comments carry a footer identifying the plugin; the language follows `commentLanguage`, as does the model-written text.
 - Comments are truncated gracefully if they exceed the platform's 60,000-character limit: the appendix shrinks first, then entries are omitted, and the truncation points to the review panel for details.
 
+## Development
+
+The browser half is a thin entry (`client.js`) plus area chunks (`client.<area>.js`). The Harness client loader resolves one module per package and gives every `require.async('./client.<area>.js')` script its own scope, so the areas are real modules — there is no bundler and no build step:
+
+| File | Contents |
+|---|---|
+| `client.js` | registration, chunk loading, composition, slot registration |
+| `client.i18n.js` | interface strings and locale plumbing |
+| `client.core.js` | host API, review-record helpers, render primitives, styles, shared singletons |
+| `client.components.js` | top bar, round strip, version controls, lists |
+| `client.conclusion.js` | conclusion/feedback/coverage rendering, markdown |
+| `client.preview.js` | publish preview dialog |
+| `client.hooks.js` | stateful workspace hooks |
+| `client.views.js` | file list, diff views, overview, diff column |
+| `client.workspace.js` | workspace container, layout, dock, overlays |
+| `client.sidebar.js` | right-sidebar tab |
+| `client.entries.js` | session-header and hero entry pills |
+
+The Host derives a package's revision from the entry file alone, and every chunk URL carries that revision, so `pnpm stamp` folds the chunks' content hash into a comment in `client.js` — otherwise a cached chunk could outlive its edit. `pnpm test` fails while that stamp is stale.
+
+```sh
+pnpm test    # chunk stamp check + unit tests
+pnpm stamp   # rewrite the entry's chunk stamp after editing a chunk
+```
+
 ## License
 
 [MIT](LICENSE)
