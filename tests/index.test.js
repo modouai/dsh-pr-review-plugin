@@ -2722,24 +2722,28 @@ test('the report verifier decides risks; unconfirmed points stay out of risks', 
 
 test('an answer in prose is retried once as JSON instead of failing the round', async () => {
   let calls = 0;
+  const requests = [];
   const plugin = await setup({
     fetch: batchFetch,
-    llm: () => (async function* () {
-      calls += 1;
-      const text = calls === 1
-        ? '## 审查结论\n\n这是一段分析，不是 JSON。'
-        : JSON.stringify({
-            verdict: 'suggest',
-            summary: '讲解',
-            logic: '逻辑',
-            changes: '改动',
-            concerns: [],
-            evidenceNeeds: [],
-            suggestions: [],
-          });
-      yield { type: 'text-delta', text };
-      yield { type: 'finish', reason: { kind: 'stop' } };
-    })(),
+    llm: (options) => {
+      requests.push(options);
+      return (async function* () {
+        calls += 1;
+        const text = calls === 1
+          ? '## 审查结论\n\n这是一段分析，不是 JSON。'
+          : JSON.stringify({
+              verdict: 'suggest',
+              summary: '讲解',
+              logic: '逻辑',
+              changes: '改动',
+              concerns: [],
+              evidenceNeeds: [],
+              suggestions: [],
+            });
+        yield { type: 'text-delta', text };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+      })();
+    },
   });
   try {
     const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
@@ -2747,6 +2751,10 @@ test('an answer in prose is retried once as JSON instead of failing the round', 
     assert.equal(result.json.explanation.summary, '讲解');
     assert.equal(calls, 2, 'the corrective turn ran once');
     assert.deepEqual(result.json.explanation.issues, []);
+    // The Host's LLM runtime cannot replay assistant history without finish.replayState,
+    // so the correction must echo the bad answer inside a user turn.
+    assert.ok(requests[1].messages.every((message) => message.role !== 'assistant'));
+    assert.match(JSON.stringify(requests[1].messages), /不是合法 JSON/);
   } finally {
     await plugin.dispose();
   }

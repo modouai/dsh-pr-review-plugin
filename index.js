@@ -1400,12 +1400,17 @@ export function apply(ctx, config) {
     if (parsed !== null) return { raw: first, parsed };
     const correction = {
       ...prompt,
+      // Echo the bad answer inside a user turn, never as an assistant turn: the Host's LLM
+      // runtime expects assistant history to carry `finish.replayState`, which callModel
+      // does not collect, and replaying it fails with "reading 'replayState'".
       messages: [
         ...prompt.messages,
-        { role: 'assistant', content: [{ type: 'text', text: first.slice(0, 4000) }] },
         {
           role: 'user',
-          content: [{ type: 'text', text: '上面的回复不是合法 JSON。请只输出一个 JSON 对象，不要 markdown 代码块，不要任何解释。' }],
+          content: [{
+            type: 'text',
+            text: `上一次的输出不是合法 JSON：\n---\n${first.slice(0, 4000)}\n---\n请只输出一个 JSON 对象，不要 markdown 代码块，不要任何解释。`,
+          }],
         },
       ],
     };
