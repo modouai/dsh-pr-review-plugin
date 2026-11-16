@@ -95,7 +95,7 @@ window.__ModuleLoader__.load({
         }
         return h(
           PanelBoundary,
-          { t: makeT(useLocaleId(ctx)) },
+          { t },
           h(ReviewWorkspace, {
             ctx,
             sessionId: props.sessionId,

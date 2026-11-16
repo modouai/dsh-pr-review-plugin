@@ -10,8 +10,7 @@ window.__ModuleLoader__.load({
     /** Reusable chrome: top bar, round strip and version controls, risk/order lists. */
     return function createComponents({ core }) {
       const {
-        Btn, VerdictPill, text, fill, formatClock, formatStamp, shortSha, publishedOfRound,
-        roundsOf, versionsOf, roundPillOf, isRoundVersionPublished, previewConflictOf,
+        Btn, VerdictPill, text, fill, formatStamp, shortSha, roundPillOf,
       } = core;
 
       /**

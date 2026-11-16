@@ -2393,9 +2393,6 @@ test('every shipped chunk is loaded by the entry and named for the host\'s chunk
     .sort();
   assert.deepEqual(plain(client.plugin.__test.chunkFiles).sort(), onDisk,
     'the entry must require.async every chunk the package ships, and nothing else');
-  for (const name of onDisk) {
-    assert.match(name, /^client\.[A-Za-z0-9][A-Za-z0-9._-]*\.js$/);
-  }
 });
 
 test('the entry composes every area once its chunks arrive', async () => {

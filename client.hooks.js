@@ -5,7 +5,6 @@ window.__ModuleLoader__.load({
   chunk: 'client.hooks.js',
   factory(require) {
     const React = require('react');
-    const h = React.createElement;
 
     /** Stateful workspace hooks: loading, polling, preview/publish and chat. */
     return function createHooks({ core }) {
@@ -266,7 +265,6 @@ window.__ModuleLoader__.load({
         const latest = rounds.length === 0 ? null : rounds[rounds.length - 1];
         const versions = versionsOf(record, latest, true);
         const latestVersion = versions.length === 0 ? null : versions[versions.length - 1];
-        const currentList = stateRef.current.list;
         const hostItems = Array.isArray(data?.items) ? data.items : null;
         const items = previewItemsOf(
           hostItems,

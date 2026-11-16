@@ -5,7 +5,6 @@ window.__ModuleLoader__.load({
   chunk: 'client.i18n.js',
   factory(require) {
     const React = require('react');
-    const h = React.createElement;
 
     /** Interface strings and locale plumbing for every other area chunk. */
 

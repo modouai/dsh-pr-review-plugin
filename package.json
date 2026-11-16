@@ -34,7 +34,7 @@
     "stamp": "node scripts/stamp.js",
     "stamp:check": "node scripts/stamp.js --check",
     "test": "node scripts/stamp.js --check && node --test tests/*.test.js",
-    "prepublishOnly": "node scripts/stamp.js && node --test tests/*.test.js"
+    "prepublishOnly": "node scripts/stamp.js --check && node --test tests/*.test.js"
   },
   "engines": {
     "dsh": ">=0.2.2-rc.1 <0.3.0"

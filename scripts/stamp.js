@@ -41,23 +41,33 @@ export function stampOf(files = chunkFiles()) {
   return hash.digest('hex').slice(0, 12);
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Resolve both sides so the guard also holds when argv[1] is a relative path or uses the
+// other separator style (Windows).
+if (process.argv[1] !== undefined
+  && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   const entry = readFileSync(ENTRY, 'utf8');
-  const current = entry.match(STAMP)?.[0];
+  const stamps = entry.match(new RegExp(STAMP.source, 'gm')) ?? [];
+  if (stamps.length > 1) {
+    console.error(`client.js has ${stamps.length} chunk stamp lines; keep exactly one`);
+    process.exit(1);
+  }
+  const current = stamps[0];
   if (current === undefined) {
     console.error('client.js is missing the "// pr-review chunks: <hash>" stamp line');
     process.exit(1);
   }
-  const expected = `// pr-review chunks: ${stampOf()}`;
+  const files = chunkFiles();
+  const expected = `// pr-review chunks: ${stampOf(files)}`;
+  const covered = `chunks: ${files.join(', ')}`;
   if (process.argv.includes('--check')) {
     if (current !== expected) {
-      console.error(`chunk stamp is stale (${current} -> ${expected}); run \`node scripts/stamp.js\``);
+      console.error(`chunk stamp is stale (${current} -> ${expected}); run \`node scripts/stamp.js\` (${covered})`);
       process.exit(1);
     }
     console.log('chunk stamp matches');
   } else if (current !== expected) {
-    writeFileSync(ENTRY, entry.replace(STAMP, expected));
-    console.log(`stamped client.js with ${expected.slice('// pr-review chunks: '.length)}`);
+    writeFileSync(ENTRY, entry.replace(STAMP, () => expected));
+    console.log(`stamped client.js with ${expected.slice('// pr-review chunks: '.length)} (${covered})`);
   } else {
     console.log('chunk stamp already current');
   }

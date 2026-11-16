@@ -33,6 +33,9 @@ window.__ModuleLoader__.load({
         useWorkspaceDerived,
       } = hooks;
 
+      /** Stable stand-in when the host gives the panel no session store. */
+      const noSessions = () => '';
+
       function ReviewWorkspace(props) {
         const ctx = props.ctx;
         const onClose = typeof props.onClose === 'function' ? props.onClose : null;
@@ -40,7 +43,7 @@ window.__ModuleLoader__.load({
         const localeId = useLocaleId(ctx);
         const t = makeT(localeId);
 
-        const useSessions = typeof props.useSessions === 'function' ? props.useSessions : () => '';
+        const useSessions = typeof props.useSessions === 'function' ? props.useSessions : noSessions;
         const sessionCwd = useSessions((snapshot) => (props.sessionId !== undefined && snapshot?.byId !== undefined
           ? snapshot.byId[props.sessionId]?.cwd ?? ''
           : ''));
@@ -435,8 +438,8 @@ window.__ModuleLoader__.load({
        *
        * The container (`ReviewWorkspace`) owns state, effects and loads. This component turns
        * that model into labels and layout; `WorkspaceCenter`, `WorkspaceOverviewPane` and
-       * `WorkspaceFileDetailPane` each render one region. The factory scope is shared, so every
-       * component and helper above is visible here without imports.
+       * `WorkspaceFileDetailPane` each render one region. Cross-area helpers arrive through
+       * `createWorkspace(deps)`; this file owns the composition, not the primitives.
        */
       function WorkspaceView({ model }) {
         const {
@@ -671,7 +674,6 @@ window.__ModuleLoader__.load({
 
         const analysisPane = h(WorkspaceAnalysisPane, { model });
         const fileDetailPane = h(WorkspaceFileDetailPane, {
-          model,
           paneHeader,
           analysis: analysisPane,
           chat: chatBox('file'),
@@ -907,7 +909,7 @@ window.__ModuleLoader__.load({
       }
 
       /** Analysis column wrapped in its resizable aside, with the pane header and chat box. */
-      function WorkspaceFileDetailPane({ model, paneHeader, analysis, chat, width }) {
+      function WorkspaceFileDetailPane({ paneHeader, analysis, chat, width }) {
         return h(
           'aside',
           { className: 'prr-detail', style: { flex: `0 0 ${width}px`, minWidth: '120px' } },

@@ -15,7 +15,6 @@ window.__ModuleLoader__.load({
         Btn, FileRow, VerdictPill, isAnalyzing, fill, text, suggestionText, cleanStepTitle,
         parseUnifiedDiff, hunkRange, mapWalkthroughToHunks, publishedOfRound, roundsOf,
         staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge,
-        fileContentCache, fileContentKey,
       } = core;
       const {
         OrderList, RiskList, RoundMeta, DeltaBlock, VersionSelector,
