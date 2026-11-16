@@ -132,6 +132,65 @@ window.__ModuleLoader__.load({
       };
     }
 
+    /**
+     * Overflow/boundary state for the top-bar round strip. Tolerates a not-yet-mounted
+     * element, sub-pixel scroll offsets and an exact fit.
+     */
+    function roundStripStateOf(scroller) {
+      if (scroller === null || scroller === undefined) {
+        return { overflow: false, atStart: true, atEnd: true };
+      }
+      const scrollWidth = scroller.scrollWidth ?? 0;
+      const clientWidth = scroller.clientWidth ?? 0;
+      const scrollLeft = scroller.scrollLeft ?? 0;
+      if (scrollWidth - clientWidth <= 1) {
+        return { overflow: false, atStart: true, atEnd: true };
+      }
+      return {
+        overflow: true,
+        atStart: scrollLeft <= 1,
+        atEnd: scrollLeft + clientWidth >= scrollWidth - 1,
+      };
+    }
+
+    /** Scroll the round strip most of a page toward `direction` (-1 left, 1 right). */
+    function scrollRoundStrip(scroller, direction) {
+      if (scroller === null || scroller === undefined || typeof scroller.scrollBy !== 'function') {
+        return false;
+      }
+      const step = Math.max(Math.round((scroller.clientWidth ?? 0) * 0.8), 120);
+      scroller.scrollBy({ left: (direction < 0 ? -1 : 1) * step, behavior: 'smooth' });
+      return true;
+    }
+
+    /** Keep the selected pill (the latest by default) inside the visible strip. */
+    function revealActiveRound(scroller) {
+      if (scroller === null || scroller === undefined || typeof scroller.querySelector !== 'function') {
+        return false;
+      }
+      const target = scroller.querySelector('[data-active="true"]');
+      if (target === null || target === undefined || typeof target.scrollIntoView !== 'function') {
+        return false;
+      }
+      target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      return true;
+    }
+
+    /**
+     * Manual review starts are redundant only while automatic rounds are on and the current
+     * round already covers the selected PR's head. Unknown settings and unverifiable heads
+     * keep the button: it may be the only way to start a round.
+     */
+    function shouldShowReviewButton(list, review, selectedPull) {
+      if (list?.autoReview !== true) return true;
+      if (review === null || review === undefined) return true;
+      if (review.status === 'reviewing') return false;
+      if (review.status === 'error' || review.status === 'stale') return true;
+      if (selectedPull === null || selectedPull === undefined) return true;
+      const headSha = selectedPull.headSha ?? '';
+      return headSha === '' || headSha !== review.headSha;
+    }
+
     /** All versions of one round's conclusion, ascending; falls back to the top-level conclusion. */
     function versionsOf(review, roundEntry, isCurrent) {
       const raw = Array.isArray(roundEntry?.conclusions) ? roundEntry.conclusions : [];
@@ -641,7 +700,7 @@ window.__ModuleLoader__.load({
 .prr-root{display:flex;flex-direction:column;flex:1 1 auto;width:100%;overflow:hidden;background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;min-height:0;height:calc(var(--dsh-conversation-viewport-height,100%) - var(--dsh-composer-height,0px))}
 .prr-top{flex:0 0 auto;display:flex;align-items:center;gap:10px;padding:7px 14px;border-bottom:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}
 .prr-title{flex:0 0 auto;font-weight:600;font-size:13px}
-.prr-select{height:28px;max-width:460px;min-width:280px;padding:0 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:12.5px/1 inherit;outline:none}
+.prr-select{height:28px;max-width:680px;min-width:280px;padding:0 8px;border-radius:8px;border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font:12.5px/1 inherit;outline:none}
 .prr-select:focus{border-color:var(--dsw-alias-brand-primary)}
 .prr-round{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:10px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-size:11.5px;font-weight:600;white-space:nowrap}
 .prr-round[data-tone="done"]{background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 10%,transparent);color:color-mix(in srgb,var(--dsw-alias-state-success-primary) 72%,var(--dsw-alias-label-primary))}
@@ -654,6 +713,10 @@ window.__ModuleLoader__.load({
 .prr-btn-sm{height:24px;padding:0 8px;font-size:12px;border-radius:7px}
 .prr-btn-primary{background:var(--dsw-alias-brand-primary);border-color:transparent;color:#fff;font-weight:600}
 .prr-btn-primary:hover:not([disabled]){background:color-mix(in srgb,var(--dsw-alias-brand-primary) 86%,#000)}
+.prr-btn-icon{width:28px;padding:0;display:inline-flex;align-items:center;justify-content:center}
+.prr-icon{width:14px;height:14px;display:block}
+.prr-btn[data-busy="true"] .prr-icon{animation:prr-rotate .8s linear infinite}
+@keyframes prr-rotate{to{transform:rotate(360deg)}}
 .prr-banner{flex:0 0 auto;margin:8px 14px 0;padding:7px 10px;border-radius:8px;font-size:12.5px;background:color-mix(in srgb,var(--dsw-alias-state-error-primary) 13%,transparent);color:var(--dsw-alias-state-error-primary);word-break:break-word}
 .prr-body{flex:1;min-height:0;display:flex;overflow:hidden}
 .prr-files{flex:0 1 246px;min-width:158px;display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}
@@ -809,9 +872,18 @@ window.__ModuleLoader__.load({
 .prr-hit{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px dashed var(--dsw-alias-border-l1);min-width:0}
 .prr-hit:last-child{border-bottom:0}
 .prr-dotline{width:5px;height:5px;border-radius:3px;background:var(--dsw-alias-label-secondary);flex:0 0 auto}
-.prr-roundpills{flex:0 1 auto;min-width:0;display:flex;align-items:center;overflow:hidden}
+.prr-roundpills{position:relative;flex:0 3 auto;min-width:140px;display:flex;align-items:center;overflow:hidden}
 .prr-roundpills-scroll{display:flex;align-items:center;gap:6px;min-width:0;padding:1px 2px;scroll-padding-inline:6px;overflow-x:auto;overflow-y:hidden;white-space:nowrap;scrollbar-width:none;-ms-overflow-style:none}
 .prr-roundpills-scroll::-webkit-scrollbar{display:none}
+.prr-roundscroll{position:absolute;top:50%;z-index:2;display:none;align-items:center;justify-content:center;width:20px;height:22px;padding:0;border:1px solid var(--dsw-alias-border-l1);border-radius:6px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);box-shadow:0 1px 3px rgba(0,0,0,.16);cursor:pointer;transform:translateY(-50%)}
+.prr-roundscroll[data-side="prev"]{left:0}
+.prr-roundscroll[data-side="next"]{right:0}
+.prr-roundpills[data-overflow="true"] .prr-roundscroll{display:inline-flex}
+.prr-roundpills[data-at-start="true"] .prr-roundscroll[data-side="prev"]{display:none}
+.prr-roundpills[data-at-end="true"] .prr-roundscroll[data-side="next"]{display:none}
+.prr-roundscroll:hover:not([disabled]){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.prr-roundscroll:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
+.prr-roundscroll-icon{display:block;width:12px;height:12px}
 .prr-roundpill{flex:0 0 auto;gap:5px;border:1px solid transparent;font-family:inherit;cursor:pointer;transition:background-color 140ms ease,color 140ms ease,border-color 140ms ease,box-shadow 140ms ease}
 .prr-roundpill:hover:not([data-active="true"]){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l1)}
 .prr-roundpill[data-active="true"]{font-weight:700;box-shadow:0 1px 2px rgba(0,0,0,.10)}
@@ -885,7 +957,7 @@ window.__ModuleLoader__.load({
 .prr-sidebar .prr-detail{flex:0 0 224px;min-width:176px}
 .prr-sidebar .prr-diffcol{min-width:176px}
 .prr-sidebar .prr-top{padding:6px 8px;gap:6px}
-.prr-sidebar .prr-select{min-width:110px;max-width:220px}
+.prr-sidebar .prr-select{min-width:110px;max-width:260px}
 .prr-subseg{flex:0 0 auto;display:flex;gap:2px;padding:2px;border-radius:8px;background:var(--dsw-alias-bg-layer-2)}
 .prr-subseg-btn{height:22px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font:12px/1 inherit;cursor:pointer;white-space:nowrap}
 .prr-subseg-btn[data-active="true"]{background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-weight:600}
@@ -918,7 +990,12 @@ window.__ModuleLoader__.load({
     }
 
     function Btn(props) {
-      const className = ['prr-btn', props.small ? 'prr-btn-sm' : '', props.primary ? 'prr-btn-primary' : '']
+      const className = [
+        'prr-btn',
+        props.small ? 'prr-btn-sm' : '',
+        props.primary ? 'prr-btn-primary' : '',
+        props.iconOnly === true ? 'prr-btn-icon' : '',
+      ]
         .filter((item) => item !== '')
         .join(' ');
       return h(
@@ -927,10 +1004,42 @@ window.__ModuleLoader__.load({
           type: 'button',
           className,
           title: props.title,
+          'aria-label': props.ariaLabel,
+          'data-busy': props.busy === true ? 'true' : undefined,
           disabled: props.disabled === true,
           onClick: props.disabled === true ? undefined : props.onClick,
         },
-        props.label,
+        props.icon === undefined ? props.label : props.icon,
+      );
+    }
+
+    /** Inline refresh glyph: the project ships no icon library, so the icon is an SVG here. */
+    function RefreshIcon() {
+      return h(
+        'svg',
+        {
+          className: 'prr-icon',
+          width: 14,
+          height: 14,
+          viewBox: '0 0 16 16',
+          'aria-hidden': 'true',
+          focusable: 'false',
+        },
+        h('path', {
+          d: 'M13.2 8a5.2 5.2 0 1 1-1.7-3.85',
+          fill: 'none',
+          stroke: 'currentColor',
+          'stroke-width': 1.6,
+          'stroke-linecap': 'round',
+        }),
+        h('path', {
+          d: 'M13.4 1.9v3.1h-3.1',
+          fill: 'none',
+          stroke: 'currentColor',
+          'stroke-width': 1.6,
+          'stroke-linecap': 'round',
+          'stroke-linejoin': 'round',
+        }),
       );
     }
 
@@ -973,13 +1082,14 @@ window.__ModuleLoader__.load({
     return {
         api, postJson, formatClock, formatStamp, fill, suggestionText, reviewAskContext,
         shortSha, roundsOf, applyRoundSelection, versionsOf, publishedOfRound, staleInfoOf,
+        roundStripStateOf, scrollRoundStrip, revealActiveRound, shouldShowReviewButton,
         isRoundVersionPublished, previewConflictOf, roundPillOf, panelSizing, clampColumnWidth,
         sidebarReviewAddress, parseSidebarReviewAddress, actionsBridge, fileContentCache,
         fileContentKey, STAGE_KEY, scrollToNewLine, fileLineLabel, previewItemsOf,
         previewSelectionSupported, selectionIncludeIds, buildPreviewBody, buildPublishBody, text,
         severityLabel, fileSeverityOf, STATUS_KEY, cleanStepTitle,
         parseUnifiedDiff, mapWalkthroughToHunks, hunkRange, CSS,
-        findingKey, FEEDBACK_LABEL_KEYS, VerdictPill, Btn, FileRow, isAnalyzing,
+        findingKey, FEEDBACK_LABEL_KEYS, VerdictPill, Btn, RefreshIcon, FileRow, isAnalyzing,
     };
   },
 });
