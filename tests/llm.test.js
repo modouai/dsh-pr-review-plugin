@@ -31,6 +31,7 @@ import {
   normalizeReport,
   normalizeUnverified,
   normalizeVerdict,
+  partitionSuggestions,
   partitionVerdicts,
   parseFeedbackReply,
   platformLabel,
@@ -822,4 +823,32 @@ test('normalizeEvidenceNeeds accepts every documented kind', () => {
     const [need] = normalizeEvidenceNeeds([{ kind, path: 'a.js' }]);
     assert.equal(need.kind, kind);
   }
+});
+
+test('partitionSuggestions drops only explicitly rejected suggestions', () => {
+  const { kept, dropped } = partitionSuggestions({
+    suggestionResults: [{ index: 1, keep: false }, { index: 3, keep: true }, null],
+  }, ['已实现', '未表态', '保留']);
+  assert.deepEqual(kept, ['未表态', '保留']);
+  assert.equal(dropped, 1);
+});
+
+test('the verifier prompt carries suggestions and the diff when given', () => {
+  const prompt = buildExplainVerifyPrompt(
+    { repo: 'r', number: 1, title: 't' },
+    { path: 'README.md', status: 'modified', additions: 2, deletions: 0 },
+    [],
+    '',
+    [],
+    {
+      language: 'zh',
+      suggestions: ['补齐三行配置'],
+      diffText: '+evidenceVerify: true\n+evidenceMaxFiles: 6',
+    },
+  );
+  const text = prompt.messages[0].content[0].text;
+  assert.match(text, /## 候选改进建议/);
+  assert.match(text, /1\. 补齐三行配置/);
+  assert.match(text, /## 该文件的 diff/);
+  assert.match(text, /"suggestionResults"/);
 });

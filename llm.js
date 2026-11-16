@@ -336,9 +336,13 @@ function verifierSystem(language) {
 }
 
 /** Shared body for both verifier prompts: candidates, collected evidence, unreadable items. */
-function verifyPromptBody(header, concerns, evidence, missing, language) {
+function verifyPromptBody(header, concerns, evidence, missing, language, extra = {}) {
   const list = Array.isArray(concerns) ? concerns : [];
   const missingList = Array.isArray(missing) ? missing : [];
+  const suggestions = Array.isArray(extra.suggestions)
+    ? extra.suggestions.filter((item) => typeof item === 'string' && item.trim() !== '')
+    : [];
+  const diffText = typeof extra.diffText === 'string' ? extra.diffText.trim() : '';
   const candidateLines = list.length === 0
     ? ['（无候选问题）']
     : list.map((item, index) => {
@@ -346,7 +350,7 @@ function verifyPromptBody(header, concerns, evidence, missing, language) {
         return `${index + 1}. [${item.severity}]${where} ${item.point}`;
       });
   const missingLines = missingList.length === 0 ? ['（无）'] : missingList.map((item) => `- ${item}`);
-  return [
+  const lines = [
     header,
     '',
     '## 候选问题（index 从 1 开始）',
@@ -357,6 +361,14 @@ function verifyPromptBody(header, concerns, evidence, missing, language) {
     '',
     '## 无法读取的证据',
     ...missingLines,
+  ];
+  if (diffText !== '') {
+    lines.push('', '## 该文件的 diff（用来判断建议是否已经实现）', diffText);
+  }
+  if (suggestions.length > 0) {
+    lines.push('', '## 候选改进建议（index 从 1 开始）', ...suggestions.map((item, index) => `${index + 1}. ${item}`));
+  }
+  lines.push(
     '',
     '## 判定规则',
     '对每条候选问题给出 confidence（0-100）：',
@@ -366,17 +378,24 @@ function verifyPromptBody(header, concerns, evidence, missing, language) {
     '每条候选都必须返回一条 result，index 用上面列表的编号（从 1 开始）；index 越界或缺失的结果会被丢弃。',
     '证据块可能只显示文件的一部分（标题里标注了行范围）。只看到片段时，不要断言文件里不存在某段内容；需要完整文件才能判断的，按未验证处理。',
     '如果 point 里出现「无法确认 / 无法核实 / 证据不足 / 证据被截断」这类措辞，confidence 必须低于 80，否则该条会被降级为未验证项。',
-    '只看候选问题与证据，不要引用第一轮的推理，也不要重新审查整个文件。',
+    '只看候选与证据，不要引用第一轮的推理，也不要重新审查整个文件。',
     '如果证据里发现了新的、可确认的问题，写进 extraIssues，带上 confidence 并确保能引用证据中的代码；否则不要输出。',
     '规范类问题必须引用规范原文（如「CLAUDE.md 要求……」），没有原文就按未验证处理。',
-    '',
-    '请输出严格 JSON（不要输出 JSON 以外的解释）：',
-    '{',
-    '  "results": [{ "index": 1, "confidence": 85, "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0, "missing": "" }],',
-    '  "extraIssues": [{ "confidence": 90, "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0 }]',
-    '}',
-    language === 'en' ? 'Write the human-readable fields in English.' : '',
-  ].filter((line) => line !== '').join('\n');
+  );
+  if (suggestions.length > 0) {
+    lines.push(
+      '对每条候选改进建议给出 keep：如果该建议已经由本次 diff 或现有代码实现，keep 为 false 并写明 reason；仍存在缺口才为 true。',
+      '不要因为建议「有价值」而保留已经实现的条目。每条建议都必须返回一条 suggestionResult（index 从 1 开始）。',
+    );
+  }
+  lines.push('', '请输出严格 JSON（不要输出 JSON 以外的解释）：', '{');
+  lines.push('  "results": [{ "index": 1, "confidence": 85, "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0, "missing": "" }],');
+  lines.push('  "extraIssues": [{ "confidence": 90, "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0 }]' + (suggestions.length > 0 ? ',' : ''));
+  if (suggestions.length > 0) {
+    lines.push('  "suggestionResults": [{ "index": 1, "keep": true, "reason": "" }]');
+  }
+  lines.push('}', language === 'en' ? 'Write the human-readable fields in English.' : '');
+  return lines.filter((line) => line !== '').join('\n');
 }
 
 /** Verifier for the whole-PR report: turns report concerns into risks or unverified notes. */
@@ -417,6 +436,7 @@ export function buildExplainVerifyPrompt(pull, file, concerns, evidence, missing
           evidence,
           missing,
           language,
+          { suggestions: options.suggestions, diffText: options.diffText },
         ),
       }],
     }],
@@ -758,6 +778,28 @@ export function partitionVerdicts(raw, concerns) {
     }
   }
   return { issues, unverified, dropped };
+}
+
+/**
+ * Suggestions are reviewed too: the verifier marks ones the diff already implements.
+ * A suggestion without a verdict is kept (the verifier may have skipped it); only an
+ * explicit `keep: false` removes it.
+ */
+export function partitionSuggestions(raw, suggestions) {
+  const list = Array.isArray(suggestions) ? suggestions : [];
+  const byIndex = new Map();
+  for (const item of Array.isArray(raw?.suggestionResults) ? raw.suggestionResults : []) {
+    if (item === null || typeof item !== 'object') continue;
+    if (Number.isInteger(item.index) && item.index >= 1) byIndex.set(item.index, item);
+  }
+  const kept = [];
+  let dropped = 0;
+  list.forEach((suggestion, index) => {
+    const verdict = byIndex.get(index + 1);
+    if (verdict !== undefined && verdict.keep === false) dropped += 1;
+    else kept.push(suggestion);
+  });
+  return { kept, dropped };
 }
 
 /** The triage pass output: display fields plus candidate problems, before any verification. */

@@ -53,6 +53,7 @@ import {
   normalizeReport,
   normalizeReportDraft,
   normalizeVerdict,
+  partitionSuggestions,
   partitionVerdicts,
 } from './llm.js';
 
@@ -1205,6 +1206,7 @@ export function apply(ctx, config) {
         issues: [],
         unverified: concerns.map((item) => ({ point: item.point, missing: `复审未完成：${reason}` })),
         dropped: 0,
+        raw: null,
       };
     }
     if (answer.parsed === null) {
@@ -1213,6 +1215,7 @@ export function apply(ctx, config) {
         issues: [],
         unverified: concerns.map((item) => ({ point: item.point, missing: '复审未完成：模型没有返回可解析的 JSON' })),
         dropped: 0,
+        raw: null,
       };
     }
     const verdicts = partitionVerdicts(answer.parsed, concerns);
@@ -1221,7 +1224,7 @@ export function apply(ctx, config) {
     if (verdicts.dropped > 0) {
       console.warn(`[pr-review] 复审丢弃 ${verdicts.dropped} 条候选（无法归位或置信度 < 25）`);
     }
-    return { discarded: false, ...verdicts };
+    return { discarded: false, raw: answer.parsed, ...verdicts };
   }
 
   // ---------- pull list ----------
@@ -1622,9 +1625,15 @@ export function apply(ctx, config) {
       throw new Error(`模型没有返回完整的分析 JSON。原始输出：${answer.raw.slice(0, 400)}`);
     }
     const concerns = normalizeConcerns(parsed.concerns);
+    const rawSuggestions = Array.isArray(parsed.suggestions)
+      ? parsed.suggestions.filter((item) => typeof item === 'string')
+      : [];
     let issues = [];
     let unverified = [];
-    if (concerns.length > 0) {
+    let suggestions = rawSuggestions;
+    // Suggestions go through the verifier too: a suggestion the diff already implements is
+    // noise, and the triage pass cannot tell on its own.
+    if (concerns.length > 0 || rawSuggestions.length > 0) {
       if (settings.evidenceVerify === false) {
         issues = concerns.map(({ severity, point, line }) => ({ severity, point, line }));
       } else {
@@ -1632,18 +1641,26 @@ export function apply(ctx, config) {
           record,
           concerns,
           parsed.evidenceNeeds,
-          (evidence, missing) => buildExplainVerifyPrompt(pull, file, concerns, evidence, missing, { language: commentLanguage() }),
+          (evidence, missing) => buildExplainVerifyPrompt(pull, file, concerns, evidence, missing, {
+            language: commentLanguage(),
+            suggestions: rawSuggestions,
+            diffText,
+          }),
           epoch,
         );
         if (verdicts.discarded) return { explanation: null, cached: false, discarded: true };
         issues = verdicts.issues.map(({ severity, point, line }) => ({ severity, point, line }));
         unverified = verdicts.unverified;
+        if (verdicts.raw !== null) {
+          suggestions = partitionSuggestions(verdicts.raw, rawSuggestions).kept;
+        }
       }
     }
     const explanation = normalizeExplanation({
       ...parsed,
       issues,
       unverified,
+      suggestions,
       // A single missing verdict must not present as "pass".
       verdict: parsed.verdict ?? 'suggest',
     });

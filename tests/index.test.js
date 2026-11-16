@@ -2853,3 +2853,30 @@ test('evidence blocks say which lines they show', async () => {
     await plugin.dispose();
   }
 });
+
+test('a suggestion the diff already implements is dropped by the verifier', async () => {
+  const plugin = await setup({
+    fetch: batchFetch,
+    llm: llmTriageThenVerify({
+      verdict: 'suggest',
+      summary: '讲解',
+      logic: '逻辑',
+      changes: '改动',
+      concerns: [],
+      evidenceNeeds: [],
+      suggestions: ['补齐三行配置', '补一条测试'],
+    }, {
+      results: [],
+      extraIssues: [],
+      suggestionResults: [{ index: 1, keep: false, reason: 'diff 已包含' }, { index: 2, keep: true }],
+    }),
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.json.explanation.suggestions, ['补一条测试']);
+    assert.deepEqual(result.json.explanation.issues, []);
+  } finally {
+    await plugin.dispose();
+  }
+});
