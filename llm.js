@@ -181,6 +181,7 @@ function reviewerSystem(language) {
     ...REVIEW_FRAMEWORK,
     '分析代码逻辑时要说清来龙去脉：这段代码原来做什么、现在改成怎样、被谁调用、影响哪些数据与状态。',
     '不要讨论与本次改动无关的既有问题，除非这次改动会触发或放大它。',
+    '输出格式：任务要求 JSON 时，只输出一个 JSON 对象，不要 markdown 标题、代码块或任何解释。',
     language === 'en'
       ? 'Write every human-readable field in English; keep code identifiers, paths and quoted code verbatim.'
       : '所有输出（代码标识符、路径与原文引用除外）使用简体中文。',
