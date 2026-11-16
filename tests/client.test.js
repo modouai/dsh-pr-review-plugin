@@ -14,12 +14,12 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import vm from 'node:vm';
 
 const CLIENT_URL = new URL('../client.js', import.meta.url);
 
-/** Where the plugin factory returns its public module; tests splice a `__parts` export in. */
+/** Where the plugin factory returns its public module; tests splice the composition handle in. */
 const EXPORT_MARKER = "    return {\n      inject: ['slots'],\n      apply(ctx) {";
 
 /** Internals the tests need; every name must exist in the client factory scope. */
@@ -35,6 +35,11 @@ const EXPOSED = [
   'DockNotice',
   'EmbeddedFooter',
   'ReviewWorkspace',
+  'WorkspaceView',
+  'WorkspaceCenter',
+  'WorkspaceOverviewPane',
+  'WorkspaceAnalysisPane',
+  'WorkspaceFileDetailPane',
   'clampColumnWidth',
   'actionsBridge',
   'overviewFooter',
@@ -202,24 +207,37 @@ function createFakeReact() {
   return { React, Fragment, render, textOf };
 }
 
-// ---------- loading client.js ----------
+// ---------- loading client.js and its chunks ----------
 
-/** Evaluate client.js in a sandbox and return its internals plus the fake renderer. */
+/**
+ * Evaluate the entry and its area chunks in one sandbox, compose them the way the entry does,
+ * and return the flat internals plus the fake renderer. Chunk scripts call the same
+ * `__ModuleLoader__.load({ id, chunk, factory })` the Host installs; `require.async` here
+ * resolves the sibling file from disk instead of over the network.
+ */
 function loadClient() {
   const source = readFileSync(CLIENT_URL, 'utf8');
   assert.ok(
     source.includes(EXPORT_MARKER),
     'client.js module-return marker changed; update tests/client.test.js',
   );
-  const exposed = EXPOSED.join(', ');
   const instrumented = source.replace(
     EXPORT_MARKER,
-    `    return {\n      __parts: { ${exposed} },\n      inject: ['slots'],\n      apply(ctx) {`,
+    "    return {\n      __test: { compose, chunkFiles: CHUNK_FILES, ready },\n      inject: ['slots'],\n      apply(ctx) {",
   );
 
-  const loaded = [];
+  const fake = createFakeReact();
+  const registrations = new Map();
+  const chunkExports = new Map();
+
   const fakeWindow = {
-    __ModuleLoader__: { load: (definition) => loaded.push(definition) },
+    __ModuleLoader__: {
+      load: (definition) => {
+        const key = definition.chunk ?? '__entry';
+        assert.ok(!registrations.has(key), `duplicate module registration for ${key}`);
+        registrations.set(key, definition);
+      },
+    },
     fetch: async () => {
       throw new Error('window.fetch was not stubbed by the test');
     },
@@ -233,18 +251,57 @@ function loadClient() {
     clearTimeout: globalThis.clearTimeout,
     setInterval: globalThis.setInterval,
     clearInterval: globalThis.clearInterval,
+    ResizeObserver: class ResizeObserver {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
   };
-  vm.runInNewContext(instrumented, sandbox, { filename: 'client.js' });
+  const context = vm.createContext(sandbox);
 
-  assert.equal(loaded.length, 1, 'client.js must register exactly one module');
-  const fake = createFakeReact();
-  const registered = loaded[0].factory((name) => {
-    if (name === 'react') return fake.React;
-    throw new Error(`unexpected require(${name}) in client.js`);
-  });
-  assert.ok(registered.__parts, 'client.js internals were not exposed for tests');
+  const makeRequire = () => {
+    const require = (name) => {
+      if (name === 'react') return fake.React;
+      throw new Error(`unexpected require(${name})`);
+    };
+    require.async = async (spec) => {
+      if (!spec.startsWith('./')) throw new Error(`unexpected require.async(${spec})`);
+      return loadChunk(spec.slice(2));
+    };
+    require.asset = (reference) => reference;
+    return require;
+  };
 
-  return { parts: registered.__parts, fake, window: fakeWindow, plugin: registered };
+  /** Register and materialize one chunk script, memoized per sandbox. */
+  function loadChunk(fileName) {
+    if (chunkExports.has(fileName)) return chunkExports.get(fileName);
+    if (!registrations.has(fileName)) {
+      vm.runInContext(readFileSync(new URL(`../${fileName}`, import.meta.url), 'utf8'), context, {
+        filename: fileName,
+      });
+    }
+    const definition = registrations.get(fileName);
+    assert.ok(definition !== undefined, `${fileName} must register itself through __ModuleLoader__.load`);
+    assert.equal(definition.id, '@modouai/dsh-pr-review', `${fileName} registers under the package id`);
+    const exports = definition.factory(makeRequire());
+    chunkExports.set(fileName, exports);
+    return exports;
+  }
+
+  vm.runInContext(instrumented, context, { filename: 'client.js' });
+  const entry = registrations.get('__entry');
+  assert.ok(entry !== undefined, 'client.js must register the package entry');
+  const plugin = entry.factory(makeRequire());
+  assert.ok(plugin.__test, 'client.js exposes its composition for tests');
+
+  const chunks = Object.fromEntries(plugin.__test.chunkFiles.map((file) => [file, loadChunk(file)]));
+  const modules = plugin.__test.compose(chunks);
+  const parts = Object.assign({}, ...Object.values(modules));
+  for (const name of EXPOSED) {
+    assert.ok(name in parts, `client internals changed: ${name} is exported by no chunk`);
+  }
+
+  return { parts, fake, window: fakeWindow, plugin, modules };
 }
 
 // ---------- fixtures ----------
@@ -2325,6 +2382,148 @@ test('the workspace renders its root in every layer (overlay and sidebar)', () =
     assert.ok(view.html.includes(expected), `${layer} layer renders its root`);
     assert.ok(view.html.includes('prr-resizer'), `${layer} layer renders the column resizer: ${view.html.slice(0, 240)}`);
   }
+});
+
+test('every shipped chunk is loaded by the entry and named for the host\'s chunk route', () => {
+  const client = loadClient();
+  const onDisk = readdirSync(new URL('..', import.meta.url))
+    .filter((name) => /^client\.[A-Za-z0-9][A-Za-z0-9._-]*\.js$/.test(name)
+      && name !== 'client.js'
+      && !name.startsWith('client.node.'))
+    .sort();
+  assert.deepEqual(plain(client.plugin.__test.chunkFiles).sort(), onDisk,
+    'the entry must require.async every chunk the package ships, and nothing else');
+});
+
+test('the entry composes every area once its chunks arrive', async () => {
+  const client = loadClient();
+  const modules = await client.plugin.__test.ready;
+  assert.ok(modules, 'the chunk graph composes');
+  for (const area of ['i18n', 'core', 'components', 'conclusion', 'preview', 'hooks', 'views', 'workspace', 'sidebar', 'entries']) {
+    assert.ok(modules[area], `${area} is composed`);
+  }
+  assert.equal(modules.i18n.DICT.zh.title, 'PR 审查');
+  assert.equal(typeof modules.workspace.ReviewWorkspace, 'function');
+  assert.equal(typeof modules.sidebar.ReviewSidebar, 'function');
+});
+
+test('the workspace view renders the open file in the narrow sidebar layout', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const t = translator(parts);
+  const review = {
+    number: 7,
+    round: 1,
+    status: 'done',
+    headSha: 'abc1234',
+    report: {},
+    files: [{ path: 'src/a.js', status: 'modified', additions: 12, deletions: 3 }],
+    explanations: [],
+    published: [],
+    pullChat: [],
+    comment: null,
+  };
+  const diff = 'diff --git a/src/a.js b/src/a.js\n'
+    + '--- a/src/a.js\n'
+    + '+++ b/src/a.js\n'
+    + '@@ -1,2 +1,2 @@\n'
+    + '-old\n'
+    + '+new\n';
+  // The model the container builds: every field is required, so a missing one fails loudly.
+  const model = {
+    t,
+    onClose: null,
+    inputActions: null,
+    embedded: false,
+    sidebar: true,
+    rootRef: { current: null },
+    list: { prs: [{ number: 7, title: 'Fix', headSha: 'abc1234' }], reviews: {}, lastPollAt: 0, autoAnalyze: true },
+    listError: '',
+    listBusy: false,
+    prNumber: 7,
+    setPrNumber: () => {},
+    review,
+    reviewError: '',
+    filePath: 'src/a.js',
+    contextBusy: false,
+    contextError: '',
+    contextBlocked: false,
+    setContextAttempt: () => {},
+    currentExplanation: { chat: [], logic: '', walkthrough: [] },
+    suggestionNotice: '',
+    reviewRounds: [],
+    latestRoundNumber: 1,
+    selectedRoundNumber: 1,
+    selectRound: () => {},
+    mode: 'file',
+    setMode: () => {},
+    sidebarPane: 'diff',
+    setSidebarPane: () => {},
+    sidebarWidth: 700,
+    filesWidth: 0,
+    setFilesWidth: () => {},
+    detailWidth: 0,
+    setDetailWidth: () => {},
+    startReview: () => {},
+    refreshPulls: () => {},
+    openFile: () => {},
+    requestAnalyzeAll: () => {},
+    analyzeAllBusy: false,
+    orderedFiles: review.files,
+    historicalView: false,
+    publishError: '',
+    feedbackError: '',
+    fileDiffError: '',
+    fileContentError: '',
+    overlayDraft: '',
+    overlayBusy: false,
+    setOverlayDraft: () => {},
+    sendOverlayMessage: () => {},
+    preview: null,
+    previewBusy: false,
+    previewError: '',
+    previewRefreshBusy: false,
+    publishBusy: false,
+    closePreview: () => {},
+    togglePreviewItem: () => {},
+    selectAllPreviewItems: () => {},
+    selectNonePreviewItems: () => {},
+    submitPublish: () => {},
+    walkFloat: null,
+    activeHunk: 0,
+    closeWalkFloat: () => {},
+    expandHunkContext: () => {},
+    askInChat: () => {},
+    currentLogic: '',
+    currentWalkthrough: [],
+    openWalkFloat: () => {},
+    showFullFile: false,
+    fileContentBusy: false,
+    fileContent: null,
+    toggleFullFile: () => {},
+    wrap: false,
+    setWrap: () => {},
+    fileDiff: { diff, truncated: false },
+    diffScrollRef: { current: null },
+    expandedHunks: new Set(),
+    collapseHunkContext: () => {},
+    setActiveHunk: () => {},
+  };
+
+  const view = fake.render(fake.React.createElement(parts.WorkspaceView, { model }));
+  // 700px is below the 780px threshold, so this must be the collapsed-analysis layout.
+  // Assert on rendered elements, not on the HTML: the inline stylesheet contains the same
+  // class names as text, and the fake renderer emits `className`, not `class`.
+  const classes = new Set(view.elements.flatMap((element) => (
+    typeof element.props?.className === 'string' ? element.props.className.split(' ') : []
+  )));
+  assert.ok(classes.has('prr-subseg'), 'a narrow sidebar offers the diff/analysis toggle');
+  assert.ok(classes.has('prr-diffcol'), 'the open file renders its diff column');
+  assert.ok(classes.has('prr-overview-pane'), 'the narrow layout keeps one content pane');
+  assert.ok(!classes.has('prr-detail'), 'the narrow layout skips the analysis aside');
+  assert.ok(view.textOnly.includes('src/a.js'), 'the diff head names the open file');
+  assert.ok(view.textOnly.includes('+12') && view.textOnly.includes('-3'), 'the diff head shows the file stats');
+  assert.ok(view.textOnly.includes(t('wrapOn')), 'the wrap toggle uses the active locale');
 });
 
 test('dragged columns are clamped to usable ranges and can be reset', () => {

@@ -323,11 +323,38 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
 
 ## 说明
 
-- 升级插件：浏览器侧（`client.js`）热加载；host 侧（`index.js` / `providers.js` / `llm.js`）需重启 Harness 生效。
+- 升级插件：浏览器侧（`client.js` 及其 `client.<area>.js` 区域 chunk）热加载；host 侧（`index.js` / `providers.js` / `llm.js`）需重启 Harness 生效。改动 chunk 后先运行 `pnpm stamp` 再测试（见[开发](#开发)）。
 - PR 列表只显示最近更新的 20 个 open PR；更早的存在时面板会明确提示。
 - 缓存采用「临时文件 + 改名」原子写入。缓存读取失败时，插件把原文件另存为 `<文件名>.corrupt-<时间戳>` 而不是覆盖，并在面板提示。
 - 发布的评论带插件署名行，语言跟随 `commentLanguage`；模型写出的正文同样跟随。
 - 评论超出平台 60000 字符上限时依次收缩：先精简附录、再省略条目，截断处会指向审查面板查看完整内容。
+
+## 开发
+
+浏览器侧是薄入口（`client.js`）+ 若干区域 chunk（chunk：按区域拆分的浏览器侧脚本文件，形如 `client.<area>.js`）。Harness 客户端加载器按包解析一个模块，并把每个 `require.async('./client.<area>.js')` 脚本放在独立作用域里执行，所以各区域是真正的模块——没有打包器，也没有构建步骤：
+
+| 文件 | 内容 |
+|---|---|
+| `client.js` | 注册、chunk 加载、装配、slot 注册 |
+| `client.i18n.js` | 界面文案与 locale |
+| `client.core.js` | host API、审查记录辅助、渲染原语、样式、跨区域单例 |
+| `client.components.js` | 顶栏、轮次条、版本控件、列表 |
+| `client.conclusion.js` | 结论/反馈/覆盖率渲染、markdown |
+| `client.preview.js` | 发布预览弹窗 |
+| `client.hooks.js` | 有状态的工作区 hook |
+| `client.views.js` | 文件列表、diff 视图、总览、diff 内容区 |
+| `client.workspace.js` | 工作区容器、布局、dock、浮层 |
+| `client.sidebar.js` | 右侧栏标签页 |
+| `client.entries.js` | 会话头部与空状态的入口胶囊 |
+
+宿主只根据入口文件推导包 revision，而所有区域 chunk 的 URL 都带这个 revision，因此改动 chunk 后要运行 `pnpm stamp`（戳：把各 chunk 的内容哈希写进入口注释），否则浏览器可能继续使用缓存中的旧 chunk。`pnpm test` 会在戳过期时失败，并提示运行 `pnpm stamp`。
+
+以下命令在仓库根目录执行，需先 `pnpm install`：
+
+```sh
+pnpm test    # 区域 chunk 契约 + 戳校验 + 单元测试
+pnpm stamp   # 改动 chunk 后重写入口里的戳，然后提交 client.js
+```
 
 ## License
 
