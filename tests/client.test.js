@@ -2601,3 +2601,9 @@ test('the overview shows report unverified notes after the initial risks', () =>
   assert.match(textOnly, /缺少证据：缺调用方/);
 });
 
+test('the zh and en tables expose the same keys', () => {
+  const client = loadClient();
+  const { DICT } = client.parts;
+  assert.deepEqual(Object.keys(DICT.zh).sort(), Object.keys(DICT.en).sort());
+});
+

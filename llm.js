@@ -336,21 +336,23 @@ function verifierSystem(language) {
 
 /** Shared body for both verifier prompts: candidates, collected evidence, unreadable items. */
 function verifyPromptBody(header, concerns, evidence, missing, language) {
-  const candidateLines = concerns.length === 0
+  const list = Array.isArray(concerns) ? concerns : [];
+  const missingList = Array.isArray(missing) ? missing : [];
+  const candidateLines = list.length === 0
     ? ['（无候选问题）']
-    : concerns.map((item, index) => {
+    : list.map((item, index) => {
         const where = item.file === '' ? '' : ` [${item.file}${item.line > 0 ? `:${item.line}` : ''}]`;
-        return `${index}. [${item.severity}]${where} ${item.point}`;
+        return `${index + 1}. [${item.severity}]${where} ${item.point}`;
       });
-  const missingLines = missing.length === 0 ? ['（无）'] : missing.map((item) => `- ${item}`);
+  const missingLines = missingList.length === 0 ? ['（无）'] : missingList.map((item) => `- ${item}`);
   return [
     header,
     '',
-    '## 候选问题（index 从 0 开始）',
+    '## 候选问题（index 从 1 开始）',
     ...candidateLines,
     '',
     '## 宿主取回的证据',
-    evidence.trim() === '' ? '（没有取到任何证据）' : evidence,
+    String(evidence ?? '').trim() === '' ? '（没有取到任何证据）' : String(evidence).trim(),
     '',
     '## 无法读取的证据',
     ...missingLines,
@@ -360,15 +362,15 @@ function verifyPromptBody(header, concerns, evidence, missing, language) {
     '- 80-100：证据确认问题存在，或高置信度会在实践中命中；写入 results，并给出最终的 severity、point、line。',
     '- 25-79：只能部分验证；写入 results 并在 missing 里说明还缺哪份证据。',
     '- 0-24：经不起推敲、属于既有问题或误报；写入 results 并给低分，不要写成高分。',
-    '每条候选都必须返回一条 result（index 对应上面的序号）。',
+    '每条候选都必须返回一条 result，index 用上面列表的编号（从 1 开始）。',
     '只看候选问题与证据，不要引用第一轮的推理，也不要重新审查整个文件。',
-    '如果证据里发现了新的、可确认的问题，写进 extraIssues，并确保能引用证据中的代码；否则不要输出。',
+    '如果证据里发现了新的、可确认的问题，写进 extraIssues，带上 confidence 并确保能引用证据中的代码；否则不要输出。',
     '规范类问题必须引用规范原文（如「CLAUDE.md 要求……」），没有原文就按未验证处理。',
     '',
     '请输出严格 JSON（不要输出 JSON 以外的解释）：',
     '{',
-    '  "results": [{ "index": 0, "confidence": 85, "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0, "missing": "" }],',
-    '  "extraIssues": [{ "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0 }]',
+    '  "results": [{ "index": 1, "confidence": 85, "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0, "missing": "" }],',
+    '  "extraIssues": [{ "confidence": 90, "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0 }]',
     '}',
     language === 'en' ? 'Write the human-readable fields in English.' : '',
   ].filter((line) => line !== '').join('\n');
@@ -665,6 +667,7 @@ export function partitionVerdicts(raw, concerns) {
   const issues = [];
   const unverified = [];
   const seen = new Set();
+  let dropped = 0;
   const severityOf = (item, fallback) => {
     if (item !== null && item !== undefined) {
       if (item.severity === 'block') return 'block';
@@ -689,12 +692,17 @@ export function partitionVerdicts(raw, concerns) {
   };
   for (const item of Array.isArray(raw?.results) ? raw.results : []) {
     if (item === null || typeof item !== 'object') continue;
-    const index = Number.isInteger(item.index) ? item.index : -1;
-    const concern = candidates[index] ?? null;
+    // The candidate list is numbered from 1 (same as evidenceNeeds.concern), so index 1 is
+    // the first concern. A 0-based index from a confused model is treated as out of range.
+    const index = Number.isInteger(item.index) && item.index >= 1 ? item.index : 0;
+    const concern = index > 0 ? (candidates[index - 1] ?? null) : null;
     const point = typeof item.point === 'string' && item.point.trim() !== ''
       ? item.point.trim()
       : (concern?.point ?? '');
-    if (point === '') continue;
+    if (point === '') {
+      dropped += 1;
+      continue;
+    }
     const confidence = typeof item.confidence === 'number' && Number.isFinite(item.confidence)
       ? Math.max(0, Math.min(100, item.confidence))
       : 0;
@@ -707,13 +715,31 @@ export function partitionVerdicts(raw, concerns) {
           ? item.missing.trim()
           : '证据不足以确认',
       });
+    } else {
+      dropped += 1;
     }
   }
   for (const item of Array.isArray(raw?.extraIssues) ? raw.extraIssues : []) {
     if (item === null || typeof item !== 'object') continue;
-    addIssue(item, null);
+    // Evidence-triggered findings skip the candidate index but not the confidence bar;
+    // a model that omits the score still gets the benefit of the doubt.
+    const confidence = typeof item.confidence === 'number' && Number.isFinite(item.confidence)
+      ? Math.max(0, Math.min(100, item.confidence))
+      : 80;
+    const point = typeof item.point === 'string' ? item.point.trim() : '';
+    if (point === '') {
+      dropped += 1;
+      continue;
+    }
+    if (confidence >= 80) {
+      addIssue(item, null);
+    } else if (confidence >= 25) {
+      unverified.push({ point, missing: '证据不足以确认' });
+    } else {
+      dropped += 1;
+    }
   }
-  return { issues, unverified };
+  return { issues, unverified, dropped };
 }
 
 /** The triage pass output: display fields plus candidate problems, before any verification. */
@@ -750,7 +776,11 @@ export function normalizeReportDraft(raw, fallbackOrder) {
   };
 }
 
-/** Normalize a report object so the browser half can trust the fields. */
+/**
+ * Normalize a final report for the browser half. `risks` is read from the input because the
+ * two-pass flow passes the verifier's confirmed risks in; the raw `risks` field is also what
+ * older cached records carry, so this stays the single restore path.
+ */
 export function normalizeReport(raw, fallbackOrder) {
   const draft = normalizeReportDraft(raw, fallbackOrder);
   const risks = Array.isArray(raw?.risks)

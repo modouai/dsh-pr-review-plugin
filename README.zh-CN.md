@@ -106,6 +106,9 @@ dsh --profile <name>
     autoReview: true
     autoAnalyze: true
     autoReconclude: false
+    evidenceVerify: true
+    evidenceMaxFiles: 6
+    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''
@@ -211,6 +214,9 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     autoReview: true
     autoAnalyze: true
     autoReconclude: false
+    evidenceVerify: true
+    evidenceMaxFiles: 6
+    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''
@@ -278,6 +284,9 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     autoReview: true
     autoAnalyze: true
     autoReconclude: false
+    evidenceVerify: true
+    evidenceMaxFiles: 6
+    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''

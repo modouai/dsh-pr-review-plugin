@@ -2606,7 +2606,7 @@ test('a concern becomes a finding only after the verifier scores it against evid
     evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
     suggestions: [],
   }, {
-    results: [{ index: 0, confidence: 90, severity: 'block', point: '空指针风险', line: 2 }],
+    results: [{ index: 1, confidence: 90, severity: 'block', point: '空指针风险', line: 2 }],
     extraIssues: [],
   });
   const recording = (options) => {
@@ -2703,8 +2703,8 @@ test('the report verifier decides risks; unconfirmed points stay out of risks', 
       focus: [],
     }, {
       results: [
-        { index: 0, confidence: 88, severity: 'block', point: '并发写入' },
-        { index: 1, confidence: 40, point: '命名不清', missing: '缺调用方' },
+        { index: 1, confidence: 88, severity: 'block', point: '并发写入' },
+        { index: 2, confidence: 40, point: '命名不清', missing: '缺调用方' },
       ],
       extraIssues: [],
     }),
@@ -2715,6 +2715,38 @@ test('the report verifier decides risks; unconfirmed points stay out of risks', 
     assert.deepEqual(review.report.risks, [{ severity: 'block', file: 'src/a.js', point: '并发写入' }]);
     assert.deepEqual(review.report.unverified, [{ point: '命名不清', missing: '缺调用方' }]);
     assert.equal(review.report.verdict, 'block', 'a confirmed blocker outranks the triage verdict');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('an answer in prose is retried once as JSON instead of failing the round', async () => {
+  let calls = 0;
+  const plugin = await setup({
+    fetch: batchFetch,
+    llm: () => (async function* () {
+      calls += 1;
+      const text = calls === 1
+        ? '## 审查结论\n\n这是一段分析，不是 JSON。'
+        : JSON.stringify({
+            verdict: 'suggest',
+            summary: '讲解',
+            logic: '逻辑',
+            changes: '改动',
+            concerns: [],
+            evidenceNeeds: [],
+            suggestions: [],
+          });
+      yield { type: 'text-delta', text };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })(),
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    assert.equal(result.json.explanation.summary, '讲解');
+    assert.equal(calls, 2, 'the corrective turn ran once');
+    assert.deepEqual(result.json.explanation.issues, []);
   } finally {
     await plugin.dispose();
   }

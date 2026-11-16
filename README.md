@@ -106,6 +106,9 @@ The file is a top-level YAML array. Keep one entry for this row; `dsh plugin add
     autoReview: true
     autoAnalyze: true
     autoReconclude: false
+    evidenceVerify: true
+    evidenceMaxFiles: 6
+    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''
@@ -211,6 +214,9 @@ export CODEUP_TOKEN=...    # Codeup (YUNXIAO_TOKEN works too)
     autoReview: true
     autoAnalyze: true
     autoReconclude: false
+    evidenceVerify: true
+    evidenceMaxFiles: 6
+    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''
@@ -278,6 +284,9 @@ This example targets `gitlab.com`; a self-hosted GitLab origin is not detected a
     autoReview: true
     autoAnalyze: true
     autoReconclude: false
+    evidenceVerify: true
+    evidenceMaxFiles: 6
+    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''

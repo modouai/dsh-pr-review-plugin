@@ -1171,9 +1171,9 @@ export function apply(ctx, config) {
     if (epoch !== null && (record.analysisEpoch ?? 0) !== epoch) {
       return { discarded: true, issues: [], unverified: [] };
     }
-    let raw;
+    let answer;
     try {
-      raw = await callModel(ctx, settings, buildPrompt(evidence.blocks, evidence.missing));
+      answer = await callModelJson(buildPrompt(evidence.blocks, evidence.missing));
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       console.warn('[pr-review] 复审调用失败，候选问题转入未验证项：', error);
@@ -1181,17 +1181,24 @@ export function apply(ctx, config) {
         discarded: false,
         issues: [],
         unverified: concerns.map((item) => ({ point: item.point, missing: `复审未完成：${reason}` })),
+        dropped: 0,
       };
     }
-    const parsed = extractJson(raw);
-    if (parsed === null) {
+    if (answer.parsed === null) {
       return {
         discarded: false,
         issues: [],
         unverified: concerns.map((item) => ({ point: item.point, missing: '复审未完成：模型没有返回可解析的 JSON' })),
+        dropped: 0,
       };
     }
-    return { discarded: false, ...partitionVerdicts(parsed, concerns) };
+    const verdicts = partitionVerdicts(answer.parsed, concerns);
+    // Dropped candidates are neither findings nor unverified notes; keep the count visible
+    // so a model that stopped answering in range does not look like "no problems found".
+    if (verdicts.dropped > 0) {
+      console.warn(`[pr-review] 复审丢弃 ${verdicts.dropped} 条候选（无法归位或置信度 < 25）`);
+    }
+    return { discarded: false, ...verdicts };
   }
 
   // ---------- pull list ----------
@@ -1381,6 +1388,31 @@ export function apply(ctx, config) {
     return true;
   }
 
+  /**
+   * Model call that must return JSON. Models occasionally answer in prose despite the
+   * contract; one corrective turn — echoing its answer back with "JSON only" — recovers
+   * most of those instead of failing the whole round.
+   */
+  async function callModelJson(prompt, signal) {
+    const request = signal === undefined || signal === null ? prompt : { ...prompt, signal };
+    const first = await callModel(ctx, settings, request);
+    const parsed = extractJson(first);
+    if (parsed !== null) return { raw: first, parsed };
+    const correction = {
+      ...prompt,
+      messages: [
+        ...prompt.messages,
+        { role: 'assistant', content: [{ type: 'text', text: first.slice(0, 4000) }] },
+        {
+          role: 'user',
+          content: [{ type: 'text', text: '上面的回复不是合法 JSON。请只输出一个 JSON 对象，不要 markdown 代码块，不要任何解释。' }],
+        },
+      ],
+    };
+    const retried = await callModel(ctx, settings, signal === undefined || signal === null ? correction : { ...correction, signal });
+    return { raw: retried, parsed: extractJson(retried) };
+  }
+
   /** Fetch one pull request and produce the overall report plus reading order. */
   async function runReview(record) {
     const client = await ensureClient();
@@ -1413,9 +1445,9 @@ export function apply(ctx, config) {
       record.files = [...fileMap.values()];
     }
     const prompt = buildReportPrompt(pull, record.files, record.diffFiles, settings);
-    let raw;
+    let answer;
     try {
-      raw = await callModel(ctx, settings, prompt);
+      answer = await callModelJson(prompt);
     } catch (error) {
       record.status = 'error';
       record.error = error instanceof Error ? error.message : String(error);
@@ -1424,10 +1456,10 @@ export function apply(ctx, config) {
       scheduleSave();
       return;
     }
-    const parsed = extractJson(raw);
+    const parsed = answer.parsed;
     if (parsed === null) {
       record.status = 'error';
-      record.error = `模型没有返回可解析的 JSON。原始输出：${raw.slice(0, 400)}`;
+      record.error = `模型没有返回可解析的 JSON。原始输出：${answer.raw.slice(0, 400)}`;
       record.finishedAt = Date.now();
       currentRoundEntry(record).finishedAt = record.finishedAt;
       scheduleSave();
@@ -1530,12 +1562,12 @@ export function apply(ctx, config) {
     );
     if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
-    const raw = await callModel(ctx, settings, signal === undefined || signal === null ? prompt : { ...prompt, signal });
+    const answer = await callModelJson(prompt, signal);
     // The round can switch while the model answers; drop the answer before parsing, so a
     // late malformed reply is never reported as a failure of the round that replaced it.
     if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
-    const parsed = extractJson(raw);
-    if (parsed === null) throw new Error(`模型没有返回可解析的 JSON。原始输出：${raw.slice(0, 400)}`);
+    const parsed = answer.parsed;
+    if (parsed === null) throw new Error(`模型没有返回可解析的 JSON。原始输出：${answer.raw.slice(0, 400)}`);
     const concerns = normalizeConcerns(parsed.concerns);
     let issues = [];
     let unverified = [];

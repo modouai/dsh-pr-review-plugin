@@ -725,24 +725,25 @@ test('partitionVerdicts: 80 is a finding, 25-79 is unverified, below 25 is dropp
   ];
   const raw = {
     results: [
-      { index: 0, confidence: 80, severity: 'block', point: 'A2', line: 5 },
-      { index: 1, confidence: 79, point: 'B2', missing: '缺调用方' },
-      { index: 2, confidence: 24, point: 'C2' },
+      { index: 1, confidence: 80, severity: 'block', point: 'A2', line: 5 },
+      { index: 2, confidence: 79, point: 'B2', missing: '缺调用方' },
+      { index: 3, confidence: 24, point: 'C2' },
     ],
     extraIssues: [{ severity: 'suggest', point: 'D', line: 9 }],
   };
-  const { issues, unverified } = partitionVerdicts(raw, concerns);
+  const { issues, unverified, dropped } = partitionVerdicts(raw, concerns);
   assert.deepEqual(issues.map((item) => item.point), ['A2', 'D']);
   // Missing fields fall back to the candidate the verifier was scoring.
   assert.equal(issues[0].file, 'a.js');
   assert.equal(issues[0].severity, 'block');
   assert.deepEqual(unverified, [{ point: 'B2', missing: '缺调用方' }]);
+  assert.equal(dropped, 1, 'below-25 scores are dropped and counted');
 });
 
 test('partitionVerdicts dedupes confirmed points and tolerates junk', () => {
   const concerns = [{ severity: 'suggest', file: '', point: 'same', line: 0 }];
   const { issues, unverified } = partitionVerdicts({
-    results: [{ index: 0, confidence: 90 }, { index: 9, confidence: 90, point: 'same' }],
+    results: [{ index: 1, confidence: 90 }, { index: 9, confidence: 90, point: 'same' }],
     extraIssues: [{ point: 'same' }, null, { point: '   ' }],
   }, concerns);
   assert.deepEqual(issues.map((item) => item.point), ['same']);
@@ -767,8 +768,8 @@ test('the verifier prompt carries candidates and evidence, not a second review',
   );
   const text = prompt.messages[0].content[0].text;
   assert.match(prompt.system, /裁判/);
-  assert.match(text, /## 候选问题/);
-  assert.match(text, /0\. \[block\] \[a\.js:3\] A/);
+  assert.match(text, /## 候选问题（index 从 1 开始）/);
+  assert.match(text, /1\. \[block\] \[a\.js:3\] A/);
   assert.match(text, /## 证据 1/);
   assert.match(text, /无法读取/);
   assert.doesNotMatch(text, /walkthrough/);
