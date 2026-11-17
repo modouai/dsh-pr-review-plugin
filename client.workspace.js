@@ -178,6 +178,7 @@ window.__ModuleLoader__.load({
           previewRefreshBusy, setPreviewRefreshBusy, publishBusy, setPublishBusy, publishError, setPublishError,
           requestPreview, refreshPreview, closePreview, togglePreviewItem,
           selectAllPreviewItems, selectNonePreviewItems, submitPublish,
+          previewModalOpen,
         } = usePreviewPublish({ withRepo, stateRef, loadReview });
 
 
@@ -433,6 +434,7 @@ window.__ModuleLoader__.load({
           preview, previewBusy, previewError, previewRefreshBusy, publishBusy, publishError,
           requestPreview, closePreview, togglePreviewItem,
           selectAllPreviewItems, selectNonePreviewItems, submitPublish,
+          previewModalOpen,
         };
         return h(WorkspaceView, { model });
       }
@@ -459,7 +461,7 @@ window.__ModuleLoader__.load({
           orderedFiles, historicalView,
           publishError, feedbackError, fileDiffError, fileContentError,
           overlayDraft, overlayBusy, setOverlayDraft, sendOverlayMessage,
-          preview, previewBusy, previewError, previewRefreshBusy, publishBusy,
+          preview, previewModalOpen, previewBusy, previewError, previewRefreshBusy, publishBusy,
           closePreview, togglePreviewItem,
           selectAllPreviewItems, selectNonePreviewItems, submitPublish,
           walkFloat, activeHunk, closeWalkFloat, expandHunkContext,
@@ -771,7 +773,7 @@ window.__ModuleLoader__.load({
                   onSend: () => void sendOverlayMessage(),
                 })
               : null,
-            preview === null
+            preview === null || previewModalOpen !== true
               ? null
               : h(PublishPreviewModal, {
                   key: 'publish-preview',
@@ -781,9 +783,6 @@ window.__ModuleLoader__.load({
                   refreshing: previewRefreshBusy,
                   error: previewError,
                   onConfirm: (force) => void submitPublish(force),
-                  onToggleItem: togglePreviewItem,
-                  onSelectAll: selectAllPreviewItems,
-                  onSelectNone: selectNonePreviewItems,
                   onCancel: closePreview,
                 }),
             walkFloat === null

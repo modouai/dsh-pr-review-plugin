@@ -2139,105 +2139,31 @@ test('fileLineLabel keeps a plain path when the line is unknown', () => {
 
 // ---------- §8.2: publish item selection ----------
 
-test('publish preview lists selectable items with checkboxes and bulk controls', () => {
-  const client = loadClient();
-  const { parts, fake } = client;
-  const toggled = [];
-  const selectedAll = [];
-  const selectedNone = [];
-  const { textOnly, elements } = fake.render(fake.React.createElement(parts.PublishPreviewModal, {
+test('PublishPreviewModal is a final confirmation without item checkboxes', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const view = fake.render(fake.React.createElement(parts.PublishPreviewModal, {
     preview: {
       markdown: '# md',
-      language: 'zh',
-      round: 3,
-      version: 2,
-      conflict: '',
+      items: [{ id: 'b1', kind: 'blocker', file: 'a.js', line: 1, point: 'p' }],
+      selectedIds: ['b1'],
       selectionSupported: true,
-      selectedIds: ['b-1'],
-      items: [
-        { id: 'b-1', kind: 'blocker', file: 'src/a.js', point: '阻塞问题', line: 42 },
-        { id: 's-1', kind: 'suggestion', file: 'src/b.js', point: '改进建议', line: 0 },
-      ],
-    },
-    t: translator(parts),
-    busy: false,
-    refreshing: false,
-    error: '',
-    onConfirm: () => {},
-    onCancel: () => {},
-    onToggleItem: (id) => toggled.push(id),
-    onSelectAll: () => selectedAll.push(true),
-    onSelectNone: () => selectedNone.push(true),
-  }));
-
-  assert.match(textOnly, /已选 1\/2/);
-  assert.match(textOnly, /src\/a\.js:42/);
-  assert.match(textOnly, /src\/b\.js/);
-  assert.match(textOnly, /阻塞项/);
-  assert.match(textOnly, /修改建议/);
-
-  const checkboxes = elements.filter((node) => node.type === 'input');
-  assert.equal(checkboxes.length, 2);
-  assert.equal(checkboxes[0].props.checked, true);
-  assert.equal(checkboxes[1].props.checked, false);
-  checkboxes[1].props.onChange();
-  assert.deepEqual(toggled, ['s-1']);
-
-  const selectAll = elements.find(
-    (node) => node.type === 'button' && fake.textOf(node) === '全选',
-  );
-  assert.ok(selectAll, 'select-all button missing');
-  selectAll.props.onClick();
-  const selectNone = elements.find(
-    (node) => node.type === 'button' && fake.textOf(node) === '全不选',
-  );
-  assert.ok(selectNone, 'select-none button missing');
-  selectNone.props.onClick();
-  assert.deepEqual(selectedAll, [true]);
-  assert.deepEqual(selectedNone, [true]);
-});
-
-test('the preview blocks publishing when nothing is selected', () => {
-  const client = loadClient();
-  const { parts, fake } = client;
-  const render = (selectedIds) => fake.render(fake.React.createElement(parts.PublishPreviewModal, {
-    preview: {
-      markdown: '# md',
-      language: 'zh',
       round: 1,
       version: 1,
       conflict: '',
-      selectionSupported: true,
-      selectedIds,
-      items: [{ id: 'b-1', kind: 'blocker', file: 'src/a.js', point: '阻塞问题', line: 42 }],
     },
-    t: translator(parts),
+    t,
     busy: false,
     refreshing: false,
     error: '',
     onConfirm: () => {},
     onCancel: () => {},
-    onToggleItem: () => {},
-    onSelectAll: () => {},
-    onSelectNone: () => {},
   }));
-
-  const empty = render([]);
-  assert.match(empty.textOnly, /没有勾选任何条目/);
-  const confirmEmpty = empty.elements.find(
-    (node) => node.type === 'button' && fake.textOf(node) === '确认发布',
-  );
-  assert.equal(confirmEmpty.props.disabled, true);
-
-  const filled = render(['b-1']);
-  const confirmFilled = filled.elements.find(
-    (node) => node.type === 'button' && fake.textOf(node) === '确认发布',
-  );
-  assert.equal(confirmFilled.props.disabled, false);
-  assert.doesNotMatch(filled.textOnly, /没有勾选任何条目/);
+  assert.equal(view.elements.filter((element) => element.type === 'input').length, 0);
+  assert.ok(view.textOnly.includes('# md'));
 });
 
-test('preview without selectable items falls back to publishing the full comment', () => {
+test('preview without selectable items still confirms the full comment', () => {
   const client = loadClient();
   const { parts, fake } = client;
   const { textOnly, elements } = fake.render(fake.React.createElement(parts.PublishPreviewModal, {
@@ -2253,12 +2179,18 @@ test('preview without selectable items falls back to publishing the full comment
     },
     t: translator(parts),
     busy: false,
+    refreshing: false,
     error: '',
     onConfirm: () => {},
     onCancel: () => {},
   }));
-  assert.match(textOnly, /无法按条目选择/);
+  assert.match(textOnly, /# md/);
   assert.equal(elements.filter((node) => node.type === 'input').length, 0);
+  const confirm = elements.find(
+    (node) => node.type === 'button' && fake.textOf(node) === '确认发布',
+  );
+  assert.ok(confirm, 'confirm button missing');
+  assert.equal(confirm.props.disabled, false);
 });
 
 test('publish bodies carry includeIds, including the force append path', () => {
@@ -2654,6 +2586,7 @@ test('the workspace view renders the open file in the narrow sidebar layout', ()
     setOverlayDraft: () => {},
     sendOverlayMessage: () => {},
     preview: null,
+    previewModalOpen: false,
     previewBusy: false,
     previewError: '',
     previewRefreshBusy: false,

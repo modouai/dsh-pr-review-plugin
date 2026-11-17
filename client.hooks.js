@@ -247,6 +247,7 @@ window.__ModuleLoader__.load({
           const [previewBusy, setPreviewBusy] = React.useState(false);
           const [previewError, setPreviewError] = React.useState('');
           const [previewRefreshBusy, setPreviewRefreshBusy] = React.useState(false);
+          const [previewModalOpen, setPreviewModalOpen] = React.useState(false);
           const previewTimerRef = React.useRef(null);
           const previewSeqRef = React.useRef(0);
           const previewRef = React.useRef(null);
@@ -292,7 +293,10 @@ window.__ModuleLoader__.load({
       }, []);
 
       /** Publish flow: fetch the host-rendered markdown first, then show the preview dialog. */
-      const requestPreview = React.useCallback(async () => {
+      const requestPreview = React.useCallback(async (options = {}) => {
+        // A quiet request only refreshes the preview state (used by the conclusion page);
+        // the plain publish button still opens the confirmation dialog.
+        setPreviewModalOpen(options.quiet !== true);
         const number = stateRef.current.prNumber;
         if (typeof number !== 'number') return;
         setPreviewBusy(true);
@@ -373,6 +377,7 @@ window.__ModuleLoader__.load({
         setPreview(null);
         setPreviewError('');
         setPreviewRefreshBusy(false);
+        setPreviewModalOpen(false);
       }, []);
 
       const togglePreviewItem = React.useCallback((id) => {
@@ -433,6 +438,7 @@ window.__ModuleLoader__.load({
           previewRefreshBusy, setPreviewRefreshBusy, publishBusy, setPublishBusy, publishError, setPublishError,
           requestPreview, refreshPreview, closePreview, togglePreviewItem,
           selectAllPreviewItems, selectNonePreviewItems, submitPublish,
+          previewModalOpen,
         };
       }
 
