@@ -1377,7 +1377,7 @@ test('top bar renders no round pills before a review exists', () => {
   assert.doesNotMatch(textOnly, /第 1 轮/);
 });
 
-test('selecting a round follows the latest or pins history and shows the overview', () => {
+test('selecting a round follows the latest on the overview or pins history onto the conclusion', () => {
   const { parts } = loadClient();
   assert.deepEqual(plain(parts.applyRoundSelection(3, 3)), {
     roundPick: null,
@@ -1385,7 +1385,7 @@ test('selecting a round follows the latest or pins history and shows the overvie
   });
   assert.deepEqual(plain(parts.applyRoundSelection(1, 3)), {
     roundPick: 1,
-    mode: 'overview',
+    mode: 'conclusion',
   });
 });
 

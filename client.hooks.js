@@ -452,7 +452,7 @@ window.__ModuleLoader__.load({
         ? latestRoundNumber
         : roundPick;
       const selectedIsCurrent = selectedRoundNumber === null || selectedRoundNumber === latestRoundNumber;
-      const historicalView = mode === 'overview' && review !== null && selectedIsCurrent === false;
+      const historicalView = (mode === 'overview' || mode === 'conclusion') && review !== null && selectedIsCurrent === false;
       const selectRound = React.useCallback((round) => {
         const next = applyRoundSelection(round, latestRoundNumber);
         setRoundPick(next.roundPick);

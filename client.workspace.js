@@ -592,7 +592,7 @@ window.__ModuleLoader__.load({
 
         const center = h(WorkspaceCenter, { model });
 
-        const overviewMode = mode === 'overview' || filePath === '';
+        const overviewMode = mode === 'overview' || mode === 'conclusion' || filePath === '';
         const noOpenPrs = !contextBlocked && list !== null && (list.prs ?? []).length === 0 && prNumber === null;
 
         // Wide sidebars keep the three columns; below ~780px the analysis column collapses into

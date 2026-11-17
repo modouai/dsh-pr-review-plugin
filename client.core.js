@@ -122,13 +122,15 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * State transition for picking a round: the latest one keeps following (null) while a
-     * historical round is pinned; either way the overview becomes the visible pane.
+     * State transition for picking a round: the latest one keeps following (null) and lands on
+     * the overview; a pinned historical round lands on the conclusion page — history persists
+     * conclusions/delta/feedback/published, so the conclusion is its main artifact.
      */
     function applyRoundSelection(round, latestRoundNumber) {
+      const historical = round !== latestRoundNumber;
       return {
-        roundPick: round === latestRoundNumber ? null : round,
-        mode: 'overview',
+        roundPick: historical ? round : null,
+        mode: historical ? 'conclusion' : 'overview',
       };
     }
 
