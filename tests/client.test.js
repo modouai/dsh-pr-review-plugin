@@ -27,7 +27,7 @@ const EXPOSED = [
   'DICT',
   'CSS',
   'api',
-  'OverviewPanel',
+  'OverviewPage',
   'FeedbackBlock',
   'renderMarkdown',
   'inlineMarkdown',
@@ -131,11 +131,25 @@ function createFakeReact() {
       typeof initial === 'function' ? initial() : initial,
       noop,
     ],
-    useMemo: (factory) => factory(),
-    useCallback: (callback) => callback,
+    // Every hook consumes one slot even when it ignores the stored value: real React advances
+    // its hook cursor per call, so a component whose hook COUNT varies between renders is a
+    // hooks-order violation. useMemo still recomputes and useCallback still passes through.
+    useMemo: (factory) => {
+      const slot = slotOf(undefined);
+      slot.value = factory();
+      return slot.value;
+    },
+    useCallback: (callback) => {
+      slotOf(undefined);
+      return callback;
+    },
     useRef: (initial) => slotOf(() => ({ current: initial })).value,
-    useEffect: () => {},
-    useLayoutEffect: () => {},
+    useEffect: () => {
+      slotOf(undefined);
+    },
+    useLayoutEffect: () => {
+      slotOf(undefined);
+    },
   };
 
   function expand(node) {
@@ -215,7 +229,32 @@ function createFakeReact() {
     };
   }
 
-  return { React, Fragment, render, textOf };
+  /**
+   * Invoke one component once per props entry through a SHARED hook frame, like real React
+   * re-rendering a mounted component: the hook slots persist while the cursor resets per
+   * invocation. The slot index after each invocation is the number of hooks that invocation
+   * consumed, so unequal counts mean a hooks-order violation that a one-shot render cannot see.
+   */
+  function rerender(type, propsList) {
+    const trees = [];
+    const counts = [];
+    const frame = { slots: [], index: 0 };
+    for (const props of propsList) {
+      frame.index = 0;
+      hookStack.push(frame);
+      let rendered;
+      try {
+        rendered = type({ ...props });
+      } finally {
+        hookStack.pop();
+      }
+      counts.push(frame.index);
+      trees.push(expand(rendered));
+    }
+    return { trees, counts };
+  }
+
+  return { React, Fragment, render, rerender, textOf };
 }
 
 // ---------- loading client.js and its chunks ----------
@@ -412,7 +451,7 @@ function makeReview(options = {}) {
   };
 }
 
-/** Props expected by OverviewPanel (wired the same way ReviewWorkspace calls it). */
+/** Props expected by OverviewPage (wired the same way ReviewWorkspace calls it). */
 function overviewProps(parts, review, extra = {}) {
   return {
     review,
@@ -445,7 +484,7 @@ function overviewProps(parts, review, extra = {}) {
 function renderOverview(client, review, extra = {}) {
   const { parts, fake } = client;
   const element = fake.React.createElement(
-    parts.OverviewPanel,
+    parts.OverviewPage,
     overviewProps(parts, review, extra),
   );
   return fake.render(element);
@@ -464,50 +503,10 @@ test('round 1 renders no comparison/feedback blocks and no feedback-check button
   });
   const { textOnly } = renderOverview(client, review);
 
-  assert.match(textOnly, /第一轮结论/);
+  assert.match(textOnly, /改动概述/);
   assert.doesNotMatch(textOnly, /复审对比/);
   assert.doesNotMatch(textOnly, /实现者反馈/);
   assert.doesNotMatch(textOnly, /检查实现者反馈/);
-});
-
-test('the report summary section owns the PR identity line and one card', () => {
-  const client = loadClient();
-  const version = makeVersion(1, '第一轮结论');
-  const review = makeReview({
-    round: 1,
-    conclusionAt: version.createdAt,
-    conclusion: version.conclusion,
-    roundHistory: [makeRound(1, { conclusions: [version] })],
-  });
-  const { parts, fake } = client;
-  const { textOnly, elements } = renderOverview(client, review);
-
-  const headingIndex = textOnly.indexOf('总体评价');
-  assert.ok(headingIndex >= 0, 'report summary heading missing');
-  // The heading leads the section: PR identity, meta and summary all follow it.
-  assert.ok(headingIndex < textOnly.indexOf('PR 标题'), 'heading must lead the PR identity line');
-  assert.ok(headingIndex < textOnly.indexOf('整体总结内容'), 'heading must sit above the summary text');
-  assert.ok(headingIndex < textOnly.indexOf('总体初筛风险'), 'heading must lead its own section');
-
-  const heading = elements.find(
-    (node) => node.type === 'div'
-      && node.props.className === 'prr-h2'
-      && fake.textOf(node) === '总体评价',
-  );
-  assert.ok(heading, 'report summary heading must use the shared section heading style');
-
-  // PR identity, author/branch stats and the summary text share one card, so the block is
-  // no longer a bare line floating between sections.
-  const card = elements.find(
-    (node) => node.type === 'div'
-      && node.props.className === 'prr-card'
-      && fake.textOf(node).includes('整体总结内容'),
-  );
-  assert.ok(card, 'the summary section must render as a card');
-  const cardText = fake.textOf(card);
-  assert.match(cardText, /#7 PR 标题/);
-  assert.match(cardText, /dev · feature → main · \+1 \/ -0 · 1/);
-  assert.equal(parts.DICT.en.summary, 'Summary');
 });
 
 // ---------- whole-review footer (actions + collapsible notices) ----------
@@ -910,7 +909,7 @@ test('round 1 as a historical tab also hides comparison and feedback', () => {
   const review = makeReview({ round: 2, roundHistory: rounds });
   const { textOnly } = renderOverview(client, review, { selectedRoundNumber: 1 });
 
-  assert.match(textOnly, /第一轮结论/);
+  assert.match(textOnly, /历史轮次不含改动概述/);
   assert.doesNotMatch(textOnly, /复审对比/);
   assert.doesNotMatch(textOnly, /实现者反馈/);
 });
@@ -927,11 +926,9 @@ test('historical round stays readable while the current round has no report', ()
   const review = makeReview({ round: 2, report: null, roundHistory: rounds });
   const { textOnly } = renderOverview(client, review, { selectedRoundNumber: 1 });
 
-  assert.match(textOnly, /第一轮结论/);
-  assert.match(textOnly, /历史轮只读/);
+  // The historical round keeps rendering instead of falling into the no-report state.
+  assert.match(textOnly, /历史轮次不含改动概述/);
   assert.doesNotMatch(textOnly, /还没有总体报告/, 'historical rounds must not fall into the no-report state');
-  // Round tabs live in the top bar; the round meta line still names the historical round.
-  assert.match(textOnly, /第 1 轮/);
 });
 
 test('current round without a report still shows the no-report state', () => {
@@ -978,7 +975,7 @@ test('current round 2 renders the comparison and feedback above the report', () 
 
   const deltaIndex = textOnly.indexOf('复审对比');
   const feedbackIndex = textOnly.indexOf('实现者反馈');
-  const reportIndex = textOnly.indexOf('总体初筛风险');
+  const reportIndex = textOnly.indexOf('审查发现');
 
   assert.ok(feedbackIndex >= 0, 'feedback block missing');
   assert.ok(deltaIndex > feedbackIndex, 'feedback must render before the comparison');
@@ -1428,7 +1425,9 @@ test('per-file suggestions render as text whether stored as a string or an objec
   assert.match(textOnly, /只有 text 的建议/);
   assert.match(textOnly, /point 为空时回退 text/);
   assert.doesNotMatch(textOnly, /\[object Object\]/);
-  const rows = elements.filter((node) => node.props.className === 'prr-rowmain prr-text');
+  // The findings list renders one collapsed row per valid suggestion; blank and malformed
+  // entries are dropped by the flattener and render no row at all.
+  const rows = elements.filter((node) => node.props.className === 'prr-finding');
   assert.equal(rows.length, 4, 'blank and malformed suggestions render no row');
 });
 
@@ -1920,40 +1919,6 @@ test('historical round 2 pins feedback before the comparison', () => {
 
 // ---------- §4.5: conclusion versions ----------
 
-test('multiple conclusion versions default to the latest; older versions are read-only', () => {
-  const client = loadClient();
-  const rounds = [
-    makeRound(1, { conclusions: [makeVersion(1, '第1轮结论')] }),
-    makeRound(2, {
-      conclusions: [
-        makeVersion(1, '旧版本摘要', { source: 'model', createdAt: 1000 }),
-        makeVersion(2, '最新版本摘要', { source: 'human', createdAt: 2000 }),
-      ],
-    }),
-    makeRound(3, { conclusions: [makeVersion(1, '第3轮结论')] }),
-  ];
-  const review = makeReview({
-    round: 3,
-    conclusionAt: 3000,
-    conclusion: makeVersion(1, '第3轮结论').conclusion,
-    roundHistory: rounds,
-  });
-
-  const latest = renderOverview(client, review, { selectedRoundNumber: 2 });
-  assert.match(latest.textOnly, /最新版本摘要/);
-  assert.doesNotMatch(latest.textOnly, /旧版本摘要/);
-  assert.doesNotMatch(latest.textOnly, /旧版本只读/);
-  assert.match(latest.textOnly, /（最新）/);
-
-  const older = renderOverview(client, review, { selectedRoundNumber: 2, versionPick: { 2: 1 } });
-  assert.match(older.textOnly, /旧版本摘要/);
-  assert.doesNotMatch(older.textOnly, /最新版本摘要/);
-  assert.match(older.textOnly, /旧版本只读/);
-  // Both versions are offered with their source annotation.
-  assert.match(older.textOnly, /v1 · 模型生成/);
-  assert.match(older.textOnly, /v2（最新） · 人工修改/);
-});
-
 test('version selector reports the chosen version', () => {
   const client = loadClient();
   const { parts, fake } = client;
@@ -1969,31 +1934,6 @@ test('version selector reports the chosen version', () => {
   assert.ok(select, 'version select missing');
   select.props.onChange({ target: { value: '1' } });
   assert.deepEqual(picked, [1]);
-});
-
-// ---------- §4.6: actionable stale state ----------
-
-test('conclusion card carries the round/version/coverage metadata line', () => {
-  const client = loadClient();
-  const version = makeVersion(1, '第三轮结论', {
-    createdAt: 5000,
-    coverage: { analyzed: 2, total: 2, unanalyzed: [] },
-  });
-  const review = makeReview({
-    round: 3,
-    conclusionAt: 5000,
-    conclusion: version.conclusion,
-    conclusionEditedAt: 6000,
-    roundHistory: [makeRound(3, { conclusions: [version] })],
-    published: [
-      { id: 21, url: 'https://example.test/c/21', round: 3, version: 1, publishedAt: 7000 },
-    ],
-  });
-  const { textOnly } = renderOverview(client, review);
-  assert.match(textOnly, /第 3 轮 · v1 · 生成于 \d{1,2}:\d{2}/);
-  assert.match(textOnly, /覆盖 2\/2 文件/);
-  assert.match(textOnly, /人工修订/);
-  assert.match(textOnly, /已发布/);
 });
 
 // ---------- §4.8: publish preview + 409 handling ----------
@@ -2096,8 +2036,8 @@ test('legacy records without roundHistory render as a single round', () => {
   assert.equal(rounds[0].round, 2);
 
   const { textOnly } = renderOverview(client, review);
-  assert.match(textOnly, /旧数据结论/);
-  assert.match(textOnly, /第 2 轮/);
+  assert.match(textOnly, /改动概述/);
+  assert.match(textOnly, /整体总结内容/);
 });
 
 // ---------- §8.1: conclusion item line numbers ----------
@@ -2813,69 +2753,10 @@ test('no unverified notes means no unverified section', () => {
   assert.doesNotMatch(textOnly, /未验证项/);
 });
 
-test('the overview shows report unverified notes after the initial risks', () => {
-  const client = loadClient();
-  const review = makeReview({
-    report: {
-      verdict: 'suggest',
-      summary: '报告',
-      risks: [{ severity: 'suggest', file: 'src/a.js', point: '已确认风险' }],
-      unverified: [{ point: '可能的并发问题', missing: '缺调用方' }],
-      order: [],
-      focus: {},
-    },
-  });
-  const { textOnly } = renderOverview(client, review);
-  assert.match(textOnly, /已确认风险/);
-  assert.match(textOnly, /未验证项/);
-  assert.match(textOnly, /可能的并发问题/);
-  assert.match(textOnly, /缺少证据：缺调用方/);
-});
-
 test('the zh and en tables expose the same keys', () => {
   const client = loadClient();
   const { DICT } = client.parts;
   assert.deepEqual(Object.keys(DICT.zh).sort(), Object.keys(DICT.en).sort());
-});
-
-test('the overview names the commit under review', () => {
-  const client = loadClient();
-  const review = makeReview({});
-  review.headSha = '5233a50abcdef0123456789';
-  const { textOnly } = renderOverview(client, review);
-  assert.match(textOnly, /commit 5233a50/);
-
-  const missing = makeReview({});
-  missing.headSha = '';
-  assert.doesNotMatch(renderOverview(client, missing).textOnly, /commit /);
-});
-
-test('an empty risk list says so instead of showing a dash', () => {
-  const client = loadClient();
-  const review = makeReview({
-    report: { verdict: 'pass', summary: '报告', risks: [], unverified: [], order: [], focus: {} },
-  });
-  const { textOnly } = renderOverview(client, review);
-  assert.match(textOnly, /未发现初筛风险/);
-});
-
-test('an empty risk list explains whether nothing was raised or everything was filtered', () => {
-  const client = loadClient();
-  const review = makeReview({
-    report: {
-      verdict: 'pass',
-      summary: '报告',
-      risks: [],
-      unverified: [],
-      raised: 3,
-      discarded: 2,
-      order: [],
-      focus: {},
-    },
-  });
-  const { textOnly } = renderOverview(client, review);
-  assert.match(textOnly, /初筛 3 条疑点/);
-  assert.match(textOnly, /2 条判定为误报/);
 });
 
 test('the overview no longer renders a reading-order section', () => {
@@ -3124,4 +3005,69 @@ test('overviewFooter gates publish and notices by page', () => {
   }
   assert.ok(conclusionLabels.includes(t('publishComment')));
   assert.notEqual(conclusion.notice, null);
+});
+
+test('OverviewPage shows digest, findings and completeness — no initial risks, no verdict', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const review = makeReview({ round: 1 });
+  const view = fake.render(fake.React.createElement(parts.OverviewPage, {
+    review,
+    t,
+    selectedRoundNumber: null,
+    onOpenFile: () => {},
+    explainedCount: 1,
+    totalFiles: 1,
+    fileFindings: [{ file: 'src/a.js', issues: [{ severity: 'block', point: 'a 阻塞', line: 8 }], suggestions: [] }],
+    feedbackBusy: false,
+    onCheckFeedback: () => {},
+  }));
+  const text = view.textOnly;
+  assert.ok(text.includes('整体总结内容'));
+  assert.ok(!text.includes('总体初筛风险'));
+  assert.ok(!text.includes('初筛风险点'));
+  assert.ok(text.includes('审查发现'));
+  assert.ok(text.includes('src/a.js:8'));
+  assert.ok(text.includes('审查完备性'));
+  assert.ok(text.includes('1/1'));
+});
+
+test('OverviewPage historical rounds keep the fix record and show the digest placeholder', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const pinned = makeRound(2, {
+    feedback: { comments: [{ id: 'c1', author: 'dev', createdAt: 'x', body: '已修复' }], notes: [] },
+  });
+  // Round 2 is pinned while round 3 is the latest, so the selected round is historical.
+  const review = makeReview({ round: 3, roundHistory: [makeRound(1), pinned, makeRound(3)] });
+  const view = fake.render(fake.React.createElement(parts.OverviewPage, {
+    review,
+    t,
+    selectedRoundNumber: 2,
+    onOpenFile: () => {},
+    explainedCount: 0,
+    totalFiles: 0,
+    fileFindings: [],
+    feedbackBusy: false,
+    onCheckFeedback: () => {},
+  }));
+  assert.ok(view.textOnly.includes('已修复'));
+  assert.ok(view.textOnly.includes('历史轮次不含改动概述'));
+});
+
+test('OverviewPage keeps its hook order across pending/historical/current transitions', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const props = (review, selectedRoundNumber) => ({
+    review, t, selectedRoundNumber,
+    onOpenFile: () => {}, explainedCount: 0, totalFiles: 0, fileFindings: [],
+    feedbackBusy: false, onCheckFeedback: () => {},
+    concludeBusy: false, reviewBusy: false, onConclude: () => {},
+  });
+  const result = fake.rerender(parts.OverviewPage, [
+    props(makeReview({ round: 2, report: null, roundHistory: [makeRound(1), makeRound(2)] }), null),
+    props(makeReview({ round: 2, roundHistory: [makeRound(1), makeRound(2)] }), 1),
+    props(makeReview({ round: 2, roundHistory: [makeRound(1), makeRound(2)] }), null),
+  ]);
+  assert.equal(new Set(result.counts).size, 1);
 });

@@ -18,7 +18,7 @@ window.__ModuleLoader__.load({
         phaseStateText, fileLineLabel,
       } = core;
       const {
-        RiskList, RoundMeta, DeltaBlock, VersionSelector,
+        RoundMeta, DeltaBlock, VersionSelector,
       } = components;
       const {
         ConclusionBlock, FeedbackBlock, PublishedBlock, conclusionMetaLine, overviewFooter,
@@ -594,47 +594,59 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * PR-level overview: round tabs first, then (round >= 2) the round comparison and
-       * developer feedback, then this round's report/conclusion/publish area and actions.
-       * Historical rounds render read-only meta + delta + feedback + conclusion + published comments.
+       * Overview page: the fix record first (round >= 2), then the change digest, the single
+       * findings list and the completeness line. Only verified facts and pending actions live
+       * here — initial-screen risks, unverified notes and the report verdict are pipeline
+       * internals and never render; the only decision surface is the conclusion page.
        */
-      function OverviewPanel(props) {
+      function OverviewPage(props) {
         const { review, t } = props;
         const report = review.report;
         const rounds = React.useMemo(() => roundsOf(review), [review]);
         const latestRound = rounds.length === 0 ? null : rounds[rounds.length - 1];
-        const latestRoundNumber = latestRound === null ? null : latestRound.round;
         const requestedRound = typeof props.selectedRoundNumber === 'number' ? props.selectedRoundNumber : null;
         const selectedRound = requestedRound === null
           ? latestRound
           : (rounds.find((entry) => entry.round === requestedRound) ?? latestRound);
         const roundNumber = selectedRound === null ? 1 : selectedRound.round;
         const isCurrent = latestRound === null || selectedRound === null || selectedRound.round === latestRound.round;
-        const versions = React.useMemo(
-          () => versionsOf(review, selectedRound, isCurrent),
-          [review, selectedRound, isCurrent],
-        );
-        const latestVersion = versions.length === 0 ? null : versions[versions.length - 1];
-        const versionPick = props.versionPick ?? {};
-        const pickedVersion = typeof versionPick[roundNumber] === 'number' ? versionPick[roundNumber] : null;
-        const selectedVersion = versions.find((entry) => entry.version === pickedVersion) ?? latestVersion;
-        const isOlderVersion = selectedVersion !== null
-          && latestVersion !== null
-          && selectedVersion.version !== latestVersion.version;
-        const publishedEntries = publishedOfRound(review, roundNumber);
-        const entryDelta = selectedRound === null ? null : selectedRound.delta ?? null;
-        const entryFeedback = selectedRound === null ? null : selectedRound.feedback ?? null;
-        const delta = isCurrent ? (review.delta ?? entryDelta) : entryDelta;
-        const feedback = isCurrent ? (review.feedback ?? entryFeedback) : entryFeedback;
-        const feedbackStates = (feedback !== null && feedback !== undefined ? feedback.states : null) ?? {};
-        const staleInfo = React.useMemo(
-          () => (isCurrent ? staleInfoOf(review, versionsOf(review, selectedRound, true)) : null),
-          [isCurrent, review, selectedRound],
-        );
-        // Round >= 2 pins the developer feedback first, then the round comparison. Feedback
-        // answers the PREVIOUS round's published comment, so this round does not need to be
-        // published before it can be read.
+        const feedback = isCurrent ? (review.feedback ?? selectedRound?.feedback ?? null) : (selectedRound?.feedback ?? null);
+        const delta = isCurrent ? (review.delta ?? selectedRound?.delta ?? null) : (selectedRound?.delta ?? null);
         const anyPublished = Array.isArray(review.published) && review.published.length > 0;
+
+        // The whole-review footer (conclusion/publish actions plus notices) is rendered above
+        // the composer by whichever surface owns it; both surfaces read it from `actionsBridge`.
+        // Hooks run unconditionally and BEFORE any early return: `overviewFooter` answers
+        // `{ actions: null, notice: null }` for pending and historical rounds, so the dock
+        // clears there instead of going stale — and the hook count never varies by path.
+        const footer = overviewFooter(props, {
+          report,
+          pull: review.pull ?? {},
+          selectedVersion: null,
+          staleInfo: null,
+          isCurrent,
+          isOlderVersion: false,
+          hasVersion: false,
+          selectedPublished: false,
+          page: 'overview',
+        });
+        React.useEffect(() => {
+          actionsBridge.set(footer.actions);
+          actionsBridge.setNotice(footer.notice);
+          return undefined;
+        }, [footer.actions, footer.notice]);
+        // Leaving the overview must clear the dock instead of leaving stale buttons behind.
+        React.useEffect(() => () => {
+          actionsBridge.set(null);
+          actionsBridge.setNotice(null);
+        }, []);
+
+        // The current round needs a report before anything renders; a historical round keeps
+        // its own feedback/delta even though `record.report` is reset on a new round.
+        if ((report === null || report === undefined) && isCurrent) {
+          return h('div', { className: 'prr-zero' }, review.status === 'reviewing' ? t('reportPending') : t('noReport'));
+        }
+
         const roundTop = roundNumber >= 2
           ? h(
               React.Fragment,
@@ -650,174 +662,42 @@ window.__ModuleLoader__.load({
               h(DeltaBlock, { delta, t }),
             )
           : null;
-        const versionHeader = h(
-          React.Fragment,
-          null,
-          h(VersionSelector, {
-            versions,
-            selectedVersion: selectedVersion === null ? null : selectedVersion.version,
-            onSelect: (version) => props.onPickVersion(
-              roundNumber,
-              version,
-              latestVersion === null ? version : latestVersion.version,
-            ),
-            t,
-          }),
-          selectedVersion === null
-            ? null
-            : h(
-                'span',
-                { className: 'prr-tag' },
-                t(selectedVersion.source === 'human' ? 'versionSourceHuman' : 'versionSourceModel'),
-              ),
-          isOlderVersion === true ? h('span', { className: 'prr-tag' }, t('versionReadOnly')) : null,
-        );
-        const conclusionNode = selectedVersion === null
-          ? h('div', { className: 'prr-subtle' }, t('historyNoConclusion'))
-          : h(ConclusionBlock, {
-              conclusion: selectedVersion.conclusion,
-              t,
-              onOpenFile: props.onOpenFile,
-              feedbackStates,
-              headerExtra: versionHeader,
-              metaLine: conclusionMetaLine(review, roundNumber, selectedVersion, publishedEntries, isCurrent, t),
-            });
 
-        const pull = review.pull ?? {};
-        // The whole-review footer (conclusion/publish actions plus the coverage and staleness
-        // notices) is rendered above the composer by whichever surface owns it: the session
-        // composer takeover or the embedded footer. Both read it from `actionsBridge`.
-        const footer = overviewFooter(props, {
-          report, pull, selectedVersion, staleInfo, isCurrent, isOlderVersion,
-          hasVersion: versions.length > 0,
-          selectedPublished: selectedVersion !== null
-            && isRoundVersionPublished(publishedEntries, roundNumber, selectedVersion.version),
-        });
-        React.useEffect(() => {
-          actionsBridge.set(footer.actions);
-          actionsBridge.setNotice(footer.notice);
-          return undefined;
-        }, [footer.actions, footer.notice]);
-        // Leaving the overview must clear the dock instead of leaving stale buttons behind.
-        React.useEffect(() => () => {
-          actionsBridge.set(null);
-          actionsBridge.setNotice(null);
-        }, []);
-
-        // The current round needs a report before anything renders; a historical round keeps
-        // its own conclusion/delta/feedback even though `record.report` is reset on a new round.
-        if ((report === null || report === undefined) && isCurrent) {
-          return h(
-            'div',
-            null,
-            h('div', { className: 'prr-zero' }, review.status === 'reviewing' ? t('reportPending') : t('noReport')),
-          );
-        }
-
-        // Historical rounds are read-only: meta, delta/feedback (round >= 2), conclusion, published.
         if (!isCurrent) {
           return h(
             'div',
             null,
-            h(RoundMeta, { round: selectedRound, t }),
             roundTop,
-            conclusionNode,
-            h(PublishedBlock, { entries: publishedEntries, t }),
-            h('div', { className: 'prr-subtle', style: { marginTop: '10px' } }, t('historyReadOnly')),
+            h('div', { className: 'prr-zero' }, t('historyNoReport')),
           );
         }
+
+        const findingCount = (props.fileFindings ?? []).reduce(
+          (sum, group) => sum + (group.issues?.length ?? 0) + (group.suggestions?.length ?? 0),
+          0,
+        );
+        const clean = cleanCountOf(review);
+        const coverage = review.coverage ?? null;
+        const analyzed = coverage !== null && typeof coverage.analyzed === 'number'
+          ? coverage.analyzed
+          : (typeof props.explainedCount === 'number' ? props.explainedCount : clean.done);
+        const total = coverage !== null && typeof coverage.total === 'number' ? coverage.total : (props.totalFiles ?? 0);
 
         return h(
           'div',
           null,
           roundTop,
-          h('div', { className: 'prr-h2' }, t('summary')),
+          h('div', { className: 'prr-h2' }, t('digestTitle')),
+          h('div', { className: 'prr-card' }, h('div', { className: 'prr-text' }, report.summary)),
+          h('div', { className: 'prr-h2' }, `${t('findingList')} · ${findingCount}`),
+          h(FindingList, { groups: props.fileFindings ?? [], t, onOpenFile: props.onOpenFile }),
+          h('div', { className: 'prr-h2' }, t('completenessTitle')),
           h(
             'div',
-            { className: 'prr-card' },
-            h(
-              'div',
-              { className: 'prr-verdictline' },
-              h(VerdictPill, { verdict: report.verdict, t }),
-              h('span', { className: 'prr-meta2' }, `#${review.number} ${text(pull.title)}`),
-            ),
-            h(
-              'div',
-              { className: 'prr-subtle', style: { marginBottom: '8px' } },
-              `${text(pull.author)} · ${text(pull.headRef)} → ${text(pull.baseRef)} · +${pull.additions ?? 0} / -${pull.deletions ?? 0} · ${pull.changedFiles ?? 0}${typeof review.headSha === 'string' && review.headSha !== '' ? ` · commit ${shortSha(review.headSha)}` : ''}`,
-            ),
-            h('div', { className: 'prr-text' }, report.summary),
+            { className: 'prr-completeness' },
+            fill(t('completenessCoverage'), { analyzed, total }),
+            clean.clean > 0 ? ` · ${fill(t('completenessClean'), { clean: clean.clean })}` : null,
           ),
-          h('div', { className: 'prr-h2' }, t('initialRisks')),
-          h('div', { className: 'prr-card' }, h(RiskList, {
-            risks: report.risks,
-            emptyLabel: (report.raised ?? 0) > 0
-              ? fill(t('noInitialRisksDetail'), {
-                  raised: report.raised ?? 0,
-                  unverified: (report.unverified ?? []).length,
-                  discarded: report.discarded ?? 0,
-                })
-              : t('noInitialRisks'),
-            t,
-            onOpenFile: props.onOpenFile,
-          })),
-          h(UnverifiedBlock, { t, items: report.unverified }),
-          h(
-            'div',
-            { className: 'prr-h2' },
-            `${t('fileFindings')} · ${t('explainedOf')} ${props.explainedCount ?? 0}/${props.totalFiles ?? 0}`,
-          ),
-          h(
-            'div',
-            { className: 'prr-card' },
-            (props.fileFindings ?? []).length === 0
-              ? h('div', { className: 'prr-subtle' }, t('noFileFindings'))
-              : (props.fileFindings ?? []).map((group) =>
-                  h(
-                    'div',
-                    { className: 'prr-finding-file', key: group.file },
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'prr-linklike prr-filetag',
-                        onClick: () => props.onOpenFile(group.file),
-                        title: group.file,
-                      },
-                      group.file,
-                    ),
-                    (group.issues ?? []).map((issue, index) =>
-                      h(
-                        'div',
-                        { className: 'prr-rowitem', key: `issue-${index}` },
-                        h(VerdictPill, { verdict: issue.severity, t }),
-                        h(
-                          'div',
-                          { className: 'prr-rowmain' },
-                          h('div', { className: 'prr-text' }, issue.point),
-                          issue.line > 0
-                            ? h('div', { className: 'prr-subtle' }, `${t('severityLine')} ${issue.line}`)
-                            : null,
-                        ),
-                      ),
-                    ),
-                    (group.suggestions ?? []).map((item, index) => {
-                      const text = suggestionText(item);
-                      return text === '' ? null : h(
-                        'div',
-                        { className: 'prr-rowitem', key: `suggestion-${index}` },
-                        h('span', { className: 'prr-tag' }, t('suggestionTag')),
-                        h('div', { className: 'prr-rowmain prr-text' }, text),
-                      );
-                    }),
-                  ),
-                ),
-          ),
-          conclusionNode,
-          h(PublishedBlock, { entries: publishedEntries, t }),
-          review.concludeError === null || review.concludeError === undefined || review.concludeError === ''
-            ? null
-            : h('div', { className: 'prr-conclude-note' }, String(review.concludeError)),
         );
       }
 
@@ -927,7 +807,7 @@ window.__ModuleLoader__.load({
 
       return {
         FilesPane, PhaseBar, FindingList, findingsOf, cleanCountOf, DiffView, FullFileView,
-        FileDetailPanel, ChatBox, OverviewPanel, WorkspaceCenter,
+        FileDetailPanel, ChatBox, OverviewPage, WorkspaceCenter,
       };
     };
   },

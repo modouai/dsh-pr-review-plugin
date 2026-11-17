@@ -26,7 +26,7 @@ window.__ModuleLoader__.load({
         PublishPreviewModal,
       } = preview;
       const {
-        FilesPane, ChatBox, FileDetailPanel, OverviewPanel, WorkspaceCenter,
+        FilesPane, ChatBox, FileDetailPanel, OverviewPage, WorkspaceCenter, PhaseBar,
       } = views;
       const {
         useRepoContext, useFileDetail, usePreviewPublish, useRoundSelection, useFeedbackCheck,
@@ -98,6 +98,8 @@ window.__ModuleLoader__.load({
           roundPick, setRoundPick, versionPick, setVersionPick, selectRound, pickConclusionVersion,
         } = useRoundSelection(review, mode, setMode);
         const concluding = review?.concluding ?? null;
+        // Temporary until Task 11 wires derivePhase: a stand-in so PhaseBar can render.
+        const phase = null;
         const concludingActive = concluding !== null && concluding !== undefined;
 
         const initialRef = React.useRef({ number: props.initialNumber, file: props.initialFile });
@@ -413,6 +415,7 @@ window.__ModuleLoader__.load({
           // Rounds and view mode.
           reviewRounds, latestRoundNumber, selectedRoundNumber, historicalView,
           versionPick, pickConclusionVersion, selectRound, mode, setMode,
+          phase,
           // Columns.
           sidebarPane, setSidebarPane, sidebarWidth,
           filesWidth, setFilesWidth, detailWidth, setDetailWidth,
@@ -864,30 +867,20 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'prr-overview-inner' },
-              h(OverviewPanel, {
+              h(PhaseBar, { phase: model.phase, round: model.selectedRoundNumber ?? review?.round ?? 1, t }),
+              h(OverviewPage, {
                 review: review ?? { report: null, number: prNumber ?? 0, pull: null, status: 'idle', conclusion: null },
                 t,
                 selectedRoundNumber,
-                onSelectRound: selectRound,
-                versionPick,
-                onPickVersion: pickConclusionVersion,
-                concludeBusy,
-                concluding,
-                cancelBusy: concludeCancelBusy,
-                onCancelConclude: () => void cancelConclude(),
-                reviewBusy,
-                onConclude: () => void runConclude(),
                 onOpenFile: (path, line) => void openFile(path, line),
                 explainedCount,
                 totalFiles: (review?.files ?? []).length,
                 fileFindings,
-                publishBusy,
-                previewBusy,
                 feedbackBusy,
                 onCheckFeedback: () => void checkFeedback(),
-                comment: review?.comment ?? null,
-                onPublish: () => void requestPreview(),
-                autoReconclude: list?.autoReconclude === true,
+                concludeBusy,
+                reviewBusy,
+                onConclude: () => void runConclude(),
               }),
               sidebar ? null : h('div', { className: 'prr-overview-chat' }, chat),
             ),
