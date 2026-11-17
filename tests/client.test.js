@@ -78,6 +78,9 @@ const EXPOSED = [
   'buildPublishBody',
   'selectionIncludeIds',
   'scrollToNewLine',
+  'derivePhase',
+  'phaseStateText',
+  'conclusionBadgeText',
 ];
 
 // ---------- fake React ----------
@@ -2912,4 +2915,101 @@ test('malformed unverified entries are dropped instead of leaking into the panel
   assert.doesNotMatch(textOnly, /undefined/);
   assert.doesNotMatch(textOnly, /缺少证据/);
 });
+
+test('derivePhase folds host state into one phase', () => {
+  const { parts } = loadClient();
+  const base = makeReview({ round: 2 });
+  assert.equal(parts.derivePhase({ ...base, status: 'error' }, null).phase, 'error');
+  assert.equal(parts.derivePhase({ ...base, status: 'reviewing' }, null).phase, 'reviewing');
+  assert.equal(
+    parts.derivePhase({ ...base, concluding: { stage: 'model', startedAt: 1 } }, null).phase,
+    'concluding',
+  );
+
+  const analyzing = { ...base, status: 'done', analyzing: { done: 12, total: 30, failed: 1, current: 'src/a.js' } };
+  const phase = parts.derivePhase(analyzing, null);
+  assert.equal(phase.phase, 'analyzing');
+  assert.deepEqual(plain(phase.progress), { done: 12, total: 30, failed: 1 });
+  assert.equal(phase.nextAction, null);
+  assert.equal(parts.derivePhase(analyzing, null, { manual: true }).nextAction, 'analyzeAll');
+
+  // Progress is clamped into [0, total]; a negative failed count folds to 0.
+  const clamped = parts.derivePhase(
+    { ...base, status: 'done', analyzing: { done: 99, total: 30, failed: -1, current: 'x' } },
+    null,
+  );
+  assert.deepEqual(plain(clamped.progress), { done: 30, total: 30, failed: 0 });
+
+  assert.equal(parts.derivePhase({ ...base, conclusion: null, conclusionAt: 0 }, null).phase, 'ready');
+  assert.equal(parts.derivePhase({ ...base, conclusion: null, conclusionAt: 0 }, null).nextAction, 'conclude');
+
+  // A missing review falls back to the empty record; staleness only decorates
+  // concluded/published states, so a stale report without a conclusion stays ready.
+  assert.deepEqual(plain(parts.derivePhase(null, null)), {
+    phase: 'ready', progress: null, nextAction: 'conclude', version: 0,
+  });
+  const staleInfo = { createdAt: 1, files: ['src/a.js'], reportNewer: false, count: 1 };
+  const staleReady = parts.derivePhase({ ...base, conclusion: null, conclusionAt: 0 }, staleInfo);
+  assert.equal(staleReady.phase, 'ready');
+  assert.equal(staleReady.nextAction, 'conclude');
+});
+
+test('derivePhase distinguishes concluded / stale / published states', () => {
+  const { parts } = loadClient();
+  const concluded = makeReview({
+    round: 2,
+    conclusion: { verdict: 'suggest', summary: 's', blockers: [], suggestions: [], nextSteps: [] },
+    conclusionAt: 5000,
+  });
+  assert.equal(parts.derivePhase(concluded, null).phase, 'concluded');
+  assert.equal(parts.derivePhase(concluded, null).nextAction, 'publish');
+  assert.equal(parts.derivePhase(concluded, null).version, 1);
+
+  const staleInfo = { createdAt: 1, files: ['src/a.js'], reportNewer: false, count: 1 };
+  assert.equal(parts.derivePhase(concluded, staleInfo).phase, 'concluded-stale');
+  assert.equal(parts.derivePhase(concluded, staleInfo).nextAction, 'regenerate');
+
+  const published = makeReview({
+    round: 2,
+    conclusion: { verdict: 'suggest', summary: 's', blockers: [], suggestions: [], nextSteps: [] },
+    conclusionAt: 5000,
+    published: [{ id: 'p1', round: 2, version: 1, publishedAt: 6000 }],
+  });
+  assert.equal(parts.derivePhase(published, null).phase, 'published');
+  assert.equal(parts.derivePhase(published, null).nextAction, 'append');
+  assert.equal(parts.derivePhase(published, staleInfo).phase, 'published-stale');
+  assert.equal(parts.derivePhase(published, staleInfo).nextAction, 'regenerate');
+});
+
+test('phase and conclusion badge text follow the phase', () => {
+  const { parts } = loadClient();
+  const t = (key) => key;
+  const analyzing = { phase: 'analyzing', progress: { done: 12, total: 30, failed: 2 }, nextAction: null, version: 0 };
+  assert.equal(
+    parts.phaseStateText(analyzing, t),
+    'badgeAnalyzing badgeAnalyzingFailed',
+  );
+
+  // The remaining status-bar branches, including the silent fall-through to badgeDone.
+  assert.equal(parts.phaseStateText(null, t), '');
+  assert.equal(parts.phaseStateText({ phase: 'reviewing' }, t), 'badgeReviewing');
+  assert.equal(parts.phaseStateText({ phase: 'concluding' }, t), 'badgeConcluding');
+  assert.equal(parts.phaseStateText({ phase: 'error' }, t), 'badgeError');
+  assert.equal(
+    parts.phaseStateText({ phase: 'analyzing', progress: { done: 3, total: 9, failed: 0 } }, t),
+    'badgeAnalyzing',
+  );
+  assert.equal(parts.phaseStateText({ phase: 'concluded', version: 1 }, t), 'badgeDone');
+  assert.equal(parts.phaseStateText({ phase: 'ready', nextAction: 'conclude' }, t), 'badgeDone');
+
+  // Conclusion-side badge: version-aware keys while a conclusion exists, none otherwise.
+  assert.equal(parts.conclusionBadgeText(null, t), 'badgeConclusionNone');
+  assert.equal(parts.conclusionBadgeText({ phase: 'ready', version: 0 }, t), 'badgeConclusionNone');
+  assert.equal(parts.conclusionBadgeText({ phase: 'error', version: 0 }, t), 'badgeConclusionNone');
+  assert.equal(parts.conclusionBadgeText({ phase: 'concluded', version: 3 }, t), 'badgeConclusionDraft');
+  assert.equal(parts.conclusionBadgeText({ phase: 'concluded-stale', version: 2 }, t), 'badgeConclusionStale');
+  assert.equal(parts.conclusionBadgeText({ phase: 'published', version: 4 }, t), 'badgePublished');
+  assert.equal(parts.conclusionBadgeText({ phase: 'published-stale', version: 5 }, t), 'badgePublishedStale');
+});
+
 

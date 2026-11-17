@@ -242,6 +242,81 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The single phase the whole panel shows. Everything the host already reports — review
+     * status, batch progress, the conclude job, conclusion versions, published entries and
+     * staleness — folds into one enum so the status bar, the rail badges and the footer
+     * cannot disagree. `staleInfo` is staleInfoOf()'s result (null = not stale); options
+     * carry per-workspace flags ({ manual: true } = autoAnalyze off).
+     */
+    function derivePhase(review, staleInfo, options = {}) {
+      const data = review ?? {};
+      if (data.status === 'error') return { phase: 'error', progress: null, nextAction: null, version: 0 };
+      const analyzing = isAnalyzing(data.analyzing) ? data.analyzing : null;
+      const progress = analyzing === null
+        ? null
+        : {
+            done: Math.min(Math.max(analyzing.done ?? 0, 0), analyzing.total),
+            total: analyzing.total,
+            failed: Math.min(Math.max(analyzing.failed ?? 0, 0), analyzing.total),
+          };
+      const rounds = roundsOf(data);
+      const current = rounds.length > 0 ? rounds[rounds.length - 1] : null;
+      const versions = versionsOf(data, current, true);
+      const version = versions.length > 0 ? versions[versions.length - 1].version : 0;
+      const hasConclusion = versions.length > 0;
+      const stale = staleInfo !== null && staleInfo !== undefined;
+      if (data.status === 'reviewing') return { phase: 'reviewing', progress: null, nextAction: null, version };
+      if (data.concluding !== null && data.concluding !== undefined) {
+        return { phase: 'concluding', progress: null, nextAction: null, version };
+      }
+      if (analyzing !== null) {
+        return {
+          phase: 'analyzing',
+          progress,
+          nextAction: options.manual === true ? 'analyzeAll' : null,
+          version,
+        };
+      }
+      if (!hasConclusion) return { phase: 'ready', progress: null, nextAction: 'conclude', version };
+      const published = isRoundVersionPublished(data.published, current === null ? 1 : current.round, version);
+      if (published && stale) return { phase: 'published-stale', progress: null, nextAction: 'regenerate', version };
+      if (published) return { phase: 'published', progress: null, nextAction: 'append', version };
+      if (stale) return { phase: 'concluded-stale', progress: null, nextAction: 'regenerate', version };
+      return { phase: 'concluded', progress: null, nextAction: 'publish', version };
+    }
+
+    /** The process-side state line: one text for the status bar and the overview badge. */
+    function phaseStateText(phase, t) {
+      if (phase === null || phase === undefined) return '';
+      if (phase.phase === 'reviewing') return t('badgeReviewing');
+      if (phase.phase === 'concluding') return t('badgeConcluding');
+      if (phase.phase === 'error') return t('badgeError');
+      if (phase.phase === 'analyzing') {
+        const base = fill(t('badgeAnalyzing'), {
+          done: phase.progress?.done ?? 0,
+          total: phase.progress?.total ?? 0,
+        });
+        const failed = (phase.progress?.failed ?? 0) > 0
+          ? fill(t('badgeAnalyzingFailed'), { failed: phase.progress.failed })
+          : '';
+        return failed === '' ? base : `${base} ${failed}`;
+      }
+      return t('badgeDone');
+    }
+
+    /** The conclusion-side badge: version-aware, none while no conclusion exists. */
+    function conclusionBadgeText(phase, t) {
+      if (phase === null || phase === undefined) return t('badgeConclusionNone');
+      const version = phase.version ?? 0;
+      if (phase.phase === 'concluding') return t('badgeConcluding');
+      if (phase.phase === 'concluded') return fill(t('badgeConclusionDraft'), { version });
+      if (phase.phase === 'concluded-stale') return fill(t('badgeConclusionStale'), { version });
+      if (phase.phase === 'published') return fill(t('badgePublished'), { version });
+      if (phase.phase === 'published-stale') return fill(t('badgePublishedStale'), { version });
+      return t('badgeConclusionNone');
+    }
+
+    /**
      * True when a published entry already covers this round's newest conclusion version.
      * Legacy records predate version tracking, so version 0 counts as published.
      */
@@ -1093,6 +1168,7 @@ window.__ModuleLoader__.load({
         severityLabel, fileSeverityOf, STATUS_KEY, cleanStepTitle,
         parseUnifiedDiff, mapWalkthroughToHunks, hunkRange, CSS,
         findingKey, FEEDBACK_LABEL_KEYS, VerdictPill, Btn, RefreshIcon, FileRow, isAnalyzing,
+        derivePhase, phaseStateText, conclusionBadgeText,
     };
   },
 });
