@@ -17,7 +17,7 @@ window.__ModuleLoader__.load({
       const {
         api, postJson, reviewAskContext, scrollToNewLine, formatClock, cleanStepTitle,
         severityLabel, text, CSS, Btn, panelSizing, clampColumnWidth, actionsBridge,
-        shouldShowReviewButton,
+        shouldShowReviewButton, derivePhase, shouldAutoSwitchPhase, staleInfoOf, versionsOf,
       } = core;
       const {
         DetailHeader, TopBar,
@@ -98,9 +98,26 @@ window.__ModuleLoader__.load({
           roundPick, setRoundPick, versionPick, setVersionPick, selectRound, pickConclusionVersion,
         } = useRoundSelection(review, mode, setMode);
         const concluding = review?.concluding ?? null;
-        // Temporary until Task 11 wires derivePhase: a stand-in so PhaseBar can render.
-        const phase = null;
+        const staleInfo = React.useMemo(() => {
+          if (review === null || review === undefined) return null;
+          const current = reviewRounds.length === 0 ? null : reviewRounds[reviewRounds.length - 1];
+          return staleInfoOf(review, versionsOf(review, current, true));
+        }, [review, reviewRounds]);
+        const phase = React.useMemo(
+          () => derivePhase(review, staleInfo, { manual: list?.autoAnalyze === false }),
+          [review, staleInfo, list],
+        );
         const concludingActive = concluding !== null && concluding !== undefined;
+
+        // When concluding finishes, land on the conclusion page — but only from the overview;
+        // a reviewer reading a file is not interrupted, the badges carry the state instead.
+        const previousPhaseRef = React.useRef(null);
+        React.useEffect(() => {
+          const previous = previousPhaseRef.current;
+          previousPhaseRef.current = phase.phase;
+          if (!shouldAutoSwitchPhase(previous, phase.phase, mode, selectedIsCurrent)) return;
+          setMode('conclusion');
+        }, [phase, mode, selectedIsCurrent]);
 
         const initialRef = React.useRef({ number: props.initialNumber, file: props.initialFile });
         const rememberRef = React.useRef(props.onRemember);
@@ -178,7 +195,7 @@ window.__ModuleLoader__.load({
           previewRefreshBusy, setPreviewRefreshBusy, publishBusy, setPublishBusy, publishError, setPublishError,
           requestPreview, refreshPreview, closePreview, togglePreviewItem,
           selectAllPreviewItems, selectNonePreviewItems, submitPublish,
-          previewModalOpen,
+          previewModalOpen, setPreviewModalOpen,
         } = usePreviewPublish({ withRepo, stateRef, loadReview });
 
 
@@ -296,7 +313,9 @@ window.__ModuleLoader__.load({
           setConcludeWait(false);
           setScrollLine(0);
           setPreview(null);
+          setPreviewModalOpen(false);
           setPreviewError('');
+          setPublishError('');
           return undefined;
         }, [repoContext]);
 
@@ -327,7 +346,9 @@ window.__ModuleLoader__.load({
           setConcludeWait(false);
           setScrollLine(0);
           setPreview(null);
+          setPreviewModalOpen(false);
           setPreviewError('');
+          setPublishError('');
           void loadReview(prNumber).then((record) => {
             if (record === null) return;
             const remembered = initialRef.current.file;
@@ -373,15 +394,29 @@ window.__ModuleLoader__.load({
           loadList,
         });
 
-        // Escape closes the publish preview dialog (same cleanup as its Cancel button).
+        // Escape closes the publish preview dialog (same cleanup as its Cancel button). A quiet
+        // prefetch keeps `preview` around without a dialog, so the flag gates the listener too.
         React.useEffect(() => {
-          if (preview === null) return undefined;
+          if (preview === null || previewModalOpen !== true) return undefined;
           const onKeyDown = (event) => {
             if (event.key === 'Escape') closePreview();
           };
           window.addEventListener('keydown', onKeyDown);
           return () => window.removeEventListener('keydown', onKeyDown);
-        }, [preview, closePreview]);
+        }, [preview, previewModalOpen, closePreview]);
+
+        // The conclusion page composes the publish inline: keep a preview prepared (quietly,
+        // without opening the modal) while that page is visible with a conclusion present.
+        // A failed prefetch stops retrying: the sidebar polls re-load the review every few
+        // seconds, and without this gate every poll would fire another request. The publish
+        // error banner is the tripwire — it is also what an explicit failed attempt leaves, so
+        // the page never fights the reviewer with background traffic either way.
+        React.useEffect(() => {
+          if (mode !== 'conclusion') return;
+          if (review === null || review.conclusion === null || review.conclusion === undefined) return;
+          if (preview !== null || previewBusy === true || publishError !== '') return;
+          void requestPreview({ quiet: true });
+        }, [mode, review, preview, previewBusy, publishError, requestPreview]);
 
         // Scroll the rendered diff to the clicked conclusion item's new-side line. A line that
         // is outside the displayed hunks (or a host without line data) silently keeps the file open.
@@ -416,7 +451,7 @@ window.__ModuleLoader__.load({
           // Rounds and view mode.
           reviewRounds, latestRoundNumber, selectedRoundNumber, historicalView,
           versionPick, pickConclusionVersion, selectRound, mode, setMode,
-          phase,
+          phase, staleInfo,
           // Columns.
           sidebarPane, setSidebarPane, sidebarWidth,
           filesWidth, setFilesWidth, detailWidth, setDetailWidth,
@@ -455,15 +490,14 @@ window.__ModuleLoader__.load({
           contextBusy, contextError, contextBlocked, setContextAttempt,
           currentExplanation, suggestionNotice,
           reviewRounds, latestRoundNumber, selectedRoundNumber, selectRound,
-          mode, setMode, sidebarPane, setSidebarPane, sidebarWidth,
+          mode, setMode, phase, sidebarPane, setSidebarPane, sidebarWidth,
           filesWidth, setFilesWidth, detailWidth, setDetailWidth,
           startReview, refreshPulls, openFile, requestAnalyzeAll, analyzeAllBusy,
           orderedFiles, historicalView,
           publishError, feedbackError, fileDiffError, fileContentError,
           overlayDraft, overlayBusy, setOverlayDraft, sendOverlayMessage,
           preview, previewModalOpen, previewBusy, previewError, previewRefreshBusy, publishBusy,
-          closePreview, togglePreviewItem,
-          selectAllPreviewItems, selectNonePreviewItems, submitPublish,
+          closePreview, submitPublish,
           walkFloat, activeHunk, closeWalkFloat, expandHunkContext,
           askInChat,
         } = model;
@@ -597,7 +631,8 @@ window.__ModuleLoader__.load({
 
         const center = h(WorkspaceCenter, { model });
 
-        const overviewMode = mode === 'overview' || mode === 'conclusion' || filePath === '';
+        const conclusionMode = mode === 'conclusion';
+        const overviewMode = mode === 'overview' || (filePath === '' && mode !== 'conclusion');
         const noOpenPrs = !contextBlocked && list !== null && (list.prs ?? []).length === 0 && prNumber === null;
 
         // Wide sidebars keep the three columns; below ~780px the analysis column collapses into
@@ -606,7 +641,8 @@ window.__ModuleLoader__.load({
         const fileColumnWidth = sidebar
           ? (sidebarWidth >= 960 ? 224 : (sidebarWidth >= 780 ? 196 : 156))
           : 0;
-        const narrowToggle = narrowFile && !overviewMode
+        // The diff/analysis toggle only means something while a file's detail is on screen.
+        const narrowToggle = narrowFile && !overviewMode && !conclusionMode
           ? h(
               'div',
               { className: 'prr-subseg' },
@@ -636,6 +672,7 @@ window.__ModuleLoader__.load({
         }));
 
         const overviewPane = h(WorkspaceOverviewPane, { model, paneHeader, chat: chatBox('pull') });
+        const conclusionPane = h(WorkspaceConclusionPane, { model, paneHeader, chat: chatBox('pull') });
 
         const filesWidthValue = filesWidth > 0 ? filesWidth : fileColumnWidth;
         const detailWidthValue = detailWidth > 0 ? detailWidth : (sidebar ? 280 : 372);
@@ -684,6 +721,7 @@ window.__ModuleLoader__.load({
         const analysisPane = h(WorkspaceAnalysisPane, { model });
         const fileDetailPane = h(WorkspaceFileDetailPane, {
           paneHeader,
+          phaseBar: h(PhaseBar, { phase, round: selectedRoundNumber ?? review?.round ?? 1, t }),
           analysis: analysisPane,
           chat: chatBox('file'),
           width: detailWidthValue,
@@ -693,9 +731,12 @@ window.__ModuleLoader__.load({
           t,
           width: filesWidthValue,
           overviewMode,
+          conclusionMode,
           onSelectOverview: () => setMode('overview'),
+          onSelectConclusion: () => setMode('conclusion'),
           files: orderedFiles,
-          // Only the file actually on screen keeps the active row; the overview highlights nothing.
+          // Only the file actually on screen keeps the active row: the overview highlights
+          // nothing, while the conclusion page keeps the row of the file the reviewer came from.
           filePath: overviewMode ? '' : filePath,
           review,
           onOpenFile: (path) => void openFile(path),
@@ -705,6 +746,7 @@ window.__ModuleLoader__.load({
           manual: historicalView !== true && list?.autoAnalyze === false && review?.status === 'done',
           analyzeAllBusy,
           onAnalyzeAll: () => void requestAnalyzeAll(),
+          phase,
         });
 
         return h(
@@ -728,25 +770,29 @@ window.__ModuleLoader__.load({
               : noOpenPrs
                 ? h('div', { className: 'prr-zero', key: 'no-prs', style: { padding: '32px 24px' } }, t('emptyPr'))
                 : sidebar
-                  ? (overviewMode
-                      ? h('div', { className: 'prr-body' }, filesPane, resizer('files'), overviewPane)
-                      : narrowFile
-                        ? h(
-                            'div',
-                            { className: 'prr-body' },
-                            filesPane,
-                            resizer('files'),
-                            h(
-                              'section',
-                              { className: 'prr-overview-pane' },
-                              paneHeader,
-                              sidebarPane === 'analysis' ? analysisPane : center,
-                            ),
-                          )
-                        : h('div', { className: 'prr-body' }, filesPane, resizer('files'), center, resizer('detail'), fileDetailPane))
-                  : overviewMode
-                    ? h('div', { className: 'prr-body' }, filesPane, resizer('files'), overviewPane)
-                    : h('div', { className: 'prr-body' }, filesPane, resizer('files'), center, resizer('detail'), fileDetailPane),
+                  ? (conclusionMode
+                      ? h('div', { className: 'prr-body' }, filesPane, resizer('files'), conclusionPane)
+                      : overviewMode
+                        ? h('div', { className: 'prr-body' }, filesPane, resizer('files'), overviewPane)
+                        : narrowFile
+                          ? h(
+                              'div',
+                              { className: 'prr-body' },
+                              filesPane,
+                              resizer('files'),
+                              h(
+                                'section',
+                                { className: 'prr-overview-pane' },
+                                paneHeader,
+                                sidebarPane === 'analysis' ? analysisPane : center,
+                              ),
+                            )
+                          : h('div', { className: 'prr-body' }, filesPane, resizer('files'), center, resizer('detail'), fileDetailPane))
+                  : (conclusionMode
+                      ? h('div', { className: 'prr-body' }, filesPane, resizer('files'), conclusionPane)
+                      : overviewMode
+                        ? h('div', { className: 'prr-body' }, filesPane, resizer('files'), overviewPane)
+                        : h('div', { className: 'prr-body' }, filesPane, resizer('files'), center, resizer('detail'), fileDetailPane)),
             sidebar
               ? h(
                   'div',
@@ -852,9 +898,9 @@ window.__ModuleLoader__.load({
         const {
           t, list, review, prNumber, sidebar,
           selectedRoundNumber, selectRound, versionPick, pickConclusionVersion,
-          concludeBusy, concluding, concludeCancelBusy, cancelConclude, reviewBusy, runConclude,
+          concludeBusy, concluding, concludeCancelBusy, reviewBusy, runConclude,
           openFile, explainedCount, fileFindings,
-          publishBusy, previewBusy, feedbackBusy, checkFeedback, requestPreview,
+          feedbackBusy, checkFeedback,
         } = model;
         return h(
           'section',
@@ -893,9 +939,9 @@ window.__ModuleLoader__.load({
           t, review, prNumber, sidebar, list, selectedRoundNumber,
           versionPick, pickConclusionVersion,
           concludeBusy, concluding, concludeCancelBusy, cancelConclude, reviewBusy, runConclude,
-          openFile, explainedCount, fileFindings, phase,
+          openFile, explainedCount, phase,
           publishBusy, previewBusy, previewRefreshBusy, feedbackBusy, checkFeedback,
-          preview, togglePreviewItem, staleInfo,
+          preview, togglePreviewItem, staleInfo, requestPreview,
         } = model;
         return h(
           'section',
@@ -930,6 +976,7 @@ window.__ModuleLoader__.load({
                 onCheckFeedback: () => void checkFeedback(),
                 preview,
                 onToggleInclude: (id) => togglePreviewItem(id),
+                onPublish: () => void requestPreview(),
                 autoReconclude: list?.autoReconclude === true,
                 staleInfo,
               }),
@@ -957,11 +1004,12 @@ window.__ModuleLoader__.load({
       }
 
       /** Analysis column wrapped in its resizable aside, with the pane header and chat box. */
-      function WorkspaceFileDetailPane({ paneHeader, analysis, chat, width }) {
+      function WorkspaceFileDetailPane({ paneHeader, phaseBar, analysis, chat, width }) {
         return h(
           'aside',
           { className: 'prr-detail', style: { flex: `0 0 ${width}px`, minWidth: '120px' } },
           paneHeader,
+          phaseBar,
           analysis,
           chat,
         );

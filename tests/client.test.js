@@ -79,6 +79,7 @@ const EXPOSED = [
   'selectionIncludeIds',
   'scrollToNewLine',
   'derivePhase',
+  'shouldAutoSwitchPhase',
   'phaseStateText',
   'conclusionBadgeText',
   'PhaseBar',
@@ -2833,6 +2834,26 @@ test('phase and conclusion badge text follow the phase', () => {
   assert.equal(parts.conclusionBadgeText({ phase: 'published-stale', version: 5 }, t), 'badgePublishedStale');
 });
 
+test('shouldAutoSwitchPhase only lands on the conclusion after the conclude job finishes', () => {
+  const { parts } = loadClient();
+  const decides = parts.shouldAutoSwitchPhase;
+  // Without a finishing conclude job nothing switches, whatever the target phase is.
+  assert.equal(decides('ready', 'concluded', 'overview', true), false);
+  assert.equal(decides('reviewing', 'published', 'overview', true), false);
+  // concluding → an intermediate phase is not a finish: stay put.
+  assert.equal(decides('concluding', 'analyzing', 'overview', true), false);
+  assert.equal(decides('concluding', 'ready', 'overview', true), false);
+  // Each terminal phase of a finished conclude job lands on the conclusion page.
+  for (const terminal of ['concluded', 'concluded-stale', 'published', 'published-stale']) {
+    assert.equal(decides('concluding', terminal, 'overview', true), true, terminal);
+  }
+  // A reviewer reading a file is not interrupted.
+  assert.equal(decides('concluding', 'concluded', 'file', true), false);
+  assert.equal(decides('concluding', 'concluded', 'conclusion', true), false);
+  // Neither is a reviewer pinned to a historical round.
+  assert.equal(decides('concluding', 'concluded', 'overview', false), false);
+});
+
 
 
 test('navigation redesign css ships the new selectors', () => {
@@ -3084,4 +3105,180 @@ test('ConclusionBlock renders publish checkboxes when includeControl is set', ()
     conclusion, t, onOpenFile: () => {},
   }));
   assert.equal(without.elements.filter((element) => element.type === 'input').length, 0);
+});
+
+test('FilesPane pins a conclusion entry with live badges', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const base = {
+    t,
+    overviewMode: true,
+    conclusionMode: false,
+    onSelectOverview: () => {},
+    onSelectConclusion: () => {},
+    files: [{ path: 'src/a.js', status: 'modified', additions: 1, deletions: 0, order: 1, reason: '', severity: '' }],
+    filePath: '',
+    review: makeReview({ round: 1 }),
+    onOpenFile: () => {},
+    analyzing: null,
+    manual: false,
+    analyzeAllBusy: false,
+    onAnalyzeAll: () => {},
+    phase: { phase: 'ready', progress: null, nextAction: 'conclude', version: 0 },
+  };
+  const view = fake.render(fake.React.createElement(parts.FilesPane, base));
+  assert.ok(view.textOnly.includes('结论'));
+  assert.ok(view.textOnly.includes('未生成'));
+  assert.ok(view.elements.some((element) => element.props?.className === 'prr-files-tail'));
+
+  const active = fake.render(fake.React.createElement(parts.FilesPane, {
+    ...base,
+    conclusionMode: true,
+    phase: { phase: 'published', progress: null, nextAction: 'append', version: 3 },
+  }));
+  assert.ok(active.textOnly.includes('v3 已发布'));
+});
+
+test('ConclusionPage keeps its hook order across pending/historical/current transitions', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const older = makeVersion(1, '第一轮结论');
+  const current = makeVersion(2, '第二轮结论');
+  const props = (review, selectedRoundNumber) => ({
+    review, t, selectedRoundNumber,
+    versionPick: {}, onPickVersion: () => {},
+    onOpenFile: () => {}, explainedCount: 0, totalFiles: 2,
+    concludeBusy: false, reviewBusy: false, onConclude: () => {},
+    concluding: null, cancelBusy: false, onCancelConclude: () => {},
+    preview: null, onToggleInclude: () => {},
+    publishBusy: false, previewBusy: false, previewRefreshBusy: false,
+    feedbackBusy: false, onCheckFeedback: () => {},
+  });
+  const concluded = makeReview({
+    round: 2,
+    conclusion: current.conclusion,
+    conclusionAt: current.createdAt,
+    roundHistory: [makeRound(1, { conclusions: [older] }), makeRound(2, { conclusions: [current] })],
+  });
+  const result = fake.rerender(parts.ConclusionPage, [
+    // Pending: the current round has no conclusion yet.
+    props(makeReview({ round: 2, conclusion: null, conclusionAt: 0, roundHistory: [makeRound(1), makeRound(2)] }), null),
+    // Historical: an older round is pinned and shows its own conclusion versions.
+    props(concluded, 1),
+    // Current: the newest round with its conclusion.
+    props(concluded, null),
+  ]);
+  assert.equal(new Set(result.counts).size, 1, 'every transition consumes the same hook count');
+  // The three props really did exercise the three render branches.
+  const [pendingText, historicalText, currentText] = result.trees.map((tree) => fake.textOf(tree));
+  assert.ok(pendingText.includes('结论待生成'));
+  assert.ok(historicalText.includes('第一轮结论'));
+  assert.ok(currentText.includes('第二轮结论'));
+});
+
+test('the publish modal opens only when the preview flag is set alongside a preview', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const t = translator(parts);
+  const review = makeReview({ round: 1 });
+  // The model the container builds (overview page on the embedded layer).
+  const model = {
+    t,
+    onClose: null,
+    inputActions: null,
+    embedded: false,
+    sidebar: false,
+    rootRef: { current: null },
+    list: { prs: [{ number: 7, title: 'Fix', headSha: review.headSha }], reviews: {}, lastPollAt: 0, autoAnalyze: true },
+    listError: '',
+    listBusy: false,
+    prNumber: 7,
+    setPrNumber: () => {},
+    review,
+    reviewError: '',
+    filePath: '',
+    contextBusy: false,
+    contextError: '',
+    contextBlocked: false,
+    setContextAttempt: () => {},
+    currentExplanation: null,
+    suggestionNotice: '',
+    reviewRounds: [],
+    latestRoundNumber: 1,
+    selectedRoundNumber: 1,
+    selectRound: () => {},
+    mode: 'overview',
+    setMode: () => {},
+    phase: { phase: 'concluded', progress: null, nextAction: 'publish', version: 1 },
+    staleInfo: null,
+    sidebarPane: 'diff',
+    setSidebarPane: () => {},
+    sidebarWidth: 0,
+    filesWidth: 0,
+    setFilesWidth: () => {},
+    detailWidth: 0,
+    setDetailWidth: () => {},
+    startReview: () => {},
+    refreshPulls: () => {},
+    openFile: () => {},
+    requestAnalyzeAll: () => {},
+    analyzeAllBusy: false,
+    orderedFiles: review.files,
+    historicalView: false,
+    publishError: '',
+    feedbackError: '',
+    fileDiffError: '',
+    fileContentError: '',
+    overlayDraft: '',
+    overlayBusy: false,
+    setOverlayDraft: () => {},
+    sendOverlayMessage: () => {},
+    preview: null,
+    previewModalOpen: false,
+    previewBusy: false,
+    previewError: '',
+    previewRefreshBusy: false,
+    publishBusy: false,
+    closePreview: () => {},
+    submitPublish: () => {},
+    walkFloat: null,
+    activeHunk: 0,
+    closeWalkFloat: () => {},
+    expandHunkContext: () => {},
+    askInChat: () => {},
+    currentLogic: '',
+    currentWalkthrough: [],
+    openWalkFloat: () => {},
+    showFullFile: false,
+    fileContentBusy: false,
+    fileContent: null,
+    toggleFullFile: () => {},
+    wrap: false,
+    setWrap: () => {},
+    fileDiff: null,
+    diffScrollRef: { current: null },
+    expandedHunks: new Set(),
+    collapseHunkContext: () => {},
+    setActiveHunk: () => {},
+  };
+  const preview = { markdown: 'preview body', round: 1, version: 1, conflict: '', items: [], selectionSupported: false, selectedIds: [] };
+
+  // The conclusion page prefetches quietly: `preview` exists while the flag stays down.
+  const hidden = fake.render(fake.React.createElement(parts.WorkspaceView, {
+    model: { ...model, preview, previewModalOpen: false },
+  }));
+  assert.equal(
+    hidden.elements.some((element) => element.props?.className === 'prr-modal-backdrop'),
+    false,
+    'a quiet prefetch keeps the preview without opening the modal',
+  );
+
+  const open = fake.render(fake.React.createElement(parts.WorkspaceView, {
+    model: { ...model, preview, previewModalOpen: true },
+  }));
+  assert.ok(
+    open.elements.some((element) => element.props?.className === 'prr-modal-backdrop'),
+    'the confirmation dialog opens when the flag is set with a preview',
+  );
+  assert.ok(open.textOnly.includes('preview body'));
 });

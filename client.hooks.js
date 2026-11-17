@@ -294,11 +294,19 @@ window.__ModuleLoader__.load({
 
       /** Publish flow: fetch the host-rendered markdown first, then show the preview dialog. */
       const requestPreview = React.useCallback(async (options = {}) => {
+        const number = stateRef.current.prNumber;
+        // Early exits (no PR selected) must not open the dialog — or a quiet prefetch on the
+        // conclusion page would leave a modal flag that survives PR switches.
+        if (typeof number !== 'number') return;
         // A quiet request only refreshes the preview state (used by the conclusion page);
         // the plain publish button still opens the confirmation dialog.
         setPreviewModalOpen(options.quiet !== true);
-        const number = stateRef.current.prNumber;
-        if (typeof number !== 'number') return;
+        // Sequence the fetch like refreshPreview AND pin it to the PR it started for: a newer
+        // request/refresh wins (seq), and a PR switch invalidates the answer outright (the
+        // landing check) — otherwise PR A's markdown ends up on PR B's page and a publish
+        // from it would mix the two records.
+        const seq = previewSeqRef.current + 1;
+        previewSeqRef.current = seq;
         setPreviewBusy(true);
         setPublishError('');
         setPreviewError('');
@@ -307,11 +315,15 @@ window.__ModuleLoader__.load({
             withRepo('/pr-review-api/comment/preview'),
             buildPreviewBody(number),
           );
+          if (seq !== previewSeqRef.current) return;
+          if (number !== stateRef.current.prNumber) return;
           setPreview(applyPreviewResponse(data, stateRef.current.review, null));
         } catch (error) {
-          setPublishError(error instanceof Error ? error.message : String(error));
+          if (seq === previewSeqRef.current) {
+            setPublishError(error instanceof Error ? error.message : String(error));
+          }
         } finally {
-          setPreviewBusy(false);
+          if (seq === previewSeqRef.current) setPreviewBusy(false);
         }
       }, [applyPreviewResponse]);
 
@@ -438,7 +450,7 @@ window.__ModuleLoader__.load({
           previewRefreshBusy, setPreviewRefreshBusy, publishBusy, setPublishBusy, publishError, setPublishError,
           requestPreview, refreshPreview, closePreview, togglePreviewItem,
           selectAllPreviewItems, selectNonePreviewItems, submitPublish,
-          previewModalOpen,
+          previewModalOpen, setPreviewModalOpen,
         };
       }
 

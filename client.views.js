@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
         Btn, FileRow, VerdictPill, isAnalyzing, fill, text, suggestionText, cleanStepTitle,
         parseUnifiedDiff, hunkRange, mapWalkthroughToHunks, publishedOfRound, roundsOf,
         staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge, shortSha,
-        phaseStateText, fileLineLabel,
+        phaseStateText, conclusionBadgeText, fileLineLabel,
       } = core;
       const {
         RoundMeta, DeltaBlock, VersionSelector,
@@ -26,12 +26,15 @@ window.__ModuleLoader__.load({
       } = conclusion;
 
       /**
-       * Left column: the overview entry, the changed-file header, then the file list. The review
-       * detail area switches between the overview and a file; that entry lives here so it stays
-       * in one place instead of moving with the pane headers.
+       * Left column: the overview entry, the changed-file header, the file list, and — pinned
+       * to the bottom regardless of list length — the conclusion entry. The rail order is the
+       * review's reading order: overview, files, conclusion; badges carry the live state.
        */
       function FilesPane(props) {
-        const { t, overviewMode, onSelectOverview, files, filePath, review, onOpenFile } = props;
+        const {
+          t, overviewMode, conclusionMode, onSelectOverview, onSelectConclusion,
+          files, filePath, review, onOpenFile, phase,
+        } = props;
         const width = typeof props.width === 'number' && props.width > 0 ? props.width : 0;
         const style = width === 0 ? undefined : { flex: `0 0 ${width}px`, minWidth: `${width}px` };
         // A batch always reports a positive total; anything else is not usable progress and
@@ -56,6 +59,7 @@ window.__ModuleLoader__.load({
             },
             h('span', { className: 'prr-navrow-mark' }),
             t('overview'),
+            h('span', { className: 'prr-navrow-badge' }, phaseStateText(phase, t)),
           ),
           h(
             'div',
@@ -85,6 +89,22 @@ window.__ModuleLoader__.load({
                     onOpen: onOpenFile,
                   }),
                 ),
+          ),
+          h(
+            'div',
+            { className: 'prr-files-tail' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'prr-navrow',
+                'data-active': conclusionMode === true ? 'true' : 'false',
+                onClick: () => onSelectConclusion(),
+              },
+              h('span', { className: 'prr-navrow-mark' }),
+              t('conclusionNav'),
+              h('span', { className: 'prr-navrow-badge' }, conclusionBadgeText(phase, t)),
+            ),
           ),
         );
       }
@@ -852,7 +872,11 @@ window.__ModuleLoader__.load({
         const selectedIds = props.preview !== null && props.preview !== undefined && Array.isArray(props.preview.selectedIds)
           ? props.preview.selectedIds
           : null;
-        const includeControl = props.preview !== null && props.preview !== undefined && props.preview.selectionSupported === true
+        // An older version's publish is disabled: leaving its checkboxes live would let a
+        // toggle write an id the next preview (always the newest version) never asked for.
+        const includeControl = props.preview !== null && props.preview !== undefined
+          && props.preview.selectionSupported === true
+          && isOlderVersion !== true
           ? {
               isSelected: (id) => (selectedIds === null ? true : selectedIds.includes(id)),
               onToggle: props.onToggleInclude,

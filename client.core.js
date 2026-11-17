@@ -287,6 +287,18 @@ window.__ModuleLoader__.load({
       return { phase: 'concluded', progress: null, nextAction: 'publish', version };
     }
 
+    /**
+     * The auto-switch decision: land on the conclusion page when the conclude job just
+     * finished (concluding → a terminal phase), but only from the overview of the current
+     * round — a reviewer reading a file is not interrupted; the badges carry the state.
+     */
+    function shouldAutoSwitchPhase(previousPhase, phase, mode, selectedIsCurrent) {
+      if (previousPhase !== 'concluding') return false;
+      if (phase !== 'concluded' && phase !== 'concluded-stale'
+        && phase !== 'published' && phase !== 'published-stale') return false;
+      return mode === 'overview' && selectedIsCurrent === true;
+    }
+
     /** The process-side state line: one text for the status bar and the overview badge. */
     function phaseStateText(phase, t) {
       if (phase === null || phase === undefined) return '';
@@ -1183,7 +1195,7 @@ window.__ModuleLoader__.load({
         severityLabel, fileSeverityOf, STATUS_KEY, cleanStepTitle,
         parseUnifiedDiff, mapWalkthroughToHunks, hunkRange, CSS,
         findingKey, FEEDBACK_LABEL_KEYS, VerdictPill, Btn, RefreshIcon, FileRow, isAnalyzing,
-        derivePhase, phaseStateText, conclusionBadgeText,
+        derivePhase, shouldAutoSwitchPhase, phaseStateText, conclusionBadgeText,
     };
   },
 });
