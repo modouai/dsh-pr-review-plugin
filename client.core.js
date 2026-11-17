@@ -884,6 +884,9 @@ window.__ModuleLoader__.load({
 .prr-roundscroll:hover:not([disabled]){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .prr-roundscroll:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px}
 .prr-roundscroll-icon{display:block;width:12px;height:12px}
+.prr-roundpills[data-overflow="true"][data-at-start="false"] .prr-roundpills-scroll{-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 16px,#000 100%);mask-image:linear-gradient(90deg,transparent 0,#000 16px,#000 100%)}
+.prr-roundpills[data-overflow="true"][data-at-end="false"] .prr-roundpills-scroll{-webkit-mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 16px),transparent 100%);mask-image:linear-gradient(90deg,#000 0,#000 calc(100% - 16px),transparent 100%)}
+.prr-roundpills[data-overflow="true"][data-at-start="false"][data-at-end="false"] .prr-roundpills-scroll{-webkit-mask-image:linear-gradient(90deg,transparent 0,#000 16px,#000 calc(100% - 16px),transparent 100%);mask-image:linear-gradient(90deg,transparent 0,#000 16px,#000 calc(100% - 16px),transparent 100%)}
 .prr-roundpill{flex:0 0 auto;gap:5px;border:1px solid transparent;font-family:inherit;cursor:pointer;transition:background-color 140ms ease,color 140ms ease,border-color 140ms ease,box-shadow 140ms ease}
 .prr-roundpill:hover:not([data-active="true"]){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary);border-color:var(--dsw-alias-border-l1)}
 .prr-roundpill[data-active="true"]{font-weight:700;box-shadow:0 1px 2px rgba(0,0,0,.10)}
@@ -962,6 +965,7 @@ window.__ModuleLoader__.load({
 .prr-subseg-btn{height:22px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font:12px/1 inherit;cursor:pointer;white-space:nowrap}
 .prr-subseg-btn[data-active="true"]{background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-weight:600}
 .prr-sidebar .prr-top{flex-wrap:wrap;row-gap:6px}
+.prr-sidebar .prr-roundpills{flex-basis:100%}
 .prr-sidebar .prr-overview-scroll{padding:12px 14px 18px}
 .prr-sidebar .prr-detail-head{padding:6px 8px;gap:6px}
 .prr-sidebar .prr-detail-body{padding:10px 12px 16px}

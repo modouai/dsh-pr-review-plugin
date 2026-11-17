@@ -1100,6 +1100,23 @@ test('round strip exposes scroll arrows gated by measured overflow', () => {
   );
 });
 
+test('the round strip fades clipped pills and keeps a stable row in the sidebar', () => {
+  const { parts } = loadClient();
+  // Sidebar: the strip always owns a full row, so the top bar does not jump between one
+  // and two lines as rounds accumulate.
+  assert.match(cssRule(parts.CSS, '.prr-sidebar .prr-roundpills'), /flex-basis:100%/);
+  // A pill clipped by the strip's edge fades out instead of stopping mid-glyph; each side
+  // fades only while it can still scroll.
+  assert.match(
+    parts.CSS,
+    /\[data-overflow="true"\]\[data-at-start="false"\] \.prr-roundpills-scroll\{[^}]*mask-image:linear-gradient\(90deg,transparent 0,#000 16px/,
+  );
+  assert.match(
+    parts.CSS,
+    /\[data-overflow="true"\]\[data-at-end="false"\] \.prr-roundpills-scroll\{[^}]*mask-image:linear-gradient\(90deg,#000 0,#000 calc\(100% - 16px\)/,
+  );
+});
+
 test('the active round pill is kept inside the visible strip', () => {
   const { parts } = loadClient();
   const scrolled = [];
