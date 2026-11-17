@@ -3013,3 +3013,11 @@ test('phase and conclusion badge text follow the phase', () => {
 });
 
 
+
+test('navigation redesign css ships the new selectors', () => {
+  const { parts } = loadClient();
+  assert.ok(parts.CSS.includes('.prr-files-tail'));
+  assert.ok(parts.CSS.includes('.prr-phasebar'));
+  assert.ok(parts.CSS.includes('.prr-finding-head'));
+  assert.ok(cssRule(parts.CSS, '.prr-completeness').includes('padding'));
+});
