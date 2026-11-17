@@ -80,6 +80,7 @@ const EXPOSED = [
   'scrollToNewLine',
   'derivePhase',
   'shouldAutoSwitchPhase',
+  'overviewFooterVisible',
   'phaseStateText',
   'conclusionBadgeText',
   'PhaseBar',
@@ -460,6 +461,7 @@ function overviewProps(parts, review, extra = {}) {
   return {
     review,
     t: translator(parts),
+    phase: extra.phase ?? { phase: 'ready', progress: null, nextAction: 'conclude', version: 0 },
     selectedRoundNumber: extra.selectedRoundNumber ?? null,
     onSelectRound: extra.onSelectRound ?? (() => {}),
     versionPick: extra.versionPick ?? {},
@@ -2854,6 +2856,24 @@ test('shouldAutoSwitchPhase only lands on the conclusion after the conclude job 
   assert.equal(decides('concluding', 'concluded', 'overview', false), false);
 });
 
+test('overviewFooterVisible mounts the dock only in the actionable phases', () => {
+  const { parts } = loadClient();
+  const visible = parts.overviewFooterVisible;
+  // Ready (the first conclusion is the next step) and concluding (progress + cancel) act.
+  assert.equal(visible({ phase: 'ready', progress: null, nextAction: 'conclude', version: 0 }), true);
+  assert.equal(visible({ phase: 'concluding', progress: null, nextAction: null, version: 0 }), true);
+  // Once a conclusion exists its actions belong to the conclusion page — dock clears.
+  for (const settled of ['concluded', 'concluded-stale', 'published', 'published-stale']) {
+    assert.equal(visible({ phase: settled, progress: null, nextAction: null, version: 1 }), false, settled);
+  }
+  // The remaining pipeline states carry their own surfaces; no footer here either.
+  for (const running of ['analyzing', 'reviewing', 'error']) {
+    assert.equal(visible({ phase: running, progress: null, nextAction: null, version: 0 }), false, running);
+  }
+  assert.equal(visible(null), false);
+  assert.equal(visible(undefined), false);
+});
+
 
 
 test('navigation redesign css ships the new selectors', () => {
@@ -3084,6 +3104,40 @@ test('ConclusionPage renders the pending card and the published conclusion', () 
     onCheckFeedback: () => {},
   }));
   assert.ok(done.textOnly.includes('最终结论摘要'));
+
+  // The cross-round record (delta) belongs to the overview only: a concluded round 2 with a
+  // non-null delta renders the conclusion without any 复审对比 block.
+  const delta = { previousRound: 1, round: 2, resolved: [], stillOpen: [{ file: 'a.js', point: 'x' }] };
+  const withDelta = fake.render(fake.React.createElement(parts.ConclusionPage, {
+    review: makeReview({
+      round: 2,
+      roundHistory: [makeRound(1), makeRound(2, { conclusions: [makeVersion(1, '第二轮最终结论')], delta })],
+      conclusion: makeVersion(1, '第二轮最终结论').conclusion,
+      conclusionAt: 2000,
+    }),
+    t,
+    selectedRoundNumber: null,
+    versionPick: {},
+    onPickVersion: () => {},
+    onOpenFile: () => {},
+    explainedCount: 1,
+    totalFiles: 1,
+    concludeBusy: false,
+    reviewBusy: false,
+    onConclude: () => {},
+    concluding: null,
+    cancelBusy: false,
+    onCancelConclude: () => {},
+    preview: null,
+    onToggleInclude: () => {},
+    publishBusy: false,
+    previewBusy: false,
+    previewRefreshBusy: false,
+    feedbackBusy: false,
+    onCheckFeedback: () => {},
+  }));
+  assert.ok(withDelta.textOnly.includes('第二轮最终结论'));
+  assert.ok(!withDelta.textOnly.includes('复审对比'));
 });
 
 test('ConclusionBlock renders publish checkboxes when includeControl is set', () => {
@@ -3158,7 +3212,11 @@ test('ConclusionPage keeps its hook order across pending/historical/current tran
     round: 2,
     conclusion: current.conclusion,
     conclusionAt: current.createdAt,
-    roundHistory: [makeRound(1, { conclusions: [older] }), makeRound(2, { conclusions: [current] })],
+    roundHistory: [
+      makeRound(1, { conclusions: [older] }),
+      // The delta is the overview's cross-round record: the conclusion page renders none of it.
+      makeRound(2, { conclusions: [current], delta: { previousRound: 1, round: 2, resolved: [], stillOpen: [{ file: 'a.js', point: '仍未解决点' }] } }),
+    ],
   });
   const result = fake.rerender(parts.ConclusionPage, [
     // Pending: the current round has no conclusion yet.
@@ -3174,6 +3232,9 @@ test('ConclusionPage keeps its hook order across pending/historical/current tran
   assert.ok(pendingText.includes('结论待生成'));
   assert.ok(historicalText.includes('第一轮结论'));
   assert.ok(currentText.includes('第二轮结论'));
+  // A round with delta data must not leak the cross-round record onto the conclusion page.
+  assert.ok(!historicalText.includes('复审对比'));
+  assert.ok(!currentText.includes('复审对比'));
 });
 
 test('the publish modal opens only when the preview flag is set alongside a preview', () => {

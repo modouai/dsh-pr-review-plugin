@@ -7,10 +7,10 @@ window.__ModuleLoader__.load({
     const React = require('react');
     const h = React.createElement;
 
-    /** Reusable chrome: top bar, round strip and version controls, risk/order lists. */
+    /** Reusable chrome: top bar, round strip and version controls. */
     return function createComponents({ core }) {
       const {
-        Btn, RefreshIcon, VerdictPill, text, fill, formatStamp, shortSha, roundPillOf,
+        Btn, RefreshIcon, text, fill, formatStamp, shortSha, roundPillOf,
         roundStripStateOf, scrollRoundStrip, revealActiveRound,
       } = core;
 
@@ -339,43 +339,8 @@ window.__ModuleLoader__.load({
         );
       }
 
-      function RiskList(props) {
-        const list = props.risks ?? [];
-        // The caller owns the empty-state wording: it knows whether nothing was raised or
-        // every candidate was filtered, and the list does not.
-        if (list.length === 0) return h('div', { className: 'prr-subtle' }, props.emptyLabel ?? '');
-        return h(
-          'div',
-          null,
-          list.map((risk, index) =>
-            h(
-              'div',
-              { className: 'prr-rowitem', key: index },
-              h(VerdictPill, { verdict: risk.severity, t: props.t }),
-              h(
-                'div',
-                { className: 'prr-rowmain' },
-                risk.file === ''
-                  ? null
-                  : h(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'prr-linklike prr-filetag',
-                        onClick: () => props.onOpenFile(risk.file),
-                        title: risk.file,
-                      },
-                      risk.file,
-                    ),
-                h('div', { className: 'prr-text' }, risk.point),
-              ),
-            ),
-          ),
-        );
-      }
-
       return {
-        DetailHeader, TopBar, RoundPills, VersionSelector, RoundMeta, DeltaBlock, RiskList,
+        DetailHeader, TopBar, RoundPills, VersionSelector, RoundMeta, DeltaBlock,
       };
     };
   },

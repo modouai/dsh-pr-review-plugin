@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
         Btn, FileRow, VerdictPill, isAnalyzing, fill, text, suggestionText, cleanStepTitle,
         parseUnifiedDiff, hunkRange, mapWalkthroughToHunks, publishedOfRound, roundsOf,
         staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge, shortSha,
-        phaseStateText, conclusionBadgeText, fileLineLabel,
+        phaseStateText, conclusionBadgeText, fileLineLabel, overviewFooterVisible,
       } = core;
       const {
         RoundMeta, DeltaBlock, VersionSelector,
@@ -621,7 +621,7 @@ window.__ModuleLoader__.load({
        * internals and never render; the only decision surface is the conclusion page.
        */
       function OverviewPage(props) {
-        const { review, t } = props;
+        const { review, t, phase } = props;
         const report = review.report;
         const rounds = React.useMemo(() => roundsOf(review), [review]);
         const latestRound = rounds.length === 0 ? null : rounds[rounds.length - 1];
@@ -637,20 +637,25 @@ window.__ModuleLoader__.load({
 
         // The whole-review footer (conclusion/publish actions plus notices) is rendered above
         // the composer by whichever surface owns it; both surfaces read it from `actionsBridge`.
-        // Hooks run unconditionally and BEFORE any early return: `overviewFooter` answers
-        // `{ actions: null, notice: null }` for pending and historical rounds, so the dock
-        // clears there instead of going stale — and the hook count never varies by path.
-        const footer = overviewFooter(props, {
-          report,
-          pull: review.pull ?? {},
-          selectedVersion: null,
-          staleInfo: null,
-          isCurrent,
-          isOlderVersion: false,
-          hasVersion: false,
-          selectedPublished: false,
-          page: 'overview',
-        });
+        // Hooks run unconditionally and BEFORE any early return: the dock clears wherever this
+        // page has nothing to act on (`overviewFooter` answers `{ actions: null, notice: null }`
+        // for pending and historical rounds) — and the hook count never varies by path.
+        // The footer mounts only in the actionable phases (ready / concluding): once a
+        // conclusion exists its actions belong to the conclusion page, so the dock clears
+        // here instead of re-offering a job this page cannot supervise.
+        const footer = overviewFooterVisible(phase)
+          ? overviewFooter(props, {
+              report,
+              pull: review.pull ?? {},
+              selectedVersion: null,
+              staleInfo: null,
+              isCurrent,
+              isOlderVersion: false,
+              hasVersion: false,
+              selectedPublished: false,
+              page: 'overview',
+            })
+          : { actions: null, notice: null };
         React.useEffect(() => {
           actionsBridge.set(footer.actions);
           actionsBridge.setNotice(footer.notice);
@@ -832,7 +837,6 @@ window.__ModuleLoader__.load({
                   headerExtra: versionHeader,
                   metaLine: selectedVersion === null ? null : conclusionMetaLine(review, roundNumber, selectedVersion, publishedEntries, isCurrent, t),
                 }),
-            roundNumber >= 2 ? h(DeltaBlock, { delta: selectedRound?.delta ?? null, t }) : null,
             h(PublishedBlock, { entries: publishedEntries, t }),
             h('div', { className: 'prr-subtle', style: { marginTop: '10px' } }, t('historyReadOnly')),
           );
@@ -902,9 +906,6 @@ window.__ModuleLoader__.load({
             refreshing: props.previewRefreshBusy,
             t,
           }),
-          roundNumber >= 2
-            ? h(DeltaBlock, { delta: review.delta ?? selectedRound?.delta ?? null, t })
-            : null,
           h(PublishedBlock, { entries: publishedEntries, t }),
           review.concludeError === null || review.concludeError === undefined || review.concludeError === ''
             ? null

@@ -898,8 +898,8 @@ window.__ModuleLoader__.load({
         const {
           t, list, review, prNumber, sidebar,
           selectedRoundNumber, selectRound, versionPick, pickConclusionVersion,
-          concludeBusy, concluding, concludeCancelBusy, reviewBusy, runConclude,
-          openFile, explainedCount, fileFindings,
+          concludeBusy, concluding, concludeCancelBusy, cancelConclude, reviewBusy, runConclude,
+          openFile, explainedCount, fileFindings, phase,
           feedbackBusy, checkFeedback,
         } = model;
         return h(
@@ -916,6 +916,7 @@ window.__ModuleLoader__.load({
               h(OverviewPage, {
                 review: review ?? { report: null, number: prNumber ?? 0, pull: null, status: 'idle', conclusion: null },
                 t,
+                phase,
                 selectedRoundNumber,
                 onOpenFile: (path, line) => void openFile(path, line),
                 explainedCount,
@@ -926,6 +927,9 @@ window.__ModuleLoader__.load({
                 concludeBusy,
                 reviewBusy,
                 onConclude: () => void runConclude(),
+                concluding,
+                cancelBusy: concludeCancelBusy,
+                onCancelConclude: () => void cancelConclude(),
               }),
               sidebar ? null : h('div', { className: 'prr-overview-chat' }, chat),
             ),
