@@ -424,9 +424,10 @@ window.__ModuleLoader__.load({
        * rounds and for a round without a report — nothing to act on or qualify there.
        */
       function overviewFooter(props, derived) {
-        const { report, pull, selectedVersion, staleInfo, isCurrent, isOlderVersion } = derived;
+        const { report, pull, selectedVersion, staleInfo, isCurrent, isOlderVersion, page } = derived;
         const t = props.t;
         const review = props.review;
+        const onConclusion = page !== 'overview';
         if (report === null || report === undefined || isCurrent !== true) {
           return { actions: null, notice: null };
         }
@@ -479,7 +480,7 @@ window.__ModuleLoader__.load({
                 disabled: props.concludeBusy === true || props.reviewBusy === true,
                 onClick: props.onConclude,
               }),
-          selectedVersion === null
+          onConclusion === false || selectedVersion === null
             ? null
             : h(Btn, {
                 label: publishLabel,
@@ -509,16 +510,19 @@ window.__ModuleLoader__.load({
         const coverageMissing = (props.explainedCount ?? 0) < (props.totalFiles ?? 0);
         // One collapsible panel in the dock: the coverage line merges into the stale warning when
         // both apply, and the whole thing folds to a single summary row. The action button does not
-        // repeat the count.
-        const notice = staleInfo !== null
-          ? {
-              tone: 'warn',
-              summary: fill(t('staleSummary'), { count: staleInfo.count }),
-              detail: staleDetailOf(staleInfo, coverageMissing === true, props.autoReconclude === true, t),
-            }
-          : (coverageMissing === true
-              ? { tone: 'note', summary: t('coverageIncomplete'), detail: null }
-              : null);
+        // repeat the count. The overview page carries state in its status bar instead, so notices
+        // render only on the conclusion page.
+        const notice = onConclusion === false
+          ? null
+          : (staleInfo !== null
+              ? {
+                  tone: 'warn',
+                  summary: fill(t('staleSummary'), { count: staleInfo.count }),
+                  detail: staleDetailOf(staleInfo, coverageMissing === true, props.autoReconclude === true, t),
+                }
+              : (coverageMissing === true
+                  ? { tone: 'note', summary: t('coverageIncomplete'), detail: null }
+                  : null));
         return { actions, notice };
       }
 

@@ -3083,3 +3083,45 @@ test('cleanCountOf counts finished analyses without issues', () => {
   };
   assert.deepEqual(plain(parts.cleanCountOf(review)), { done: 2, clean: 1 });
 });
+
+test('overviewFooter gates publish and notices by page', () => {
+  const { parts } = loadClient();
+  const t = translator(parts);
+  const baseProps = {
+    t,
+    review: { publishing: false },
+    concludeBusy: false, reviewBusy: false, publishBusy: false, previewBusy: false,
+    cancelBusy: false, concluding: null,
+    onCancelConclude: () => {}, onConclude: () => {}, onPublish: () => {},
+    comment: null, autoReconclude: false,
+    explainedCount: 0, totalFiles: 1,
+  };
+  const derived = (page) => ({
+    report: makeReport(),
+    pull: { url: 'https://example.test/pr/7' },
+    selectedVersion: makeVersion(1, 's'),
+    staleInfo: null,
+    isCurrent: true,
+    isOlderVersion: false,
+    hasVersion: true,
+    selectedPublished: false,
+    page,
+  });
+
+  const overview = parts.overviewFooter(baseProps, derived('overview'));
+  const overviewLabels = [];
+  for (const element of overview.actions.props.children) {
+    if (element !== null && element.props?.label !== undefined) overviewLabels.push(element.props.label);
+  }
+  assert.ok(overviewLabels.includes(t('reconclude')));
+  assert.ok(!overviewLabels.includes(t('publishComment')));
+  assert.equal(overview.notice, null);
+
+  const conclusion = parts.overviewFooter(baseProps, derived('conclusion'));
+  const conclusionLabels = [];
+  for (const element of conclusion.actions.props.children) {
+    if (element !== null && element.props?.label !== undefined) conclusionLabels.push(element.props.label);
+  }
+  assert.ok(conclusionLabels.includes(t('publishComment')));
+  assert.notEqual(conclusion.notice, null);
+});
