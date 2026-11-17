@@ -1100,11 +1100,12 @@ test('round strip exposes scroll arrows gated by measured overflow', () => {
   );
 });
 
-test('the round strip fades clipped pills and keeps a stable row in the sidebar', () => {
+test('the round strip stays on the picker row and fades clipped pills', () => {
   const { parts } = loadClient();
-  // Sidebar: the strip always owns a full row, so the top bar does not jump between one
-  // and two lines as rounds accumulate.
-  assert.match(cssRule(parts.CSS, '.prr-sidebar .prr-roundpills'), /flex-basis:100%/);
+  // One row at any panel width: the sidebar top bar never wraps, and the strip
+  // yields space by scrolling instead of claiming a second line.
+  assert.doesNotMatch(parts.CSS, /\.prr-sidebar \.prr-top\{flex-wrap/);
+  assert.match(cssRule(parts.CSS, '.prr-sidebar .prr-roundpills'), /min-width:0/);
   // A pill clipped by the strip's edge fades out instead of stopping mid-glyph; each side
   // fades only while it can still scroll.
   assert.match(

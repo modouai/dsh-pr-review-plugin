@@ -964,8 +964,7 @@ window.__ModuleLoader__.load({
 .prr-subseg{flex:0 0 auto;display:flex;gap:2px;padding:2px;border-radius:8px;background:var(--dsw-alias-bg-layer-2)}
 .prr-subseg-btn{height:22px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary);font:12px/1 inherit;cursor:pointer;white-space:nowrap}
 .prr-subseg-btn[data-active="true"]{background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-weight:600}
-.prr-sidebar .prr-top{flex-wrap:wrap;row-gap:6px}
-.prr-sidebar .prr-roundpills{flex-basis:100%}
+.prr-sidebar .prr-roundpills{min-width:0}
 .prr-sidebar .prr-overview-scroll{padding:12px 14px 18px}
 .prr-sidebar .prr-detail-head{padding:6px 8px;gap:6px}
 .prr-sidebar .prr-detail-body{padding:10px 12px 16px}
