@@ -108,11 +108,12 @@ footer：仅 ready 阶段挂 [生成结论]（避免跳页）；发布按钮不�
 当前轮内容顺序：
 
 1. 结论卡：复用 ConclusionBlock 主体（verdict pill + summary + metaLine + 版本选择 headerExtra）。
-2. 必改 blockers / 建议 suggestions / 下一步 nextSteps（现有渲染与反馈状态 pill 不动——pill 是条目的最小元数据，发布时审查员需要据此避免重复报告已认可/已修复的条目；回复原文与跨轮对照在总览页）。
-3. 已发布记录 PublishedBlock 紧凑化：每条一行 `v{version} · {时间} · 查看评论`（有 url 时为链接）+ 未发布 tag；**不再渲染条目全文**。
-4. footer（沿用 actionsBridge / `overviewFooter`）：[生成结论 / 重新生成] + [发布 / 追加评论] + stale / coverage 提示，仅本页挂载。
+2. 必改 blockers / 建议 suggestions / 下一步 nextSteps（现有渲染与反馈状态 pill 不动——pill 是条目的最小元数据，发布时审查员需要据此避免重复报告已认可/已修复的条目；回复原文与跨轮对照在总览页）。**每条 blocker / suggestion 带「纳入发布」开关**（复用现有 selection 通道 `selectionIncludeIds` / `buildPublishBody`）：发布装配在读结论的同时完成，不推迟到发布那一刻的弹窗。
+3. **评论预览（折叠区）**：按当前勾选实时生成的 markdown（lazy 加载，复用现有 preview 接口），标题「评论预览」。面板条目与评论条目本就 1:1（`commentItems`），这里是「发出去会是什么样」的持续可见出口，含截断与附录的收缩结果。
+4. 已发布记录 PublishedBlock 紧凑化：每条一行 `v{version} · {时间} · 查看评论`（有 url 时为链接）+ 未发布 tag；**不再渲染条目全文**。
+5. footer（沿用 actionsBridge / `overviewFooter`）：[生成结论 / 重新生成] + [发布 / 追加评论] + stale / coverage 提示，仅本页挂载。发布使用页面当前勾选；发布弹窗退化为**最终确认**——markdown 全文 + 冲突提示（已发布 / 发布中），勾选区从弹窗移除。
 
-结论页只回答**代码现状**（能不能合、要改什么）；审查对话的记录（作者回复、跨轮对照）在总览页，不在本页。
+结论页只回答**代码现状**（能不能合、要改什么）与其**执行**（装配发布、发没发）；审查对话的记录（作者回复、跨轮对照）在总览页，不在本页。
 
 未生成时（ready）：空状态卡「结论待生成」+ 覆盖率（已分析 x/y + coverageIncomplete 提示）+ [生成结论]。不展示初筛参考——verdict 只在结论生成后出现在结论页。
 汇总中（concluding）：ConcludingProgress（阶段进度 + 取消，复用 `client.conclusion.js:369`）。
@@ -136,7 +137,8 @@ footer：仅 ready 阶段挂 [生成结论]（避免跳页）；发布按钮不�
 
 - `client.core.js`：+`derivePhase`（导出）；`applyRoundSelection` 落点改 `'conclusion'`；CSS 增补（PhaseBar、sticky 尾区、FindingList 行与展开、徽标）。
 - `client.views.js`：FilesPane（结论入口 + 双徽标）；OverviewPanel 拆为 OverviewPage + ConclusionPage；+FindingList（可展开发现清单）；+完备性行；+PhaseBar；删除 650-700 行聚合区与 RiskList / UnverifiedBlock 展示。
-- `client.conclusion.js`：PublishedBlock 紧凑化；`overviewFooter` 增加 `page` 参数按页挂载动作与提示；ConclusionBlock / conclusionMetaLine / ConcludingProgress 复用。
+- `client.conclusion.js`：PublishedBlock 紧凑化；`overviewFooter` 增加 `page` 参数按页挂载动作与提示；ConclusionBlock / conclusionMetaLine / ConcludingProgress 复用；结论条目加「纳入发布」开关与评论预览折叠区。
+- `client.preview.js`：发布弹窗退化为最终确认（markdown 全文 + 冲突提示），移除勾选区；勾选迁移至结论页条目（复用 `selectionIncludeIds` / `buildPublishBody` 通道）。
 - `client.workspace.js`：mode 扩展与装配、PhaseBar 挂载、自动切换 effect；`reviewAskContext` 与输入框 scope（`client.workspace.js:113`、222 行）把 `'conclusion'` 视为 PR 级（同 overview）。
 - `client.hooks.js`：无结构性改动（派生 memo 放 workspace 层）。
 - `client.i18n.js`：新增 key（§9）。
@@ -144,7 +146,7 @@ footer：仅 ready 阶段挂 [生成结论]（避免跳页）；发布按钮不�
 
 ## 9. i18n 新增 key（中英两套）
 
-`conclusionNav`（结论）、`digestTitle`（改动概述）、`findingList`（审查发现）、`findingListEmpty`（未发现问题）、`findingOpenContext`（在明细页查看上下文）、`completenessTitle`（审查完备性）、`completenessClean`（其中 {clean} 个文件核查后未发现问题）、`conclusionPendingCard`（结论待生成）、`historyNoReport`（历史轮次不含改动概述）、`badgeReviewing`（审查中…）、`badgeAnalyzing`（分析 {done}/{total}）、`badgeAnalyzingFailed`（+{failed} 失败）、`badgeConcluding`（汇总中…）、`badgeConclusionNone`（未生成）、`badgeConclusionDraft`（v{n} 草稿）、`badgeConclusionStale`（v{n} 已过期）、`badgePublished`（v{n} 已发布）、`badgePublishedStale`（v{n} 已发布 · 有更新）、`badgeError`（审查失败）。
+`conclusionNav`（结论）、`digestTitle`（改动概述）、`findingList`（审查发现）、`findingListEmpty`（未发现问题）、`findingOpenContext`（在明细页查看上下文）、`completenessTitle`（审查完备性）、`completenessClean`（其中 {clean} 个文件核查后未发现问题）、`conclusionPendingCard`（结论待生成）、`publishInclude`（纳入发布）、`publishPreviewSection`（评论预览）、`historyNoReport`（历史轮次不含改动概述）、`badgeReviewing`（审查中…）、`badgeAnalyzing`（分析 {done}/{total}）、`badgeAnalyzingFailed`（+{failed} 失败）、`badgeConcluding`（汇总中…）、`badgeConclusionNone`（未生成）、`badgeConclusionDraft`（v{n} 草稿）、`badgeConclusionStale`（v{n} 已过期）、`badgePublished`（v{n} 已发布）、`badgePublishedStale`（v{n} 已发布 · 有更新）、`badgeError`（审查失败）。
 
 ## 10. 测试策略（`tests/client.test.js`）
 
@@ -156,6 +158,7 @@ footer：仅 ready 阶段挂 [生成结论]（避免跳页）；发布按钮不�
 - 总览页处置记录：round ≥ 2 渲染 FeedbackBlock + DeltaBlock（顺序：回复在前、对照在后）；round 1 不渲染。
 - FilesPane：结论入口存在且位于 sticky 尾区容器；徽标文案随 phase 变化。
 - ConclusionPage：ready 空状态（覆盖率 + 生成按钮，无初筛参考行）；concluding 进度；**不渲染** DeltaBlock / FeedbackBlock（条目状态 pill 除外）；历史轮只读无动作（RoundMeta + 历史结论 + Published）；PublishedBlock 紧凑渲染（不含条目全文）。
+- 发布装配：条目「纳入发布」开关更新 selection；评论预览按勾选 lazy 刷新；发布请求携带页面当前勾选；弹窗不含勾选区、保留 markdown 全文与冲突提示。
 - 自动切换：concluding → concluded 且 mode=overview 触发；mode=file 不触发；取消不触发。
 - `overviewFooter`：publish 仅结论页；conclude 在总览页（仅 ready）与结论页；stale / coverage 提示归结论页。
 - 现有测试保持通过（`pnpm stamp:check` + `node --test`）。
@@ -166,6 +169,7 @@ footer：仅 ready 阶段挂 [生成结论]（避免跳页）；发布按钮不�
 - **sticky 尾区在窄栏 / 极小高度**：CSS 设最小高度；极端时保徽标、省文字。
 - **review 快照字段演进**：`derivePhase` 只读现有字段并对缺失回退，纯函数用单测锁定。
 - **回归面**：`review_update_overview` 等对话工具更新后的刷新依赖现有 state 流；本设计只移动渲染位置，不改数据契约。
+- **评论预览刷新时机**：勾选变化防抖；concluding / publishing / preview 刷新中禁用重取，避免过期 markdown 被当作最新装配。
 - **行号锚点**：FindingList 依赖 `issue.line > 0`；为 0 时只显示文件路径（与现状一致）。
 
 ## 12. 与后续工作的衔接
