@@ -17,6 +17,7 @@ window.__ModuleLoader__.load({
       const {
         api, postJson, reviewAskContext, scrollToNewLine, formatClock, cleanStepTitle,
         severityLabel, text, CSS, Btn, panelSizing, clampColumnWidth, actionsBridge,
+        shouldShowReviewButton,
       } = core;
       const {
         DetailHeader, TopBar,
@@ -537,6 +538,8 @@ window.__ModuleLoader__.load({
           : review === null || prNumber === null
             ? t('reviewFirstHint')
             : t('reviewNextHint');
+        // With automatic rounds on, the action only appears when they cannot cover the head.
+        const showReview = shouldShowReviewButton(list, review, selectedPull);
 
         const banners = [
           list?.tokenMissing === true ? h('div', { className: 'prr-banner', key: 'token' }, t('tokenMissing')) : null,
@@ -578,6 +581,7 @@ window.__ModuleLoader__.load({
           listBusy,
           lastPoll,
           onRefresh: () => void refreshPulls(),
+          showReview,
           reviewLabel: reviewButtonLabel,
           reviewHint: reviewButtonHint,
           reviewDisabled: contextBlocked || reviewing || prNumber === null,

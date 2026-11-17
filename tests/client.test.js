@@ -46,6 +46,10 @@ const EXPOSED = [
   'versionsOf',
   'staleInfoOf',
   'RoundPills',
+  'roundStripStateOf',
+  'scrollRoundStrip',
+  'revealActiveRound',
+  'shouldShowReviewButton',
   'TopBar',
   'applyRoundSelection',
   'sidebarReviewAddress',
@@ -1052,6 +1056,147 @@ test('round pills label rounds without a conclusion and keep the latest status t
   assert.match(html, /data-tone="reviewing" data-active="false"[^>]*>第 2 轮/);
 });
 
+test('round strip exposes scroll arrows gated by measured overflow', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const rounds = [1, 2, 3].map((round) => makeRound(round, { conclusions: [] }));
+  const { html, elements } = fake.render(fake.React.createElement(parts.RoundPills, {
+    rounds,
+    selectedRoundNumber: 3,
+    latestRoundNumber: 3,
+    latestText: '第 3 轮 · 审查中…',
+    latestTone: 'reviewing',
+    onSelect: () => {},
+    t,
+  }));
+
+  assert.equal(parts.DICT.zh.roundScrollPrev, '向左滚动轮次');
+  assert.equal(parts.DICT.zh.roundScrollNext, '向右滚动轮次');
+  assert.equal(parts.DICT.en.roundScrollPrev, 'Scroll rounds left');
+  assert.equal(parts.DICT.en.roundScrollNext, 'Scroll rounds right');
+
+  const prev = elements.find(
+    (node) => node.type === 'button' && node.props['aria-label'] === '向左滚动轮次',
+  );
+  const next = elements.find(
+    (node) => node.type === 'button' && node.props['aria-label'] === '向右滚动轮次',
+  );
+  assert.ok(prev, 'left arrow missing');
+  assert.ok(next, 'right arrow missing');
+  assert.equal(prev.props['data-side'], 'prev');
+  assert.equal(next.props['data-side'], 'next');
+  // Before the first measurement neither side claims overflow, so both arrows stay hidden.
+  assert.match(
+    html,
+    /className="prr-roundpills" data-overflow="false" data-at-start="true" data-at-end="true"/,
+  );
+  assert.equal(prev.props.disabled, true);
+  assert.equal(next.props.disabled, true);
+  // The tablist wraps the pills, not the arrows.
+  assert.match(html, /className="prr-roundpills-scroll" role="tablist"/);
+  assert.match(
+    parts.CSS,
+    /\.prr-roundpills\[data-overflow="true"\] \.prr-roundscroll\{display:inline-flex\}/,
+  );
+});
+
+test('the round strip stays on the picker row and fades clipped pills', () => {
+  const { parts } = loadClient();
+  // One row at any panel width: the sidebar top bar never wraps, and the strip
+  // yields space by scrolling instead of claiming a second line.
+  assert.doesNotMatch(parts.CSS, /\.prr-sidebar \.prr-top\{flex-wrap/);
+  assert.match(cssRule(parts.CSS, '.prr-sidebar .prr-roundpills'), /min-width:0/);
+  // A pill clipped by the strip's edge fades out instead of stopping mid-glyph; each side
+  // fades only while it can still scroll.
+  assert.match(
+    parts.CSS,
+    /\[data-overflow="true"\]\[data-at-start="false"\] \.prr-roundpills-scroll\{[^}]*mask-image:linear-gradient\(90deg,transparent 0,#000 16px/,
+  );
+  assert.match(
+    parts.CSS,
+    /\[data-overflow="true"\]\[data-at-end="false"\] \.prr-roundpills-scroll\{[^}]*mask-image:linear-gradient\(90deg,#000 0,#000 calc\(100% - 16px\)/,
+  );
+});
+
+test('the active round pill is kept inside the visible strip', () => {
+  const { parts } = loadClient();
+  const scrolled = [];
+  const active = { scrollIntoView: (options) => scrolled.push(options) };
+  const scroller = {
+    querySelector: (selector) => (selector === '[data-active="true"]' ? active : null),
+  };
+
+  assert.equal(parts.revealActiveRound(scroller), true);
+  assert.deepEqual(plain(scrolled), [{ block: 'nearest', inline: 'nearest' }]);
+  assert.equal(parts.revealActiveRound(null), false);
+  assert.equal(parts.revealActiveRound({ querySelector: () => null }), false);
+});
+
+test('round strip state tracks overflow and both ends', () => {
+  const { parts } = loadClient();
+  const scroller = (scrollWidth, clientWidth, scrollLeft) => ({ scrollWidth, clientWidth, scrollLeft });
+
+  assert.deepEqual(plain(parts.roundStripStateOf(null)), {
+    overflow: false, atStart: true, atEnd: true,
+  });
+  assert.deepEqual(plain(parts.roundStripStateOf(scroller(300, 300, 0))), {
+    overflow: false, atStart: true, atEnd: true,
+  });
+  assert.deepEqual(plain(parts.roundStripStateOf(scroller(800, 300, 0))), {
+    overflow: true, atStart: true, atEnd: false,
+  });
+  assert.deepEqual(plain(parts.roundStripStateOf(scroller(800, 300, 250))), {
+    overflow: true, atStart: false, atEnd: false,
+  });
+  assert.deepEqual(plain(parts.roundStripStateOf(scroller(800, 300, 500))), {
+    overflow: true, atStart: false, atEnd: true,
+  });
+  // Sub-pixel offsets from smooth scrolling still count as the boundary.
+  assert.deepEqual(plain(parts.roundStripStateOf(scroller(800, 300, 0.5))), {
+    overflow: true, atStart: true, atEnd: false,
+  });
+});
+
+test('round strip scrolls most of a page toward the requested side', () => {
+  const { parts } = loadClient();
+  const calls = [];
+  const scroller = { clientWidth: 300, scrollBy: (options) => calls.push(options) };
+
+  assert.equal(parts.scrollRoundStrip(scroller, 1), true);
+  assert.equal(parts.scrollRoundStrip(scroller, -1), true);
+  assert.deepEqual(plain(calls), [
+    { left: 240, behavior: 'smooth' },
+    { left: -240, behavior: 'smooth' },
+  ]);
+  assert.equal(parts.scrollRoundStrip(null, 1), false);
+});
+
+test('review button only shows when automatic rounds cannot cover the head', () => {
+  const { parts } = loadClient();
+  const list = (autoReview) => ({ autoReview });
+  const pull = (headSha) => ({ headSha });
+  const round = (headSha, status = 'done') => ({ status, headSha });
+
+  assert.equal(parts.shouldShowReviewButton(list(false), round('abc'), pull('abc')), true,
+    'manual mode keeps the only entry');
+  assert.equal(parts.shouldShowReviewButton(null, null, null), true,
+    'unknown settings must not hide the only entry');
+  assert.equal(parts.shouldShowReviewButton(list(true), null, pull('abc')), true,
+    'no round yet');
+  assert.equal(parts.shouldShowReviewButton(list(true), round('abc'), pull('abc')), false,
+    'current round already covers the head');
+  assert.equal(parts.shouldShowReviewButton(list(true), round('abc', 'error'), pull('abc')), true,
+    'failed round can be retried immediately');
+  assert.equal(parts.shouldShowReviewButton(list(true), round('abc', 'stale'), pull('abc')), true,
+    'interrupted round can be retried immediately');
+  assert.equal(parts.shouldShowReviewButton(list(true), round('abc'), pull('def')), true,
+    'new commits are waiting for a round');
+  assert.equal(parts.shouldShowReviewButton(list(true), round('abc'), null), true,
+    'an unverifiable head keeps the manual entry');
+  assert.equal(parts.shouldShowReviewButton(list(true), round('abc', 'reviewing'), pull('def')), false,
+    'a running round is not a manual entry');
+});
+
 test('top bar drops the repository meta line and keeps pills + refresh tooltip', () => {
   const client = loadClient();
   const { parts, fake } = client;
@@ -1088,25 +1233,29 @@ test('top bar drops the repository meta line and keeps pills + refresh tooltip',
     onClose: () => {},
   }));
 
-  // Pills sit between the PR picker and the action buttons (spacer keeps them from squeezing).
+  // Refresh is an icon right after the picker; the pills follow it and the review action stays last.
   const selectIndex = html.indexOf('prr-select');
+  const refreshIndex = html.indexOf('prr-btn-icon');
   const pillsIndex = html.indexOf('prr-roundpills');
-  const refreshIndex = html.indexOf('prr-btn');
+  const reviewIndex = html.indexOf('开始第 4 轮审查');
   assert.ok(selectIndex >= 0, 'PR picker missing');
-  assert.ok(pillsIndex > selectIndex, 'round pills must follow the PR picker');
-  assert.ok(refreshIndex > pillsIndex, 'action buttons must come after the round pills');
+  assert.ok(refreshIndex > selectIndex, 'refresh icon must follow the PR picker');
+  assert.ok(pillsIndex > refreshIndex, 'round pills must follow the refresh icon');
+  assert.ok(reviewIndex > pillsIndex, 'the review action sits after the round pills');
 
   // The old repository meta line is gone.
   assert.doesNotMatch(html, /class="prr-meta"/);
   assert.doesNotMatch(textOnly, /GitHub/);
   assert.doesNotMatch(textOnly, /acme-demo/);
 
-  // The refresh tooltip still carries the last poll time.
+  // The refresh tooltip still carries the last poll time, and the icon is the whole button.
   const refreshButton = elements.find(
-    (node) => node.type === 'button' && fake.textOf(node) === '刷新列表',
+    (node) => node.type === 'button' && node.props['aria-label'] === '刷新列表',
   );
   assert.ok(refreshButton, 'refresh button missing');
   assert.match(refreshButton.props.title, /10:50/);
+  assert.equal(fake.textOf(refreshButton), '', 'icon button must not render label text');
+  assert.match(html, /<svg/);
   refreshButton.props.onClick();
   assert.deepEqual(refreshed, [true]);
 
@@ -1119,6 +1268,81 @@ test('top bar drops the repository meta line and keeps pills + refresh tooltip',
   assert.ok(pill2, 'historical pill missing');
   pill2.props.onClick();
   assert.deepEqual(selected, [2]);
+});
+
+test('the refresh icon spins visibly while the pull list reloads', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const { elements } = fake.render(fake.React.createElement(parts.TopBar, {
+    t,
+    prNumber: null,
+    pullOptions: [],
+    onSelectPr: () => {},
+    prSelectDisabled: true,
+    showRounds: false,
+    rounds: [],
+    selectedRoundNumber: 1,
+    latestRoundNumber: 1,
+    latestRoundText: '',
+    latestRoundTone: 'idle',
+    onSelectRound: () => {},
+    listBusy: true,
+    lastPoll: '10:50',
+    onRefresh: () => {},
+    reviewLabel: '立即审查',
+    reviewHint: '',
+    reviewDisabled: true,
+    onReview: () => {},
+  }));
+
+  const refreshButton = elements.find(
+    (node) => node.type === 'button' && node.props['aria-label'] === '刷新中…',
+  );
+  assert.ok(refreshButton, 'busy refresh button missing');
+  assert.equal(refreshButton.props.disabled, true);
+  assert.equal(refreshButton.props['data-busy'], 'true');
+  assert.match(
+    parts.CSS,
+    /\.prr-btn\[data-busy="true"\] \.prr-icon\{animation:prr-rotate/,
+  );
+});
+
+test('top bar hides the review action when automatic rounds already cover the head', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const render = (showReview) => fake.render(fake.React.createElement(parts.TopBar, {
+    t,
+    prNumber: 7,
+    pullOptions: [],
+    onSelectPr: () => {},
+    prSelectDisabled: false,
+    showRounds: false,
+    rounds: [],
+    selectedRoundNumber: 1,
+    latestRoundNumber: 1,
+    latestRoundText: '',
+    latestRoundTone: 'idle',
+    onSelectRound: () => {},
+    listBusy: false,
+    lastPoll: '10:50',
+    onRefresh: () => {},
+    showReview,
+    reviewLabel: '开始第 4 轮审查',
+    reviewHint: '下一轮提示',
+    reviewDisabled: false,
+    onReview: () => {},
+  }));
+
+  assert.doesNotMatch(render(false).textOnly, /开始第 4 轮审查/);
+  assert.match(render(true).textOnly, /开始第 4 轮审查/);
+  // Callers that do not compute the flag keep the old behaviour.
+  assert.match(render(undefined).textOnly, /开始第 4 轮审查/);
+});
+
+test('the pull picker is wider without squeezing the round strip', () => {
+  const { parts } = loadClient();
+  assert.match(cssRule(parts.CSS, '.prr-select'), /max-width:680px/);
+  assert.match(cssRule(parts.CSS, '.prr-sidebar .prr-select'), /max-width:260px/);
 });
 
 test('top bar renders no round pills before a review exists', () => {

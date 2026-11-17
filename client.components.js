@@ -10,12 +10,14 @@ window.__ModuleLoader__.load({
     /** Reusable chrome: top bar, round strip and version controls, risk/order lists. */
     return function createComponents({ core }) {
       const {
-        Btn, VerdictPill, text, fill, formatStamp, shortSha, roundPillOf,
+        Btn, RefreshIcon, VerdictPill, text, fill, formatStamp, shortSha, roundPillOf,
+        roundStripStateOf, scrollRoundStrip, revealActiveRound,
       } = core;
 
       /**
        * Top-bar round strip: clickable status pills (reusing the round chip styling) with the
-       * latest round tagged. Long histories scroll horizontally so the action buttons stay put.
+       * latest round tagged. Overflowing histories show edge arrows so the newest rounds are
+       * discoverable; the selected pill is scrolled back into view on every change.
        */
       function RoundPills(props) {
         const {
@@ -28,15 +30,77 @@ window.__ModuleLoader__.load({
           onSelect,
           t,
         } = props;
-        if (!Array.isArray(rounds) || rounds.length === 0) return null;
+        const roundCount = Array.isArray(rounds) ? rounds.length : 0;
+        const scrollRef = React.useRef(null);
+        const [strip, setStrip] = React.useState({ overflow: false, atStart: true, atEnd: true });
+        const syncStrip = React.useCallback(() => {
+          const next = roundStripStateOf(scrollRef.current);
+          // Scroll fires per frame: keep the same object when nothing changed to avoid churn.
+          setStrip((current) => (
+            current.overflow === next.overflow
+              && current.atStart === next.atStart
+              && current.atEnd === next.atEnd
+              ? current
+              : next
+          ));
+        }, []);
+
+        // Re-measure when the number of pills, a pill's text or the available width changes.
+        React.useEffect(() => {
+          const scroller = scrollRef.current;
+          syncStrip();
+          if (scroller === null) return undefined;
+          const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(syncStrip) : null;
+          if (observer !== null) observer.observe(scroller);
+          return () => {
+            if (observer !== null) observer.disconnect();
+          };
+        }, [syncStrip, rounds, latestText]);
+
+        // Keep the selected pill (the latest by default) visible after a switch or a new round.
+        React.useEffect(() => {
+          revealActiveRound(scrollRef.current);
+          syncStrip();
+        }, [selectedRoundNumber, roundCount, syncStrip]);
+
+        if (roundCount === 0) return null;
         const pills = rounds.map((round) =>
           roundPillOf(round, latestRoundNumber, latestText, latestTone, published, t));
+        const scrollButton = (side, label) =>
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'prr-roundscroll',
+              'data-side': side,
+              'aria-label': label,
+              title: label,
+              tabIndex: strip.overflow ? 0 : -1,
+              disabled: strip.overflow !== true || (side === 'prev' ? strip.atStart : strip.atEnd),
+              onClick: () => {
+                scrollRoundStrip(scrollRef.current, side === 'prev' ? -1 : 1);
+              },
+            },
+            h(ChevronIcon, { direction: side }),
+          );
         return h(
           'div',
-          { className: 'prr-roundpills', role: 'tablist', 'aria-label': t('roundTabsLabel') },
+          {
+            className: 'prr-roundpills',
+            'data-overflow': strip.overflow ? 'true' : 'false',
+            'data-at-start': strip.atStart ? 'true' : 'false',
+            'data-at-end': strip.atEnd ? 'true' : 'false',
+          },
+          scrollButton('prev', t('roundScrollPrev')),
           h(
             'div',
-            { className: 'prr-roundpills-scroll' },
+            {
+              className: 'prr-roundpills-scroll',
+              role: 'tablist',
+              'aria-label': t('roundTabsLabel'),
+              ref: scrollRef,
+              onScroll: syncStrip,
+            },
             pills.map((pill) =>
               h(
                 'button',
@@ -67,6 +131,30 @@ window.__ModuleLoader__.load({
               ),
             ),
           ),
+          scrollButton('next', t('roundScrollNext')),
+        );
+      }
+
+      /** Inline chevron for the round-strip arrows (no icon library in the project). */
+      function ChevronIcon(props) {
+        return h(
+          'svg',
+          {
+            className: 'prr-roundscroll-icon',
+            width: 12,
+            height: 12,
+            viewBox: '0 0 16 16',
+            'aria-hidden': 'true',
+            focusable: 'false',
+          },
+          h('path', {
+            d: props.direction === 'prev' ? 'M9.8 3.5 5.3 8l4.5 4.5' : 'M6.2 3.5 10.7 8l-4.5 4.5',
+            fill: 'none',
+            stroke: 'currentColor',
+            'stroke-width': 1.8,
+            'stroke-linecap': 'round',
+            'stroke-linejoin': 'round',
+          }),
         );
       }
 
@@ -187,6 +275,7 @@ window.__ModuleLoader__.load({
           listBusy,
           lastPoll,
           onRefresh,
+          showReview,
           reviewLabel,
           reviewHint,
           reviewDisabled,
@@ -211,6 +300,16 @@ window.__ModuleLoader__.load({
             },
             pullOptions,
           ),
+          h(Btn, {
+            icon: h(RefreshIcon),
+            iconOnly: true,
+            ariaLabel: listBusy ? t('refreshing') : t('refresh'),
+            title: t('refreshHint').replace('{time}', lastPoll ?? ''),
+            small: true,
+            busy: listBusy === true,
+            disabled: listBusy === true,
+            onClick: onRefresh,
+          }),
           showRounds === true
             ? h(RoundPills, {
                 rounds,
@@ -224,21 +323,16 @@ window.__ModuleLoader__.load({
               })
             : null,
           h('span', { className: 'prr-spacer' }),
-          h(Btn, {
-            label: listBusy ? t('refreshing') : t('refresh'),
-            title: t('refreshHint').replace('{time}', lastPoll ?? ''),
-            small: true,
-            disabled: listBusy === true,
-            onClick: onRefresh,
-          }),
-          h(Btn, {
-            label: reviewLabel,
-            title: reviewHint,
-            primary: true,
-            small: true,
-            disabled: reviewDisabled === true,
-            onClick: onReview,
-          }),
+          showReview === false
+            ? null
+            : h(Btn, {
+                label: reviewLabel,
+                title: reviewHint,
+                primary: true,
+                small: true,
+                disabled: reviewDisabled === true,
+                onClick: onReview,
+              }),
           typeof onClose === 'function'
             ? h(Btn, { label: t('overlayClose'), small: true, onClick: onClose })
             : null,
