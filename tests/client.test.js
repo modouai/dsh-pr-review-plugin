@@ -82,6 +82,9 @@ const EXPOSED = [
   'phaseStateText',
   'conclusionBadgeText',
   'PhaseBar',
+  'FindingList',
+  'findingsOf',
+  'cleanCountOf',
 ];
 
 // ---------- fake React ----------
@@ -3035,4 +3038,48 @@ test('PhaseBar renders the round and the phase text', () => {
   assert.ok(view.textOnly.includes('分析 12/30'));
   const empty = fake.render(fake.React.createElement(parts.PhaseBar, { phase: null, round: 1, t }));
   assert.equal(empty.textOnly, '');
+});
+
+test('findingsOf flattens and orders file findings', () => {
+  const { parts } = loadClient();
+  const groups = [
+    { file: 'src/b.js', issues: [{ severity: 'suggest', point: 'b 问题', line: 3 }], suggestions: ['b 建议'] },
+    { file: 'src/a.js', issues: [{ severity: 'block', point: 'a 阻塞', line: 8 }, { severity: 'suggest', point: 'a 问题', line: 2 }], suggestions: [] },
+  ];
+  const rows = parts.findingsOf(groups);
+  assert.deepEqual(plain(rows.map((row) => [row.severity, row.file])), [
+    ['block', 'src/a.js'],
+    ['suggest', 'src/a.js'],
+    ['suggest', 'src/b.js'],
+    ['suggestion', 'src/b.js'],
+  ]);
+  assert.equal(rows[0].line, 8);
+  assert.equal(parts.findingsOf([]).length, 0);
+});
+
+test('FindingList renders rows and the empty state', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const empty = fake.render(fake.React.createElement(parts.FindingList, { groups: [], t, onOpenFile: () => {} }));
+  assert.ok(empty.textOnly.includes('未发现问题'));
+
+  const view = fake.render(fake.React.createElement(parts.FindingList, {
+    groups: [{ file: 'src/a.js', issues: [{ severity: 'block', point: 'a 阻塞', line: 8 }], suggestions: [] }],
+    t,
+    onOpenFile: () => {},
+  }));
+  assert.ok(view.textOnly.includes('src/a.js:8'));
+  assert.ok(view.textOnly.includes('a 阻塞'));
+});
+
+test('cleanCountOf counts finished analyses without issues', () => {
+  const { parts } = loadClient();
+  const review = {
+    explanations: [
+      { file: 'a.js', status: 'done', explanation: { issues: [] } },
+      { file: 'b.js', status: 'done', explanation: { issues: [{ severity: 'block', point: 'x' }] } },
+      { file: 'c.js', status: 'error', explanation: null },
+    ],
+  };
+  assert.deepEqual(plain(parts.cleanCountOf(review)), { done: 2, clean: 1 });
 });

@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
         Btn, FileRow, VerdictPill, isAnalyzing, fill, text, suggestionText, cleanStepTitle,
         parseUnifiedDiff, hunkRange, mapWalkthroughToHunks, publishedOfRound, roundsOf,
         staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge, shortSha,
-        phaseStateText,
+        phaseStateText, fileLineLabel,
       } = core;
       const {
         RiskList, RoundMeta, DeltaBlock, VersionSelector,
@@ -98,6 +98,108 @@ window.__ModuleLoader__.load({
           h('span', null, fill(t('phaseRound'), { round: round ?? 1 })),
           h('span', null, phaseStateText(phase, t)),
         );
+      }
+
+      /**
+       * Flatten the per-file findings into the page's single ordered list: block first, then
+       * suggest, then suggestions; ties break by path and line. This is the one place the
+       * overview speaks about findings — detail pages and the conclusion reference, not repeat.
+       */
+      function findingsOf(groups) {
+        const rows = [];
+        for (const group of Array.isArray(groups) ? groups : []) {
+          if (group === null || typeof group !== 'object') continue;
+          const file = typeof group.file === 'string' ? group.file : '';
+          for (const issue of Array.isArray(group.issues) ? group.issues : []) {
+            if (issue === null || typeof issue !== 'object') continue;
+            const point = typeof issue.point === 'string' ? issue.point.trim() : '';
+            if (point === '') continue;
+            rows.push({
+              kind: 'issue',
+              severity: issue.severity === 'block' ? 'block' : 'suggest',
+              file,
+              line: Number.isFinite(issue.line) && issue.line > 0 ? Math.floor(issue.line) : 0,
+              point,
+            });
+          }
+          for (const suggestion of Array.isArray(group.suggestions) ? group.suggestions : []) {
+            const point = suggestionText(suggestion).trim();
+            if (point === '') continue;
+            rows.push({ kind: 'suggestion', severity: 'suggestion', file, line: 0, point });
+          }
+        }
+        const rank = { block: 0, suggest: 1, suggestion: 2 };
+        rows.sort((a, b) => rank[a.severity] - rank[b.severity] || a.file.localeCompare(b.file) || a.line - b.line);
+        return rows;
+      }
+
+      /** The expandable findings list: one row per finding, detail unfolds in place. */
+      function FindingList(props) {
+        const { groups, t, onOpenFile } = props;
+        const rows = findingsOf(groups);
+        const [openKey, setOpenKey] = React.useState(null);
+        if (rows.length === 0) return h('div', { className: 'prr-subtle' }, t('findingListEmpty'));
+        return h(
+          'div',
+          { className: 'prr-card' },
+          rows.map((row, index) => {
+            const key = `${row.kind}-${row.file}-${row.line}-${index}`;
+            const open = openKey === key;
+            const label = row.file === '' ? row.point : `${fileLineLabel(row.file, row.line)} — ${row.point}`;
+            return h(
+              'div',
+              { className: 'prr-finding', key },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'prr-finding-head',
+                  'data-open': open ? 'true' : 'false',
+                  title: row.point,
+                  onClick: () => setOpenKey(open ? null : key),
+                },
+                row.kind === 'suggestion'
+                  ? h('span', { className: 'prr-tag' }, t('suggestionTag'))
+                  : h(VerdictPill, { verdict: row.severity, t }),
+                h('span', { className: 'prr-finding-point' }, label),
+                h('span', { className: 'prr-finding-caret', 'aria-hidden': 'true' }, open ? '▾' : '▸'),
+              ),
+              open
+                ? h(
+                    'div',
+                    { className: 'prr-finding-detail' },
+                    h('div', { className: 'prr-text' }, row.point),
+                    row.file === ''
+                      ? null
+                      : h(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'prr-linklike',
+                            onClick: () => onOpenFile(row.file, row.line),
+                          },
+                          t('findingOpenContext'),
+                        ),
+                  )
+                : null,
+            );
+          }),
+        );
+      }
+
+      /** How many finished analyses found no issues: the review's visible negative result. */
+      function cleanCountOf(review) {
+        const entries = Array.isArray(review?.explanations) ? review.explanations : [];
+        let done = 0;
+        let clean = 0;
+        for (const entry of entries) {
+          if (entry === null || typeof entry !== 'object') continue;
+          if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
+          done += 1;
+          const issues = Array.isArray(entry.explanation.issues) ? entry.explanation.issues : [];
+          if (issues.length === 0) clean += 1;
+        }
+        return { done, clean };
       }
 
       function DiffView(props) {
@@ -824,7 +926,8 @@ window.__ModuleLoader__.load({
       }
 
       return {
-        FilesPane, PhaseBar, DiffView, FullFileView, FileDetailPanel, ChatBox, OverviewPanel, WorkspaceCenter,
+        FilesPane, PhaseBar, FindingList, findingsOf, cleanCountOf, DiffView, FullFileView,
+        FileDetailPanel, ChatBox, OverviewPanel, WorkspaceCenter,
       };
     };
   },
