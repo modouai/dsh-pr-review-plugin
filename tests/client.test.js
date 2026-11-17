@@ -81,6 +81,7 @@ const EXPOSED = [
   'derivePhase',
   'phaseStateText',
   'conclusionBadgeText',
+  'PhaseBar',
 ];
 
 // ---------- fake React ----------
@@ -3020,4 +3021,18 @@ test('navigation redesign css ships the new selectors', () => {
   assert.ok(parts.CSS.includes('.prr-phasebar'));
   assert.ok(parts.CSS.includes('.prr-finding-head'));
   assert.ok(cssRule(parts.CSS, '.prr-completeness').includes('padding'));
+});
+
+test('PhaseBar renders the round and the phase text', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const view = fake.render(fake.React.createElement(parts.PhaseBar, {
+    phase: { phase: 'analyzing', progress: { done: 12, total: 30, failed: 0 }, nextAction: null, version: 0 },
+    round: 2,
+    t,
+  }));
+  assert.ok(view.textOnly.includes('第 2 轮'));
+  assert.ok(view.textOnly.includes('分析 12/30'));
+  const empty = fake.render(fake.React.createElement(parts.PhaseBar, { phase: null, round: 1, t }));
+  assert.equal(empty.textOnly, '');
 });

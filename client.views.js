@@ -15,6 +15,7 @@ window.__ModuleLoader__.load({
         Btn, FileRow, VerdictPill, isAnalyzing, fill, text, suggestionText, cleanStepTitle,
         parseUnifiedDiff, hunkRange, mapWalkthroughToHunks, publishedOfRound, roundsOf,
         staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge, shortSha,
+        phaseStateText,
       } = core;
       const {
         RiskList, RoundMeta, DeltaBlock, VersionSelector,
@@ -84,6 +85,18 @@ window.__ModuleLoader__.load({
                   }),
                 ),
           ),
+        );
+      }
+
+      /** One shared status line: the round plus the single derived phase. */
+      function PhaseBar(props) {
+        const { phase, round, t } = props;
+        if (phase === null || phase === undefined) return null;
+        return h(
+          'div',
+          { className: 'prr-phasebar' },
+          h('span', null, fill(t('phaseRound'), { round: round ?? 1 })),
+          h('span', null, phaseStateText(phase, t)),
         );
       }
 
@@ -811,7 +824,7 @@ window.__ModuleLoader__.load({
       }
 
       return {
-        FilesPane, DiffView, FullFileView, FileDetailPanel, ChatBox, OverviewPanel, WorkspaceCenter,
+        FilesPane, PhaseBar, DiffView, FullFileView, FileDetailPanel, ChatBox, OverviewPanel, WorkspaceCenter,
       };
     };
   },
