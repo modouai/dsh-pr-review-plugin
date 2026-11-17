@@ -26,7 +26,7 @@ window.__ModuleLoader__.load({
         PublishPreviewModal,
       } = preview;
       const {
-        FilesPane, ChatBox, FileDetailPanel, OverviewPage, WorkspaceCenter, PhaseBar,
+        FilesPane, ChatBox, FileDetailPanel, OverviewPage, ConclusionPage, WorkspaceCenter, PhaseBar,
       } = views;
       const {
         useRepoContext, useFileDetail, usePreviewPublish, useRoundSelection, useFeedbackCheck,
@@ -888,6 +888,58 @@ window.__ModuleLoader__.load({
         );
       }
 
+      /** Conclusion pane: the decision page with the shared status bar and the composer. */
+      function WorkspaceConclusionPane({ model, paneHeader, chat }) {
+        const {
+          t, review, prNumber, sidebar, list, selectedRoundNumber,
+          versionPick, pickConclusionVersion,
+          concludeBusy, concluding, concludeCancelBusy, cancelConclude, reviewBusy, runConclude,
+          openFile, explainedCount, fileFindings, phase,
+          publishBusy, previewBusy, previewRefreshBusy, feedbackBusy, checkFeedback,
+          preview, togglePreviewItem, staleInfo,
+        } = model;
+        return h(
+          'section',
+          { className: 'prr-overview-pane' },
+          paneHeader,
+          h(
+            'div',
+            { className: 'prr-overview-scroll' },
+            h(
+              'div',
+              { className: 'prr-overview-inner' },
+              h(PhaseBar, { phase, round: selectedRoundNumber ?? review?.round ?? 1, t }),
+              h(ConclusionPage, {
+                review: review ?? { report: null, number: prNumber ?? 0, pull: null, status: 'idle', conclusion: null },
+                t,
+                selectedRoundNumber,
+                versionPick,
+                onPickVersion: pickConclusionVersion,
+                concludeBusy,
+                concluding,
+                cancelBusy: concludeCancelBusy,
+                onCancelConclude: () => void cancelConclude(),
+                reviewBusy,
+                onConclude: () => void runConclude(),
+                onOpenFile: (path, line) => void openFile(path, line),
+                explainedCount,
+                totalFiles: (review?.files ?? []).length,
+                publishBusy,
+                previewBusy,
+                previewRefreshBusy,
+                feedbackBusy,
+                onCheckFeedback: () => void checkFeedback(),
+                preview,
+                onToggleInclude: (id) => togglePreviewItem(id),
+                autoReconclude: list?.autoReconclude === true,
+                staleInfo,
+              }),
+              sidebar ? null : h('div', { className: 'prr-overview-chat' }, chat),
+            ),
+          ),
+        );
+      }
+
       /** Analysis column: the open file's review, or the empty state before one is picked. */
       function WorkspaceAnalysisPane({ model }) {
         const { t, review, prNumber, filePath, currentExplanation, explainBusy, suggestionNotice, requestExplain } = model;
@@ -1012,7 +1064,7 @@ window.__ModuleLoader__.load({
       // ---------- the review workspace ----------
 
       return {
-        ReviewWorkspace, WorkspaceView, WorkspaceOverviewPane, WorkspaceAnalysisPane, WorkspaceFileDetailPane, EmbeddedFooter, DockNotice, ReviewDock,
+        ReviewWorkspace, WorkspaceView, WorkspaceOverviewPane, WorkspaceConclusionPane, WorkspaceAnalysisPane, WorkspaceFileDetailPane, EmbeddedFooter, DockNotice, ReviewDock,
       };
     };
   },

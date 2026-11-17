@@ -22,6 +22,7 @@ window.__ModuleLoader__.load({
       } = components;
       const {
         ConclusionBlock, FeedbackBlock, PublishedBlock, conclusionMetaLine, overviewFooter,
+        ConcludingProgress,
       } = conclusion;
 
       /**
@@ -701,6 +702,192 @@ window.__ModuleLoader__.load({
         );
       }
 
+      /** Collapsible live comment preview: what the current selection will post. */
+      function PublishPreviewSection(props) {
+        const { preview, busy, refreshing, t } = props;
+        const [open, setOpen] = React.useState(false);
+        if (preview === null || preview === undefined) return null;
+        return h(
+          'div',
+          { className: 'prr-preview-section' },
+          h(
+            'button',
+            { type: 'button', className: 'prr-dock-toggle', onClick: () => setOpen(!open) },
+            h('span', { 'aria-hidden': 'true' }, open ? '▾' : '▸'),
+            t('publishPreviewSection'),
+            busy === true || refreshing === true
+              ? h('span', { className: 'prr-subtle' }, refreshing === true ? t('previewRefreshing') : t('previewLoading'))
+              : null,
+          ),
+          open ? h('pre', { className: 'prr-markdown' }, text(preview.markdown)) : null,
+        );
+      }
+
+      /**
+       * Conclusion page: the versioned decision (card, items with publish toggles, next
+       * steps), the live comment preview, published records and the action footer. Dialogue
+       * records (author replies, cross-round delta) live on the overview page.
+       */
+      function ConclusionPage(props) {
+        const { review, t } = props;
+        const rounds = React.useMemo(() => roundsOf(review), [review]);
+        const latestRound = rounds.length === 0 ? null : rounds[rounds.length - 1];
+        const requestedRound = typeof props.selectedRoundNumber === 'number' ? props.selectedRoundNumber : null;
+        const selectedRound = requestedRound === null
+          ? latestRound
+          : (rounds.find((entry) => entry.round === requestedRound) ?? latestRound);
+        const roundNumber = selectedRound === null ? 1 : selectedRound.round;
+        const isCurrent = latestRound === null || selectedRound === null || selectedRound.round === latestRound.round;
+        const versions = React.useMemo(
+          () => versionsOf(review, selectedRound, isCurrent),
+          [review, selectedRound, isCurrent],
+        );
+        const latestVersion = versions.length === 0 ? null : versions[versions.length - 1];
+        const versionPick = props.versionPick ?? {};
+        const pickedVersion = typeof versionPick[roundNumber] === 'number' ? versionPick[roundNumber] : null;
+        const selectedVersion = versions.find((entry) => entry.version === pickedVersion) ?? latestVersion;
+        const isOlderVersion = selectedVersion !== null
+          && latestVersion !== null
+          && selectedVersion.version !== latestVersion.version;
+        const publishedEntries = publishedOfRound(review, roundNumber);
+        const feedback = isCurrent ? (review.feedback ?? selectedRound?.feedback ?? null) : (selectedRound?.feedback ?? null);
+        const feedbackStates = feedback?.states ?? {};
+
+        const versionHeader = h(
+          React.Fragment,
+          null,
+          h(VersionSelector, {
+            versions,
+            selectedVersion: selectedVersion === null ? null : selectedVersion.version,
+            onSelect: (version) => props.onPickVersion(
+              roundNumber,
+              version,
+              latestVersion === null ? version : latestVersion.version,
+            ),
+            t,
+          }),
+          selectedVersion === null
+            ? null
+            : h('span', { className: 'prr-tag' }, t(selectedVersion.source === 'human' ? 'versionSourceHuman' : 'versionSourceModel')),
+          isOlderVersion === true ? h('span', { className: 'prr-tag' }, t('versionReadOnly')) : null,
+        );
+
+        const footer = overviewFooter(props, {
+          report: review.report ?? null,
+          pull: review.pull ?? {},
+          selectedVersion,
+          staleInfo: props.staleInfo ?? null,
+          isCurrent,
+          isOlderVersion,
+          hasVersion: versions.length > 0,
+          selectedPublished: isRoundVersionPublished(
+            publishedEntries,
+            roundNumber,
+            selectedVersion === null ? 0 : selectedVersion.version,
+          ),
+          page: 'conclusion',
+        });
+        React.useEffect(() => {
+          actionsBridge.set(footer.actions);
+          actionsBridge.setNotice(footer.notice);
+          return undefined;
+        }, [footer.actions, footer.notice]);
+        React.useEffect(() => () => {
+          actionsBridge.set(null);
+          actionsBridge.setNotice(null);
+        }, []);
+
+        if (!isCurrent) {
+          return h(
+            'div',
+            null,
+            h(RoundMeta, { round: selectedRound, t }),
+            selectedVersion === null || selectedVersion === undefined
+              ? h('div', { className: 'prr-subtle' }, t('historyNoConclusion'))
+              : h(ConclusionBlock, {
+                  conclusion: selectedVersion.conclusion,
+                  t,
+                  onOpenFile: props.onOpenFile,
+                  feedbackStates,
+                  headerExtra: versionHeader,
+                  metaLine: selectedVersion === null ? null : conclusionMetaLine(review, roundNumber, selectedVersion, publishedEntries, isCurrent, t),
+                }),
+            roundNumber >= 2 ? h(DeltaBlock, { delta: selectedRound?.delta ?? null, t }) : null,
+            h(PublishedBlock, { entries: publishedEntries, t }),
+            h('div', { className: 'prr-subtle', style: { marginTop: '10px' } }, t('historyReadOnly')),
+          );
+        }
+
+        if (selectedVersion === null || selectedVersion === undefined) {
+          const concluding = props.concluding ?? null;
+          const coverage = review.coverage ?? null;
+          return h(
+            'div',
+            null,
+            h(
+              'div',
+              { className: 'prr-card' },
+              concluding !== null
+                ? h(ConcludingProgress, { concluding, t, cancelBusy: props.cancelBusy, onCancel: props.onCancelConclude })
+                : h('div', { className: 'prr-zero' }, t('conclusionPendingCard')),
+            ),
+            h(
+              'div',
+              { className: 'prr-completeness' },
+              coverage !== null && coverage !== undefined
+                ? fill(t('metaCoverage'), { analyzed: coverage.analyzed ?? 0, total: coverage.total ?? 0 })
+                : fill(t('metaCoverage'), { analyzed: props.explainedCount ?? 0, total: props.totalFiles ?? 0 }),
+            ),
+            concluding === null
+              ? h(Btn, {
+                  label: t('conclude'),
+                  primary: true,
+                  disabled: props.concludeBusy === true || props.reviewBusy === true,
+                  onClick: props.onConclude,
+                })
+              : null,
+          );
+        }
+
+        const selectedIds = props.preview !== null && props.preview !== undefined && Array.isArray(props.preview.selectedIds)
+          ? props.preview.selectedIds
+          : null;
+        const includeControl = props.preview !== null && props.preview !== undefined && props.preview.selectionSupported === true
+          ? {
+              isSelected: (id) => (selectedIds === null ? true : selectedIds.includes(id)),
+              onToggle: props.onToggleInclude,
+            }
+          : null;
+        const metaLine = conclusionMetaLine(review, roundNumber, selectedVersion, publishedEntries, isCurrent, t);
+
+        return h(
+          'div',
+          null,
+          h(ConclusionBlock, {
+            conclusion: selectedVersion.conclusion,
+            t,
+            onOpenFile: props.onOpenFile,
+            feedbackStates,
+            headerExtra: versionHeader,
+            metaLine,
+            includeControl,
+          }),
+          h(PublishPreviewSection, {
+            preview: props.preview,
+            busy: props.previewBusy,
+            refreshing: props.previewRefreshBusy,
+            t,
+          }),
+          roundNumber >= 2
+            ? h(DeltaBlock, { delta: review.delta ?? selectedRound?.delta ?? null, t })
+            : null,
+          h(PublishedBlock, { entries: publishedEntries, t }),
+          review.concludeError === null || review.concludeError === undefined || review.concludeError === ''
+            ? null
+            : h('div', { className: 'prr-conclude-note' }, String(review.concludeError)),
+        );
+      }
+
       /** Content pane: one of the empty states, the review error, or the open file's diff. */
       function WorkspaceCenter({ model }) {
         const {
@@ -807,7 +994,7 @@ window.__ModuleLoader__.load({
 
       return {
         FilesPane, PhaseBar, FindingList, findingsOf, cleanCountOf, DiffView, FullFileView,
-        FileDetailPanel, ChatBox, OverviewPage, WorkspaceCenter,
+        FileDetailPanel, ChatBox, OverviewPage, ConclusionPage, PublishPreviewSection, WorkspaceCenter,
       };
     };
   },

@@ -146,6 +146,7 @@ window.__ModuleLoader__.load({
         const conclusion = props.conclusion;
         if (conclusion === null || conclusion === undefined) return null;
         const states = props.feedbackStates ?? {};
+        const include = props.includeControl ?? null;
         const section = (title, items, withVerdict, kind) => {
           const list = items ?? [];
           if (list.length === 0) return null;
@@ -165,6 +166,17 @@ window.__ModuleLoader__.load({
                 return h(
                   'div',
                   { className: 'prr-rowitem', key: index },
+                  include !== null && idKey !== ''
+                    ? h(
+                        'label',
+                        { className: 'prr-include', title: props.t('publishInclude') },
+                        h('input', {
+                          type: 'checkbox',
+                          checked: include.isSelected(idKey),
+                          onChange: () => include.onToggle(idKey),
+                        }),
+                      )
+                    : null,
                   withVerdict === true ? h(VerdictPill, { verdict: 'block', t: props.t }) : null,
                   h(
                     'div',

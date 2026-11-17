@@ -85,6 +85,9 @@ const EXPOSED = [
   'FindingList',
   'findingsOf',
   'cleanCountOf',
+  'ConclusionPage',
+  'PublishPreviewSection',
+  'WorkspaceConclusionPane',
 ];
 
 // ---------- fake React ----------
@@ -3070,4 +3073,82 @@ test('OverviewPage keeps its hook order across pending/historical/current transi
     props(makeReview({ round: 2, roundHistory: [makeRound(1), makeRound(2)] }), null),
   ]);
   assert.equal(new Set(result.counts).size, 1);
+});
+
+test('ConclusionPage renders the pending card and the published conclusion', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const pending = fake.render(fake.React.createElement(parts.ConclusionPage, {
+    review: makeReview({ round: 1, conclusion: null, conclusionAt: 0, coverage: { analyzed: 0, total: 2 } }),
+    t,
+    selectedRoundNumber: null,
+    versionPick: {},
+    onPickVersion: () => {},
+    onOpenFile: () => {},
+    explainedCount: 0,
+    totalFiles: 2,
+    concludeBusy: false,
+    reviewBusy: false,
+    onConclude: () => {},
+    concluding: null,
+    cancelBusy: false,
+    onCancelConclude: () => {},
+    preview: null,
+    onToggleInclude: () => {},
+    publishBusy: false,
+    previewBusy: false,
+    previewRefreshBusy: false,
+    feedbackBusy: false,
+    onCheckFeedback: () => {},
+  }));
+  assert.ok(pending.textOnly.includes('结论待生成'));
+  assert.ok(pending.textOnly.includes('0/2'));
+
+  const version = makeVersion(1, '最终结论摘要', { verdict: 'block' });
+  const round = makeRound(1, { conclusions: [version] });
+  const done = fake.render(fake.React.createElement(parts.ConclusionPage, {
+    review: makeReview({ round: 1, roundHistory: [round], conclusion: version.conclusion, conclusionAt: 1000 }),
+    t,
+    selectedRoundNumber: null,
+    versionPick: {},
+    onPickVersion: () => {},
+    onOpenFile: () => {},
+    explainedCount: 1,
+    totalFiles: 1,
+    concludeBusy: false,
+    reviewBusy: false,
+    onConclude: () => {},
+    concluding: null,
+    cancelBusy: false,
+    onCancelConclude: () => {},
+    preview: null,
+    onToggleInclude: () => {},
+    publishBusy: false,
+    previewBusy: false,
+    previewRefreshBusy: false,
+    feedbackBusy: false,
+    onCheckFeedback: () => {},
+  }));
+  assert.ok(done.textOnly.includes('最终结论摘要'));
+});
+
+test('ConclusionBlock renders publish checkboxes when includeControl is set', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const conclusion = {
+    verdict: 'block',
+    summary: 's',
+    blockers: [{ id: 'b1', file: 'a.js', line: 3, point: '阻塞点' }],
+    suggestions: [{ id: 's1', file: '', line: 0, point: '建议点' }],
+    nextSteps: ['补测试'],
+  };
+  const withControl = fake.render(fake.React.createElement(parts.ConclusionBlock, {
+    conclusion, t, onOpenFile: () => {},
+    includeControl: { isSelected: () => true, onToggle: () => {} },
+  }));
+  assert.equal(withControl.elements.filter((element) => element.type === 'input').length, 2);
+  const without = fake.render(fake.React.createElement(parts.ConclusionBlock, {
+    conclusion, t, onOpenFile: () => {},
+  }));
+  assert.equal(without.elements.filter((element) => element.type === 'input').length, 0);
 });
