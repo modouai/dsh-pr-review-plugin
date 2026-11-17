@@ -80,7 +80,7 @@ phase 枚举与判定优先级（先命中先得）：
 
 当前轮内容顺序：
 
-1. （round ≥ 2）上轮处置摘要（一行，点击跳结论页）：`上轮处置：已修复 {resolved} · 仍未解决 {open} · 作者回复 {replies} 条`。只做指针，不做记录——处置记录全文在结论页（见 6.3）。数据取自 `review.delta` / `review.feedback`，现场计数。
+1. （round ≥ 2）**上轮处置记录**：FeedbackBlock（作者回复：每条回复 + 状态 + 理由）+ DeltaBlock（已修复 / 仍未解决）。二者是**审查对话的记录**（我们提的意见兑现了没有），不是代码现状，归过程页置顶，作为本轮验证的输入；记录完整不拆分。「仍未解决」的条目本身会作为 blocker 重新出现在本轮结论，结论页不再重复记录区。
 2. 初筛报告卡：summary + VerdictPill(`report.verdict`)，pill 旁加「初筛」标签（`prr-tag`），整体样式弱化；不再与结论 pill 同屏。
 3. 整体初筛风险 RiskList（现状保留，含计数行——语义不动）。
 4. 未验证项 UnverifiedBlock（现状保留）。
@@ -94,7 +94,7 @@ phase 枚举与判定优先级（先命中先得）：
 
 footer：仅 ready 阶段挂 [生成结论]（避免跳页）；发布按钮不在此页。
 
-历史轮次：仅初筛区占位「历史轮次不含初筛报告」；反馈与处置记录全文在结论页（6.3）。
+历史轮次：FeedbackBlock + DeltaBlock（该轮的处置记录，完整保留在此页）+ 初筛区占位「历史轮次不含初筛报告」。
 
 ### 6.2 明细页 FileDetailPanel
 
@@ -105,16 +105,16 @@ footer：仅 ready 阶段挂 [生成结论]（避免跳页）；发布按钮不�
 当前轮内容顺序：
 
 1. 结论卡：复用 ConclusionBlock 主体（verdict pill + summary + metaLine + 版本选择 headerExtra）。
-2. 必改 blockers / 建议 suggestions / 下一步 nextSteps（现有渲染与反馈状态 pill 不动）。
-3. （round ≥ 2）DeltaBlock（已修复 / 仍未解决——结论的跨轮演化）。
-4. （round ≥ 2）FeedbackBlock（作者回复记录：每条回复 + 状态 + 理由）。条目状态 pill、Delta、回复原文同属一份**条目处置记录**，三个视图集中在本页，不跨页拆分。
-5. 已发布记录 PublishedBlock 紧凑化：每条一行 `v{version} · {时间} · 查看评论`（有 url 时为链接）+ 未发布 tag；**不再渲染条目全文**。
-6. footer（沿用 actionsBridge / `overviewFooter`）：[生成结论 / 重新生成] + [发布 / 追加评论] + stale / coverage 提示，仅本页挂载。
+2. 必改 blockers / 建议 suggestions / 下一步 nextSteps（现有渲染与反馈状态 pill 不动——pill 是条目的最小元数据，发布时审查员需要据此避免重复报告已认可/已修复的条目；回复原文与跨轮对照在总览页）。
+3. 已发布记录 PublishedBlock 紧凑化：每条一行 `v{version} · {时间} · 查看评论`（有 url 时为链接）+ 未发布 tag；**不再渲染条目全文**。
+4. footer（沿用 actionsBridge / `overviewFooter`）：[生成结论 / 重新生成] + [发布 / 追加评论] + stale / coverage 提示，仅本页挂载。
+
+结论页只回答**代码现状**（能不能合、要改什么）；审查对话的记录（作者回复、跨轮对照）在总览页，不在本页。
 
 未生成时（ready）：空状态卡「结论待生成」+ 覆盖率（已分析 x/y + coverageIncomplete 提示）+ [生成结论]；下方弱化参考行「初筛：{verdict}，结论生成后作准」。
 汇总中（concluding）：ConcludingProgress（阶段进度 + 取消，复用 `client.conclusion.js:369`）。
 
-历史轮次：RoundMeta + DeltaBlock + FeedbackBlock + 历史结论版本（只读，沿用 versionsOf / VersionSelector）+ PublishedBlock——历史轮的完整处置记录集中在此页；无动作区（`overviewFooter` 现有 null 逻辑不变）。
+历史轮次：RoundMeta + 历史结论版本（只读，沿用 versionsOf / VersionSelector）+ PublishedBlock；无动作区（`overviewFooter` 现有 null 逻辑不变）。该轮的处置记录（Feedback / Delta）在总览页的历史视图。
 
 ### 6.4 PhaseBar（新组件）
 
@@ -141,16 +141,16 @@ footer：仅 ready 阶段挂 [生成结论]（避免跳页）；发布按钮不�
 
 ## 9. i18n 新增 key（中英两套）
 
-`conclusionNav`（结论）、`initialTag`（初筛）、`findingIndex`（文件发现）、`findingIndexEmpty`（暂无文件发现）、`conclusionPendingCard`（结论待生成）、`initialReference`（初筛：{verdict}，结论生成后作准）、`historyNoReport`（历史轮次不含初筛报告）、`feedbackDigest`（上轮处置：已修复 {resolved} · 仍未解决 {open} · 作者回复 {replies} 条）、`badgeReviewing`（审查中…）、`badgeAnalyzing`（分析 {done}/{total}）、`badgeAnalyzingFailed`（+{failed} 失败）、`badgeConcluding`（汇总中…）、`badgeConclusionNone`（未生成）、`badgeConclusionDraft`（v{n} 草稿）、`badgeConclusionStale`（v{n} 已过期）、`badgePublished`（v{n} 已发布）、`badgePublishedStale`（v{n} 已发布 · 有更新）、`badgeError`（审查失败）。
+`conclusionNav`（结论）、`initialTag`（初筛）、`findingIndex`（文件发现）、`findingIndexEmpty`（暂无文件发现）、`conclusionPendingCard`（结论待生成）、`initialReference`（初筛：{verdict}，结论生成后作准）、`historyNoReport`（历史轮次不含初筛报告）、`badgeReviewing`（审查中…）、`badgeAnalyzing`（分析 {done}/{total}）、`badgeAnalyzingFailed`（+{failed} 失败）、`badgeConcluding`（汇总中…）、`badgeConclusionNone`（未生成）、`badgeConclusionDraft`（v{n} 草稿）、`badgeConclusionStale`（v{n} 已过期）、`badgePublished`（v{n} 已发布）、`badgePublishedStale`（v{n} 已发布 · 有更新）、`badgeError`（审查失败）。
 
 ## 10. 测试策略（`tests/client.test.js`）
 
 - `derivePhase`：全枚举、优先级（concluding > analyzing）、stale 叠加（concluded-stale / published-stale）、字段缺失回退。
 - `applyRoundSelection`：历史轮落结论页。
 - FindingIndex：行渲染（severity tag、file:line、单行截断）、排序、点击回调带行号、空态。
-- 总览页处置摘要：round ≥ 2 渲染一行计数指针（resolved/open/replies 计数正确）、点击跳结论页；不渲染 FeedbackBlock 全文；round 1 不渲染。
+- 总览页处置记录：round ≥ 2 渲染 FeedbackBlock + DeltaBlock（顺序：回复在前、对照在后）；round 1 不渲染。
 - FilesPane：结论入口存在且位于 sticky 尾区容器；徽标文案随 phase 变化。
-- ConclusionPage：ready 空状态（覆盖率 + 生成按钮 + 初筛参考行）；concluding 进度；round ≥ 2 含 DeltaBlock 与 FeedbackBlock；历史轮只读无动作且含完整处置记录（RoundMeta + Delta + Feedback + 历史结论 + Published）；PublishedBlock 紧凑渲染（不含条目全文）。
+- ConclusionPage：ready 空状态（覆盖率 + 生成按钮 + 初筛参考行）；concluding 进度；**不渲染** DeltaBlock / FeedbackBlock（条目状态 pill 除外）；历史轮只读无动作（RoundMeta + 历史结论 + Published）；PublishedBlock 紧凑渲染（不含条目全文）。
 - 自动切换：concluding → concluded 且 mode=overview 触发；mode=file 不触发；取消不触发。
 - `overviewFooter`：publish 仅结论页；conclude 在总览页（仅 ready）与结论页；stale / coverage 提示归结论页。
 - 现有测试保持通过（`pnpm stamp:check` + `node --test`）。
