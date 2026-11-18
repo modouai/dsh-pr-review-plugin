@@ -244,7 +244,6 @@ window.__ModuleLoader__.load({
                 verdict: props.t(VERDICT_FULL_KEYS[conclusion.verdict] ?? 'verdictFullSuggest'),
               }),
             ),
-            props.headerExtra ?? null,
           ),
           pullNumber > 0 || pullTitle !== ''
             ? h(
@@ -358,9 +357,6 @@ window.__ModuleLoader__.load({
                       { className: 'prr-subtle' },
                       [
                         typeof entry.round === 'number' ? `#${entry.round}` : '',
-                        typeof entry.version === 'number'
-                          ? fill(t('publishedVersion'), { version: entry.version })
-                          : '',
                         typeof entry.publishedAt === 'number' && entry.publishedAt > 0
                           ? formatClock(entry.publishedAt)
                           : '',
@@ -434,7 +430,7 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * One-line conclusion metadata: commit, round, version, generated time, coverage,
+       * One-line conclusion metadata: commit, round, generated time, coverage,
        * human/published. The commit leads like the published comment's meta line and renders
        * only when the caller passes a non-empty sha (both ConclusionPage call sites pass it
        * explicitly: the historical round's own head, the current round's review head).
@@ -443,7 +439,6 @@ window.__ModuleLoader__.load({
         const parts = [];
         if (typeof headSha === 'string' && headSha !== '') parts.push(`commit ${shortSha(headSha)}`);
         parts.push(fill(t('metaRound'), { round: roundNumber }));
-        parts.push(fill(t('versionOption'), { version: version.version }));
         const rawCreated = version.createdAt ?? review?.conclusionAt ?? 0;
         const stamp = formatClock(typeof rawCreated === 'number' ? rawCreated : 0);
         if (stamp !== '') parts.push(fill(t('metaGeneratedAt'), { time: stamp }));
@@ -479,7 +474,7 @@ window.__ModuleLoader__.load({
        * rounds and for a round without a report — nothing to act on or qualify there.
        */
       function overviewFooter(props, derived) {
-        const { report, pull, selectedVersion, staleInfo, isCurrent, isOlderVersion, page } = derived;
+        const { report, pull, selectedVersion, staleInfo, isCurrent, page } = derived;
         const t = props.t;
         const review = props.review;
         const onConclusion = page !== 'overview';
@@ -507,15 +502,11 @@ window.__ModuleLoader__.load({
             ? t('previewLoading')
             : (selectedPublished ? t('appendComment') : t('publishComment')));
         const progressActive = props.concluding !== null && props.concluding !== undefined;
-        const publishTitle = isOlderVersion === true
-          ? t('publishOlderHint')
-          : selectedPublished
-            ? fill(t(staleInfo !== null ? 'appendStaleHint' : 'appendCommentHint'), {
-                version: selectedVersion === null ? '?' : selectedVersion.version,
-              })
-            : staleInfo !== null
-              ? t('publishStaleHint')
-              : (progressActive === true ? t('publishConcludingHint') : undefined);
+        const publishTitle = selectedPublished
+          ? t(staleInfo !== null ? 'appendStaleHint' : 'appendCommentHint')
+          : staleInfo !== null
+            ? t('publishStaleHint')
+            : (progressActive === true ? t('publishConcludingHint') : undefined);
         const actions = h(
           'div',
           { className: 'prr-actions' },
@@ -529,9 +520,9 @@ window.__ModuleLoader__.load({
             : h(Btn, {
                 label: props.concludeBusy ? t('concluding') : concludeLabel,
                 // Regenerating is the next step only when there is nothing to publish: a stale
-                // conclusion, no conclusion at all, or a historical version whose publish is
-                // disabled — the footer must never end up with no primary action.
-                primary: selectedVersion === null || staleInfo !== null || isOlderVersion === true,
+                // conclusion or no conclusion at all — the footer must never end up with no
+                // primary action.
+                primary: selectedVersion === null || staleInfo !== null,
                 disabled: props.concludeBusy === true || props.reviewBusy === true,
                 onClick: props.onConclude,
               }),
@@ -541,9 +532,9 @@ window.__ModuleLoader__.load({
                 label: publishLabel,
                 // Publishing (or appending) is the step that reaches the PR; it steps back only
                 // while the conclusion is stale and regenerating is what the reviewer wants.
-                primary: staleInfo === null && isOlderVersion !== true,
+                primary: staleInfo === null,
                 disabled: props.publishBusy === true || props.previewBusy === true
-                  || review.publishing === true || isOlderVersion === true,
+                  || review.publishing === true,
                 title: publishTitle,
                 onClick: props.onPublish,
               }),

@@ -95,7 +95,7 @@ window.__ModuleLoader__.load({
 
         const {
           reviewRounds, latestRoundNumber, selectedRoundNumber, selectedIsCurrent, historicalView,
-          roundPick, setRoundPick, versionPick, setVersionPick, selectRound, pickConclusionVersion,
+          roundPick, setRoundPick, selectRound,
         } = useRoundSelection(review, mode, setMode);
         const concluding = review?.concluding ?? null;
         // Staleness belongs to the live round only: a pinned historical round is a read-only
@@ -312,7 +312,6 @@ window.__ModuleLoader__.load({
           setSuggestionNotice('');
           setMode('overview');
           setRoundPick(null);
-          setVersionPick({});
           setConcludeWait(false);
           setScrollLine(0);
           setPreview(null);
@@ -345,7 +344,6 @@ window.__ModuleLoader__.load({
           setSuggestionNotice('');
           setMode('overview');
           setRoundPick(null);
-          setVersionPick({});
           setConcludeWait(false);
           setScrollLine(0);
           setPreview(null);
@@ -453,7 +451,7 @@ window.__ModuleLoader__.load({
           requestExplain, explainBusy,
           // Rounds and view mode.
           reviewRounds, latestRoundNumber, selectedRoundNumber, historicalView,
-          versionPick, pickConclusionVersion, selectRound, mode, setMode,
+          selectRound, mode, setMode,
           phase, staleInfo,
           // Columns.
           sidebarPane, setSidebarPane, sidebarWidth,
@@ -894,7 +892,7 @@ window.__ModuleLoader__.load({
       function WorkspaceOverviewPane({ model, paneHeader, chat }) {
         const {
           t, list, review, prNumber, sidebar,
-          selectedRoundNumber, selectRound, versionPick, pickConclusionVersion,
+          selectedRoundNumber, selectRound,
           concludeBusy, concluding, concludeCancelBusy, cancelConclude, reviewBusy, runConclude,
           openFile, explainedCount, fileFindings, phase,
           feedbackBusy, checkFeedback,
@@ -938,7 +936,6 @@ window.__ModuleLoader__.load({
       function WorkspaceConclusionPane({ model, paneHeader, chat }) {
         const {
           t, review, prNumber, sidebar, list, selectedRoundNumber,
-          versionPick, pickConclusionVersion,
           concludeBusy, concluding, concludeCancelBusy, cancelConclude, reviewBusy, runConclude,
           openFile, explainedCount, fileFindings, phase,
           publishBusy, previewBusy, previewRefreshBusy, feedbackBusy, checkFeedback,
@@ -959,13 +956,6 @@ window.__ModuleLoader__.load({
                 review: review ?? { report: null, number: prNumber ?? 0, pull: null, status: 'idle', conclusion: null },
                 t,
                 selectedRoundNumber,
-                versionPick,
-                onPickVersion: (round, version, latestVersion) => {
-                  pickConclusionVersion(round, version, latestVersion);
-                  // A version switch changes the item list: re-fetch quietly so the
-                  // selection resets to the new version's defaults instead of leaking.
-                  void requestPreview({ quiet: true });
-                },
                 concludeBusy,
                 concluding,
                 cancelBusy: concludeCancelBusy,

@@ -19,7 +19,7 @@ window.__ModuleLoader__.load({
         fileLineLabel, overviewFooterVisible,
       } = core;
       const {
-        RoundMeta, DeltaBlock, VersionSelector,
+        RoundMeta, DeltaBlock,
       } = components;
       const {
         ConclusionBlock, FeedbackBlock, PublishedBlock, conclusionMetaLine, overviewFooter,
@@ -661,7 +661,6 @@ window.__ModuleLoader__.load({
               selectedVersion: null,
               staleInfo: null,
               isCurrent,
-              isOlderVersion: false,
               hasVersion: false,
               selectedPublished: false,
               page: 'overview',
@@ -863,7 +862,7 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Conclusion page: the versioned decision (card, items with publish toggles, next
+       * Conclusion page: the decision (card, items with publish toggles, next
        * steps), the live comment preview, published records and the action footer. Dialogue
        * records (author replies, cross-round delta) live on the overview page.
        */
@@ -882,34 +881,12 @@ window.__ModuleLoader__.load({
           [review, selectedRound, isCurrent],
         );
         const latestVersion = versions.length === 0 ? null : versions[versions.length - 1];
-        const versionPick = props.versionPick ?? {};
-        const pickedVersion = typeof versionPick[roundNumber] === 'number' ? versionPick[roundNumber] : null;
-        const selectedVersion = versions.find((entry) => entry.version === pickedVersion) ?? latestVersion;
-        const isOlderVersion = selectedVersion !== null
-          && latestVersion !== null
-          && selectedVersion.version !== latestVersion.version;
+        // The panel always reads the newest conclusion version; the version snapshot array in
+        // the data layer stays intact but is no longer user-selectable.
+        const selectedVersion = latestVersion;
         const publishedEntries = publishedOfRound(review, roundNumber);
         const feedback = isCurrent ? (review.feedback ?? selectedRound?.feedback ?? null) : (selectedRound?.feedback ?? null);
         const feedbackStates = feedback?.states ?? {};
-
-        const versionHeader = h(
-          React.Fragment,
-          null,
-          h(VersionSelector, {
-            versions,
-            selectedVersion: selectedVersion === null ? null : selectedVersion.version,
-            onSelect: (version) => props.onPickVersion(
-              roundNumber,
-              version,
-              latestVersion === null ? version : latestVersion.version,
-            ),
-            t,
-          }),
-          selectedVersion === null
-            ? null
-            : h('span', { className: 'prr-tag' }, t(selectedVersion.source === 'human' ? 'versionSourceHuman' : 'versionSourceModel')),
-          isOlderVersion === true ? h('span', { className: 'prr-tag' }, t('versionReadOnly')) : null,
-        );
 
         const footer = overviewFooter(props, {
           report: review.report ?? null,
@@ -917,7 +894,6 @@ window.__ModuleLoader__.load({
           selectedVersion,
           staleInfo: props.staleInfo ?? null,
           isCurrent,
-          isOlderVersion,
           hasVersion: versions.length > 0,
           selectedPublished: isRoundVersionPublished(
             publishedEntries,
@@ -962,7 +938,6 @@ window.__ModuleLoader__.load({
                   pull: review.pull ?? null,
                   onOpenFile: props.onOpenFile,
                   feedbackStates,
-                  headerExtra: versionHeader,
                   metaLine: selectedVersion === null
                     ? null
                     : conclusionMetaLine(review, roundNumber, selectedVersion, publishedEntries, isCurrent, t, selectedRound?.headSha ?? ''),
@@ -1007,11 +982,8 @@ window.__ModuleLoader__.load({
         const selectedIds = props.preview !== null && props.preview !== undefined && Array.isArray(props.preview.selectedIds)
           ? props.preview.selectedIds
           : null;
-        // An older version's publish is disabled: leaving its checkboxes live would let a
-        // toggle write an id the next preview (always the newest version) never asked for.
         const includeControl = props.preview !== null && props.preview !== undefined
           && props.preview.selectionSupported === true
-          && isOlderVersion !== true
           ? {
               isSelected: (id) => (selectedIds === null ? true : selectedIds.includes(id)),
               onToggle: props.onToggleInclude,
@@ -1028,7 +1000,6 @@ window.__ModuleLoader__.load({
             pull: review.pull ?? null,
             onOpenFile: props.onOpenFile,
             feedbackStates,
-            headerExtra: versionHeader,
             metaLine,
             includeControl,
           }),

@@ -60,7 +60,6 @@ const EXPOSED = [
   'reviewAskContext',
   'isRoundVersionPublished',
   'previewConflictOf',
-  'VersionSelector',
   'PublishPreviewModal',
   'DetailHeader',
   'FilesPane',
@@ -485,8 +484,6 @@ function overviewProps(parts, review, extra = {}) {
     phase: extra.phase ?? { phase: 'ready', progress: null, nextAction: 'conclude', version: 0 },
     selectedRoundNumber: extra.selectedRoundNumber ?? null,
     onSelectRound: extra.onSelectRound ?? (() => {}),
-    versionPick: extra.versionPick ?? {},
-    onPickVersion: extra.onPickVersion ?? (() => {}),
     concludeBusy: extra.concludeBusy ?? false,
     concluding: extra.concluding ?? null,
     cancelBusy: false,
@@ -553,7 +550,6 @@ function renderFooter(client, review, extra = {}) {
     selectedVersion,
     staleInfo: parts.staleInfoOf(review, versions),
     isCurrent: extra.isCurrent ?? true,
-    isOlderVersion: extra.isOlderVersion ?? false,
     hasVersion: versions.length > 0,
     selectedPublished: selectedVersion !== null
       && parts.isRoundVersionPublished(review.published ?? [], roundNumber, selectedVersion.version),
@@ -649,7 +645,7 @@ test('a published version turns publishing into an explicit append action', () =
   );
   assert.ok(append, 'the publish button should read as an append');
   assert.match(String(append.props.className), /prr-btn-primary/);
-  assert.match(String(append.props.title ?? ''), /v1 已经发布/);
+  assert.match(String(append.props.title ?? ''), /此结论已发布/);
   assert.doesNotMatch(String(append.props.title ?? ''), /\{version\}/, 'the placeholder must be filled');
   assert.equal(
     actions.elements.filter((node) => node.type === 'button' && fake.textOf(node) === '发布').length,
@@ -657,7 +653,7 @@ test('a published version turns publishing into an explicit append action', () =
   );
 });
 
-test('the publish button says which version the click would publish', () => {
+test('the publish button says what the click would publish', () => {
   const client = loadClient();
   const { fake } = client;
   const version = makeVersion(1, '第一轮结论', { createdAt: 5000 });
@@ -698,9 +694,9 @@ test('the publish button says which version the click would publish', () => {
   });
   const appendStaleButton = publishOf(appendStale);
   assert.equal(fake.textOf(appendStaleButton), '追加评论');
-  assert.match(String(appendStaleButton.props.title ?? ''), /本次追加的是当前选中的结论/);
+  assert.match(String(appendStaleButton.props.title ?? ''), /本次追加的是最新结论/);
 
-  // Concluding: publishing keeps working, but on the version that is already there.
+  // Concluding: publishing keeps working, but on the conclusion that is already there.
   const concluding = makeReview({
     round: 1,
     conclusionAt: version.createdAt,
@@ -796,7 +792,7 @@ test('auto-regeneration is announced when the stale panel is expanded', () => {
   assert.match(expanded.textOnly, /已开启自动重生成/);
 });
 
-test('an older conclusion version cannot be published', () => {
+test('the latest conclusion stays publishable with publish owning the primary slot', () => {
   const client = loadClient();
   const { fake } = client;
   const version = makeVersion(1, '第一轮结论');
@@ -810,22 +806,18 @@ test('an older conclusion version cannot be published', () => {
     (node) => node.type === 'button' && fake.textOf(node) === '发布',
   );
 
-  const older = findPublish(renderFooter(client, review, { isOlderVersion: true }).actions);
-  assert.ok(older, 'publish button missing');
-  assert.equal(older.props.disabled, true);
-  assert.match(String(older.props.title ?? ''), /旧版本结论/);
-  // Publishing is disabled here, so regenerating must own the primary slot — the footer never
-  // ends up with no primary action.
-  const olderFooter = renderFooter(client, review, { isOlderVersion: true }).actions;
-  const olderConclude = olderFooter.elements.find(
+  const publish = findPublish(renderFooter(client, review).actions);
+  assert.ok(publish, 'publish button missing');
+  assert.equal(publish.props.disabled, false);
+  // With nothing stale and no older version in play, publishing is the step that reaches
+  // the PR and owns the primary slot; regenerating steps back.
+  assert.match(String(publish.props.className), /prr-btn-primary/);
+  const actions = renderFooter(client, review).actions;
+  const conclude = actions.elements.find(
     (node) => node.type === 'button' && fake.textOf(node) === '重新生成结论',
   );
-  assert.ok(olderConclude, 'conclude button missing');
-  assert.match(String(olderConclude.props.className), /prr-btn-primary/);
-
-  // The latest version stays publishable.
-  const latest = findPublish(renderFooter(client, review).actions);
-  assert.equal(latest.props.disabled, false);
+  assert.ok(conclude, 'conclude button missing');
+  assert.doesNotMatch(String(conclude.props.className), /prr-btn-primary/);
 });
 
 test('the footer notices the files that are not analyzed yet', () => {
@@ -1944,25 +1936,6 @@ test('historical round 2 pins feedback before the comparison', () => {
   assert.doesNotMatch(textOnly, /检查实现者反馈/);
 });
 
-// ---------- §4.5: conclusion versions ----------
-
-test('version selector reports the chosen version', () => {
-  const client = loadClient();
-  const { parts, fake } = client;
-  const versions = [makeVersion(1, 'v1 摘要'), makeVersion(2, 'v2 摘要')];
-  const picked = [];
-  const { elements } = fake.render(fake.React.createElement(parts.VersionSelector, {
-    versions,
-    selectedVersion: 2,
-    onSelect: (version) => picked.push(version),
-    t: translator(parts),
-  }));
-  const select = elements.find((node) => node.type === 'select');
-  assert.ok(select, 'version select missing');
-  select.props.onChange({ target: { value: '1' } });
-  assert.deepEqual(picked, [1]);
-});
-
 // ---------- §4.8: publish preview + 409 handling ----------
 
 test('already-published preview offers the append-anyway path', () => {
@@ -1987,7 +1960,7 @@ test('already-published preview offers the append-anyway path', () => {
 
   assert.match(textOnly, /# PR 评论正文/);
   assert.doesNotMatch(textOnly, /语言\s*[:：]|Language\s*[:：]/i);
-  assert.match(textOnly, /已经发布过/);
+  assert.match(textOnly, /此轮结论已发布/);
   const append = elements.find(
     (node) => node.type === 'button' && /仍然追加/.test(fake.textOf(node)),
   );
@@ -2668,8 +2641,6 @@ test('the workspace view renders the open file in the narrow sidebar layout', ()
     ...model,
     mode: 'conclusion',
     filePath: '',
-    versionPick: {},
-    pickConclusionVersion: () => {},
     concludeBusy: false,
     concluding: null,
     concludeCancelBusy: false,
@@ -3063,7 +3034,6 @@ test('overviewFooter gates publish and notices by page', () => {
     selectedVersion: makeVersion(1, 's'),
     staleInfo: null,
     isCurrent: true,
-    isOlderVersion: false,
     hasVersion: true,
     selectedPublished: false,
     page,
@@ -3159,8 +3129,6 @@ test('ConclusionPage renders the pending card and the published conclusion', () 
     review: makeReview({ round: 1, conclusion: null, conclusionAt: 0, coverage: { analyzed: 0, total: 2 } }),
     t,
     selectedRoundNumber: null,
-    versionPick: {},
-    onPickVersion: () => {},
     onOpenFile: () => {},
     explainedCount: 0,
     totalFiles: 2,
@@ -3187,8 +3155,6 @@ test('ConclusionPage renders the pending card and the published conclusion', () 
     review: makeReview({ round: 1, roundHistory: [round], conclusion: version.conclusion, conclusionAt: 1000 }),
     t,
     selectedRoundNumber: null,
-    versionPick: {},
-    onPickVersion: () => {},
     onOpenFile: () => {},
     explainedCount: 1,
     totalFiles: 1,
@@ -3220,8 +3186,6 @@ test('ConclusionPage renders the pending card and the published conclusion', () 
     }),
     t,
     selectedRoundNumber: null,
-    versionPick: {},
-    onPickVersion: () => {},
     onOpenFile: () => {},
     explainedCount: 1,
     totalFiles: 1,
@@ -3264,8 +3228,6 @@ test('ConclusionPage mirrors the published comment structure', () => {
     review,
     t,
     selectedRoundNumber: null,
-    versionPick: {},
-    onPickVersion: () => {},
     onOpenFile: () => {},
     explainedCount: 1,
     totalFiles: 2,
@@ -3331,8 +3293,6 @@ test('ConclusionPage shows the mirrored empty sections and no appendix without d
     review,
     t,
     selectedRoundNumber: null,
-    versionPick: {},
-    onPickVersion: () => {},
     onOpenFile: () => {},
     explainedCount: 0,
     totalFiles: 0,
@@ -3464,7 +3424,6 @@ test('ConclusionPage historical rounds keep only their own appendix sources', ()
   });
   const props = (selectedRoundNumber) => ({
     review, t, selectedRoundNumber,
-    versionPick: {}, onPickVersion: () => {},
     onOpenFile: () => {}, explainedCount: 0, totalFiles: 0,
     concludeBusy: false, reviewBusy: false, onConclude: () => {},
     concluding: null, cancelBusy: false, onCancelConclude: () => {},
@@ -3586,36 +3545,46 @@ test('FilesPane pins a conclusion entry with live badges', () => {
     conclusionMode: true,
     phase: { phase: 'published', progress: null, nextAction: 'append', version: 3 },
   }));
-  assert.ok(active.textOnly.includes('v3 已发布'));
+  assert.ok(active.textOnly.includes('已发布'));
   const activeTones = active.elements.filter((element) => element.props?.className === 'prr-navrow-badge');
   assert.equal(activeTones.some((element) => element.props?.['data-tone'] === 'ok'), true);
 });
 
-test('the conclusion pane resets the publish preview when the version changes', () => {
-  const { parts } = loadClient();
-  const picked = [];
-  const previews = [];
-  const model = {
-    t: translator(parts),
-    review: makeReview({ round: 2 }),
-    prNumber: 7,
-    sidebar: true,
-    list: {},
-    selectedRoundNumber: 2,
-    versionPick: {},
-    pickConclusionVersion: (round, version, latestVersion) => picked.push([round, version, latestVersion]),
-    requestPreview: (options) => previews.push(options),
-    staleInfo: null,
-    fileFindings: [],
-  };
-  // The pane is a hook-free element builder, so the test can call it directly and read the
-  // raw props the conclusion page receives instead of expanding the whole subtree.
-  const tree = parts.WorkspaceConclusionPane({ model, paneHeader: null, chat: null });
-  const page = findElement(tree, (node) => node.type === parts.ConclusionPage);
-  assert.ok(page, 'the conclusion pane renders the conclusion page');
-  page.props.onPickVersion(2, 1, 2);
-  assert.deepEqual(plain(picked), [[2, 1, 2]], 'the version pick still reaches the selection hook');
-  assert.deepEqual(plain(previews), [{ quiet: true }], 'a version switch re-fetches the preview quietly');
+test('ConclusionPage renders no version selector, even with several versions', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const review = makeReview({
+    round: 1,
+    conclusion: makeVersion(2, '最新结论').conclusion,
+    conclusionAt: 2000,
+    roundHistory: [makeRound(1, {
+      conclusions: [makeVersion(1, '旧结论'), makeVersion(2, '最新结论')],
+    })],
+  });
+  const view = fake.render(fake.React.createElement(parts.ConclusionPage, {
+    review,
+    t,
+    selectedRoundNumber: null,
+    onOpenFile: () => {},
+    explainedCount: 1,
+    totalFiles: 1,
+    concludeBusy: false,
+    reviewBusy: false,
+    onConclude: () => {},
+    concluding: null,
+    cancelBusy: false,
+    onCancelConclude: () => {},
+    preview: null,
+    onToggleInclude: () => {},
+    publishBusy: false,
+    previewBusy: false,
+    previewRefreshBusy: false,
+    feedbackBusy: false,
+    onCheckFeedback: () => {},
+  }));
+  // The panel always reads the newest version: the title row carries no <select> anywhere.
+  assert.equal(view.elements.some((node) => node.type === 'select'), false, 'version selector must be gone');
+  assert.ok(view.textOnly.includes('最新结论'));
 });
 
 test('ConclusionPage keeps its hook order across pending/historical/current transitions', () => {
@@ -3625,7 +3594,6 @@ test('ConclusionPage keeps its hook order across pending/historical/current tran
   const current = makeVersion(2, '第二轮结论');
   const props = (review, selectedRoundNumber) => ({
     review, t, selectedRoundNumber,
-    versionPick: {}, onPickVersion: () => {},
     onOpenFile: () => {}, explainedCount: 0, totalFiles: 2,
     concludeBusy: false, reviewBusy: false, onConclude: () => {},
     concluding: null, cancelBusy: false, onCancelConclude: () => {},

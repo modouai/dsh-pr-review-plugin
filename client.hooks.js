@@ -455,13 +455,11 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Round and conclusion-version selection. `roundPick` null follows the latest round;
-       * per-round version picks are keyed by round number (absent = latest version).
+       * Round selection. `roundPick` null follows the latest round.
        */
       function useRoundSelection(review, mode, setMode) {
         const [roundPick, setRoundPick] = React.useState(null);
-        const [versionPick, setVersionPick] = React.useState({});
-      // Round selection (null = follow the latest round) and per-round conclusion version picks.
+      // Round selection (null = follow the latest round).
       const reviewRounds = React.useMemo(() => roundsOf(review), [review]);
       const latestRoundNumber = reviewRounds.length === 0
         ? null
@@ -476,18 +474,10 @@ window.__ModuleLoader__.load({
         setRoundPick(next.roundPick);
         setMode(next.mode);
       }, [latestRoundNumber]);
-      const pickConclusionVersion = React.useCallback((round, version, latestVersion) => {
-        setVersionPick((previous) => {
-          const next = { ...previous };
-          if (version === latestVersion) delete next[round];
-          else next[round] = version;
-          return next;
-        });
-      }, []);
 
         return {
           reviewRounds, latestRoundNumber, selectedRoundNumber, selectedIsCurrent, historicalView,
-          roundPick, setRoundPick, versionPick, setVersionPick, selectRound, pickConclusionVersion,
+          roundPick, setRoundPick, selectRound,
         };
       }
 

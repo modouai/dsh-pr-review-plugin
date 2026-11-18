@@ -158,33 +158,6 @@ window.__ModuleLoader__.load({
         );
       }
 
-      /** Conclusion version selector for one round; only shown when more than one version exists. */
-      function VersionSelector(props) {
-        const { versions, selectedVersion, onSelect, t } = props;
-        if (!Array.isArray(versions) || versions.length <= 1) return null;
-        const latestVersion = versions[versions.length - 1].version;
-        return h(
-          'select',
-          {
-            className: 'prr-select prr-select-sm',
-            value: selectedVersion === null || selectedVersion === undefined ? '' : String(selectedVersion),
-            title: t('versionPickerTitle'),
-            'aria-label': t('versionPickerTitle'),
-            onChange: (event) => {
-              const next = Number(event.target.value);
-              if (Number.isFinite(next)) onSelect(next);
-            },
-          },
-          versions.map((version) =>
-            h(
-              'option',
-              { key: version.version, value: version.version },
-              `${fill(t('versionOption'), { version: version.version })}${version.version === latestVersion ? t('versionLatestTag') : ''} · ${t(version.source === 'human' ? 'versionSourceHuman' : 'versionSourceModel')}`,
-            ),
-          ),
-        );
-      }
-
       /** Metadata line for a historical round: commit hash, start and finish. */
       function RoundMeta(props) {
         const { round, t } = props;
@@ -340,7 +313,7 @@ window.__ModuleLoader__.load({
       }
 
       return {
-        DetailHeader, TopBar, RoundPills, VersionSelector, RoundMeta, DeltaBlock,
+        DetailHeader, TopBar, RoundPills, RoundMeta, DeltaBlock,
       };
     };
   },
