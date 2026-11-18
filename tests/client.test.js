@@ -81,6 +81,7 @@ const EXPOSED = [
   'shouldAutoSwitchPhase',
   'overviewFooterVisible',
   'phaseStateText',
+  'overviewStateText',
   'conclusionBadgeText',
   'conclusionBadgeTone',
   'processBadgeTone',
@@ -2871,6 +2872,20 @@ test('phase and conclusion badge text follow the phase', () => {
   assert.equal(parts.conclusionBadgeText({ phase: 'concluded-stale', version: 2 }, t), 'badgeConclusionStale');
   assert.equal(parts.conclusionBadgeText({ phase: 'published', version: 4 }, t), 'badgePublished');
   assert.equal(parts.conclusionBadgeText({ phase: 'published-stale', version: 5 }, t), 'badgePublishedStale');
+
+  // The overview-entry variant treats the process as its own subject: the conclude job
+  // never leaks into it, so concluding falls through to the plain review-done text.
+  assert.equal(parts.overviewStateText(null, t), '');
+  assert.equal(parts.overviewStateText({ phase: 'error' }, t), 'badgeError');
+  assert.equal(parts.overviewStateText({ phase: 'reviewing' }, t), 'badgeReviewing');
+  assert.equal(
+    parts.overviewStateText({ phase: 'analyzing', progress: { done: 3, total: 9, failed: 0 } }, t),
+    'badgeAnalyzing',
+  );
+  assert.equal(parts.overviewStateText({ phase: 'concluding' }, t), 'badgeDone');
+  assert.equal(parts.overviewStateText({ phase: 'ready' }, t), 'badgeDone');
+  assert.equal(parts.overviewStateText({ phase: 'concluded' }, t), 'badgeDone');
+  assert.equal(parts.overviewStateText({ phase: 'published' }, t), 'badgeDone');
 });
 
 test('conclusionBadgeTone maps phases to badge tones', () => {
@@ -2895,7 +2910,7 @@ test('processBadgeTone maps phases to the overview entry tones', () => {
   assert.equal(tone('error'), 'danger');
   assert.equal(tone('reviewing'), 'info');
   assert.equal(tone('analyzing'), 'info');
-  assert.equal(tone('concluding'), 'info');
+  assert.equal(tone('concluding'), 'ok');
   assert.equal(tone('ready'), 'ok');
   assert.equal(tone('concluded'), 'ok');
   assert.equal(tone('concluded-stale'), 'ok');
@@ -3559,7 +3574,11 @@ test('FilesPane pins a conclusion entry with live badges', () => {
     ...base,
     phase: { phase: 'concluding', progress: null, nextAction: null, version: 0 },
   }));
-  assert.equal(spinners(concluding).length, 2);
+  // The conclude job belongs to the conclusion entry alone: the overview badge settles
+  // to review-done with no spinner while the conclusion entry keeps 汇总中 and spins.
+  assert.ok(concluding.textOnly.includes(t('badgeDone')));
+  assert.ok(concluding.textOnly.includes(t('badgeConcluding')));
+  assert.equal(spinners(concluding).length, 1);
 
   const active = fake.render(fake.React.createElement(parts.FilesPane, {
     ...base,

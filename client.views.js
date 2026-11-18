@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
         Btn, FileRow, VerdictPill, isAnalyzing, fill, text, suggestionText, cleanStepTitle,
         parseUnifiedDiff, hunkRange, mapWalkthroughToHunks, publishedOfRound, roundsOf,
         staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge, shortSha,
-        phaseStateText, conclusionBadgeText, conclusionBadgeTone, processBadgeTone, filesBadgeTone,
+        phaseStateText, overviewStateText, conclusionBadgeText, conclusionBadgeTone, processBadgeTone, filesBadgeTone,
         fileLineLabel, overviewFooterVisible,
       } = core;
       const {
@@ -53,7 +53,7 @@ window.__ModuleLoader__.load({
         const analyzedFiles = fileCounts.done;
         const filesTone = filesBadgeTone(analyzing, failedFiles, analyzedFiles, files.length);
         const processing = phase !== null && phase !== undefined
-          && (phase.phase === 'reviewing' || phase.phase === 'analyzing' || phase.phase === 'concluding');
+          && (phase.phase === 'reviewing' || phase.phase === 'analyzing');
         const concluding = phase !== null && phase !== undefined && phase.phase === 'concluding';
         return h(
           'aside',
@@ -73,7 +73,7 @@ window.__ModuleLoader__.load({
               'span',
               { className: 'prr-navrow-badge', 'data-tone': processBadgeTone(phase) },
               processing === true ? h('span', { className: 'prr-spinner-sm', 'aria-hidden': 'true' }) : null,
-              phaseStateText(phase, t),
+              overviewStateText(phase, t),
             ),
           ),
           h(

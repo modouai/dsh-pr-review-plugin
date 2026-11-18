@@ -324,6 +324,24 @@ window.__ModuleLoader__.load({
       return t('badgeDone');
     }
 
+    /** The overview-entry state: the review process itself, never the conclude job. */
+    function overviewStateText(phase, t) {
+      if (phase === null || phase === undefined) return '';
+      if (phase.phase === 'error') return t('badgeError');
+      if (phase.phase === 'reviewing') return t('badgeReviewing');
+      if (phase.phase === 'analyzing') {
+        const base = fill(t('badgeAnalyzing'), {
+          done: phase.progress?.done ?? 0,
+          total: phase.progress?.total ?? 0,
+        });
+        const failed = (phase.progress?.failed ?? 0) > 0
+          ? fill(t('badgeAnalyzingFailed'), { failed: phase.progress.failed })
+          : '';
+        return failed === '' ? base : `${base} ${failed}`;
+      }
+      return t('badgeDone');
+    }
+
     /** The conclusion-side badge: version-aware, none while no conclusion exists. */
     function conclusionBadgeText(phase, t) {
       if (phase === null || phase === undefined) return t('badgeConclusionNone');
@@ -350,7 +368,8 @@ window.__ModuleLoader__.load({
     function processBadgeTone(phase) {
       if (phase === null || phase === undefined) return 'none';
       if (phase.phase === 'error') return 'danger';
-      if (phase.phase === 'reviewing' || phase.phase === 'analyzing' || phase.phase === 'concluding') return 'info';
+      if (phase.phase === 'concluding' || phase.phase === 'concluded') return 'ok';
+      if (phase.phase === 'reviewing' || phase.phase === 'analyzing') return 'info';
       return 'ok';
     }
 
@@ -1234,8 +1253,8 @@ window.__ModuleLoader__.load({
         severityLabel, fileSeverityOf, STATUS_KEY, cleanStepTitle,
         parseUnifiedDiff, mapWalkthroughToHunks, hunkRange, CSS,
         findingKey, FEEDBACK_LABEL_KEYS, VerdictPill, Btn, RefreshIcon, FileRow, isAnalyzing,
-        derivePhase, shouldAutoSwitchPhase, overviewFooterVisible, phaseStateText, conclusionBadgeText,
-        conclusionBadgeTone, processBadgeTone, filesBadgeTone,
+        derivePhase, shouldAutoSwitchPhase, overviewFooterVisible, phaseStateText, overviewStateText,
+        conclusionBadgeText, conclusionBadgeTone, processBadgeTone, filesBadgeTone,
     };
   },
 });
