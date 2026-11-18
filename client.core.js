@@ -336,6 +336,16 @@ window.__ModuleLoader__.load({
       return t('badgeConclusionNone');
     }
 
+    /** Badge tone for the rail's conclusion entry: ok/warn/info/danger/none. */
+    function conclusionBadgeTone(phase) {
+      if (phase === null || phase === undefined) return 'none';
+      if (phase.phase === 'concluding' || phase.phase === 'concluded') return 'info';
+      if (phase.phase === 'concluded-stale' || phase.phase === 'published-stale') return 'warn';
+      if (phase.phase === 'published') return 'ok';
+      if (phase.phase === 'error') return 'danger';
+      return 'none';
+    }
+
     /**
      * True when a published entry already covers this round's newest conclusion version.
      * Legacy records predate version tracking, so version 0 counts as published.
@@ -817,7 +827,7 @@ window.__ModuleLoader__.load({
 .prr-files{flex:0 1 246px;min-width:158px;display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}
 .prr-pane-head{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:8px 12px;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary);border-bottom:1px solid var(--dsw-alias-border-l1);white-space:nowrap}
 .prr-count{margin-left:auto;font-weight:500}
-.prr-filelist{flex:1;min-height:0;overflow:auto;padding:4px 0}
+.prr-filelist{flex:0 1 auto;min-height:0;overflow:auto;padding:4px 0}
 .prr-frow{display:flex;align-items:center;gap:6px;width:100%;padding:5px 10px;border:0;background:transparent;color:inherit;text-align:left;font:12px/1.45 inherit;cursor:pointer}
 .prr-frow:hover{background:var(--dsw-alias-interactive-bg-hover)}
 .prr-frow[data-active="true"]{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 15%,transparent)}
@@ -1050,8 +1060,16 @@ window.__ModuleLoader__.load({
 .prr-panel-footer .prr-dock .prr-actions{margin-left:auto}
 .prr-panel-footer-extra{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:6px}
 .prr-sidebar .prr-files{flex:0 0 146px;min-width:104px}
-.prr-files-tail{margin-top:auto;flex:0 0 auto;border-top:1px solid var(--dsw-alias-border-l1)}
+.prr-files-tail{flex:0 0 auto;border-top:1px solid var(--dsw-alias-border-l1)}
 .prr-navrow-badge{margin-left:auto;flex:0 0 auto;font:11px/1.3 inherit;color:var(--dsw-alias-label-secondary);white-space:nowrap}
+.prr-navrow-badge[data-tone="ok"]{color:var(--dsw-alias-state-success-primary)}
+.prr-navrow-badge[data-tone="warn"]{color:var(--dsw-alias-state-warn-primary)}
+.prr-navrow-badge[data-tone="info"]{color:var(--dsw-alias-state-info-primary, var(--dsw-alias-brand-primary))}
+.prr-navrow-badge[data-tone="danger"]{color:var(--dsw-alias-state-error-primary)}
+.prr-navrow[data-tone="ok"] .prr-navrow-mark{background:var(--dsw-alias-state-success-primary)}
+.prr-navrow[data-tone="warn"] .prr-navrow-mark{background:var(--dsw-alias-state-warn-primary)}
+.prr-navrow[data-tone="info"] .prr-navrow-mark{background:var(--dsw-alias-state-info-primary, var(--dsw-alias-brand-primary))}
+.prr-navrow[data-tone="danger"] .prr-navrow-mark{background:var(--dsw-alias-state-error-primary)}
 .prr-phasebar{display:flex;gap:10px;align-items:center;padding:6px 12px;border-bottom:1px solid var(--dsw-alias-border-l1);font:12px/1.4 inherit;color:var(--dsw-alias-label-secondary)}
 .prr-finding{border-bottom:1px dashed var(--dsw-alias-border-l1)}
 .prr-finding:last-child{border-bottom:0}
@@ -1200,6 +1218,7 @@ window.__ModuleLoader__.load({
         parseUnifiedDiff, mapWalkthroughToHunks, hunkRange, CSS,
         findingKey, FEEDBACK_LABEL_KEYS, VerdictPill, Btn, RefreshIcon, FileRow, isAnalyzing,
         derivePhase, shouldAutoSwitchPhase, overviewFooterVisible, phaseStateText, conclusionBadgeText,
+        conclusionBadgeTone,
     };
   },
 });

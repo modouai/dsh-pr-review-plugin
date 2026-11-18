@@ -83,6 +83,7 @@ const EXPOSED = [
   'overviewFooterVisible',
   'phaseStateText',
   'conclusionBadgeText',
+  'conclusionBadgeTone',
   'PhaseBar',
   'FindingList',
   'findingsOf',
@@ -2285,6 +2286,12 @@ test('the review root reserves the composer band and lets the content scroll its
   assert.match(filelist, /overflow:auto/);
   const detail = cssRule(css, '.prr-detail-body');
   assert.match(detail, /overflow:auto/);
+
+  // The conclusion entry hugs the list instead of pinning to the rail bottom, and the
+  // rail tones it by phase.
+  assert.ok(filelist.includes('flex:0 1 auto'));
+  assert.ok(!cssRule(css, '.prr-files-tail').includes('margin-top:auto'));
+  assert.ok(css.includes('.prr-navrow-badge[data-tone="ok"]'));
 });
 
 test('round pill CSS keeps the tone and marks the selection without a brand ring', () => {
@@ -2835,6 +2842,21 @@ test('phase and conclusion badge text follow the phase', () => {
   assert.equal(parts.conclusionBadgeText({ phase: 'concluded-stale', version: 2 }, t), 'badgeConclusionStale');
   assert.equal(parts.conclusionBadgeText({ phase: 'published', version: 4 }, t), 'badgePublished');
   assert.equal(parts.conclusionBadgeText({ phase: 'published-stale', version: 5 }, t), 'badgePublishedStale');
+});
+
+test('conclusionBadgeTone maps phases to badge tones', () => {
+  const { parts } = loadClient();
+  const tone = (phase) => parts.conclusionBadgeTone({ phase, progress: null, nextAction: null, version: 0 });
+  assert.equal(tone('ready'), 'none');
+  assert.equal(tone('reviewing'), 'none');
+  assert.equal(tone('analyzing'), 'none');
+  assert.equal(parts.conclusionBadgeTone(null), 'none');
+  assert.equal(tone('concluding'), 'info');
+  assert.equal(tone('concluded'), 'info');
+  assert.equal(tone('concluded-stale'), 'warn');
+  assert.equal(tone('published'), 'ok');
+  assert.equal(tone('published-stale'), 'warn');
+  assert.equal(tone('error'), 'danger');
 });
 
 test('shouldAutoSwitchPhase only lands on the conclusion after the conclude job finishes', () => {
@@ -3454,6 +3476,8 @@ test('FilesPane pins a conclusion entry with live badges', () => {
   assert.ok(view.textOnly.includes('结论'));
   assert.ok(view.textOnly.includes('未生成'));
   assert.ok(view.elements.some((element) => element.props?.className === 'prr-files-tail'));
+  const tones = view.elements.filter((element) => element.props?.className === 'prr-navrow-badge');
+  assert.equal(tones.some((element) => element.props?.['data-tone'] === 'none'), true);
 
   const active = fake.render(fake.React.createElement(parts.FilesPane, {
     ...base,
@@ -3461,6 +3485,8 @@ test('FilesPane pins a conclusion entry with live badges', () => {
     phase: { phase: 'published', progress: null, nextAction: 'append', version: 3 },
   }));
   assert.ok(active.textOnly.includes('v3 已发布'));
+  const activeTones = active.elements.filter((element) => element.props?.className === 'prr-navrow-badge');
+  assert.equal(activeTones.some((element) => element.props?.['data-tone'] === 'ok'), true);
 });
 
 test('ConclusionPage keeps its hook order across pending/historical/current transitions', () => {

@@ -6,7 +6,7 @@
 // Revision stamp: the Host derives a package's revision from this entry file only, so the
 // stamp below is rewritten by scripts/stamp.js whenever a chunk changes. That keeps
 // `/plugins/<pkg>/client.<area>.js?rev=<entry rev>` cache-busting honest.
-// pr-review chunks: 59afb68b5638
+// pr-review chunks: 88bbf0440124
 window.__ModuleLoader__.load({
   id: '@modouai/dsh-pr-review',
   factory(require) {

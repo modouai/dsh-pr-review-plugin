@@ -15,7 +15,7 @@ window.__ModuleLoader__.load({
         Btn, FileRow, VerdictPill, isAnalyzing, fill, text, suggestionText, cleanStepTitle,
         parseUnifiedDiff, hunkRange, mapWalkthroughToHunks, publishedOfRound, roundsOf,
         staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge, shortSha,
-        phaseStateText, conclusionBadgeText, fileLineLabel, overviewFooterVisible,
+        phaseStateText, conclusionBadgeText, conclusionBadgeTone, fileLineLabel, overviewFooterVisible,
       } = core;
       const {
         RoundMeta, DeltaBlock, VersionSelector,
@@ -26,9 +26,9 @@ window.__ModuleLoader__.load({
       } = conclusion;
 
       /**
-       * Left column: the overview entry, the changed-file header, the file list, and — pinned
-       * to the bottom regardless of list length — the conclusion entry. The rail order is the
-       * review's reading order: overview, files, conclusion; badges carry the live state.
+       * Left column: the overview entry, the changed-file header, the file list, and — on the
+       * row right below the list — the conclusion entry. The rail order is the review's
+       * reading order: overview, files, conclusion; badges carry the live state and tone.
        */
       function FilesPane(props) {
         const {
@@ -98,12 +98,13 @@ window.__ModuleLoader__.load({
               {
                 type: 'button',
                 className: 'prr-navrow',
+                'data-tone': conclusionBadgeTone(phase),
                 'data-active': conclusionMode === true ? 'true' : 'false',
                 onClick: () => onSelectConclusion(),
               },
               h('span', { className: 'prr-navrow-mark' }),
               t('conclusionNav'),
-              h('span', { className: 'prr-navrow-badge' }, conclusionBadgeText(phase, t)),
+              h('span', { className: 'prr-navrow-badge', 'data-tone': conclusionBadgeTone(phase) }, conclusionBadgeText(phase, t)),
             ),
           ),
         );
