@@ -230,13 +230,61 @@ function serializeReview(record) {
     published: record.published ?? [],
     publishedItems: record.publishedItems ?? [],
     feedback: record.feedback ?? null,
-    delta: record.delta ?? null,
+    delta: reviewDeltaOf(record),
     conclusionAt: record.conclusionAt ?? 0,
     conclusion: record.conclusion,
     comment: record.comment ?? null,
     revision: record.revision ?? 0,
     audit: Array.isArray(record.audit) ? record.audit : [],
   };
+}
+
+/**
+ * Live resolved-vs-still-open preview from the finished per-file findings, for the
+ * window before a conclusion exists. Honesty boundary: an early「已修复」only means
+ * 「本轮未再发现」— analyses that have not finished cannot clear a previous item, so
+ * the preview sharpens as analyses complete. The result is ephemeral (never written
+ * to the record, the cache, or the round history); the persisted conclusion delta
+ * that conclude writes always wins over it (see reviewDeltaOf).
+ */
+function previewDeltaOf(record) {
+  const previousItems = Array.isArray(record.previousRound?.items) ? record.previousRound.items : [];
+  if (previousItems.length === 0) return null;
+  // Live records hold a Map keyed by file; serialized shapes may be entry lists.
+  const entries = record.explanations instanceof Map
+    ? Array.from(record.explanations, ([filePath, entry]) => ({ ...entry, file: filePath }))
+    : (Array.isArray(record.explanations) ? record.explanations : []);
+  const current = [];
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== 'object' || entry.status !== 'done') continue;
+    if (entry.explanation === null || entry.explanation === undefined) continue;
+    const file = typeof entry.file === 'string' ? entry.file : '';
+    for (const issue of Array.isArray(entry.explanation.issues) ? entry.explanation.issues : []) {
+      if (issue === null || typeof issue !== 'object' || typeof issue.point !== 'string' || issue.point.trim() === '') continue;
+      current.push({
+        kind: issue.severity === 'block' ? 'blocker' : 'suggestion',
+        file,
+        point: issue.point,
+      });
+    }
+  }
+  if (current.length === 0) return null;
+  const compared = compareComments(previousItems, current);
+  return {
+    round: record.round ?? 1,
+    previousRound: record.previousRound?.round ?? (record.round ?? 1) - 1,
+    resolved: compared.resolved.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
+    stillOpen: compared.stillOpen.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
+    comparedAt: Date.now(),
+    preview: true,
+  };
+}
+
+/** The delta the panel should show: the persisted one after conclude, a live preview before. */
+function reviewDeltaOf(record) {
+  if (record === null || record === undefined) return null;
+  if (record.delta !== null && record.delta !== undefined) return record.delta;
+  return previewDeltaOf(record);
 }
 
 /** A quick status row for the pull list; the final conclusion wins over the initial report. */

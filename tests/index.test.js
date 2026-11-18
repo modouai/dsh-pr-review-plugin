@@ -481,6 +481,111 @@ test('force review opens round 2: previousRound, cleared state, and delta on the
   }
 });
 
+test('the overview delta previews from per-file findings before any conclusion exists', async () => {
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    delta: null,
+    published: [],
+    publishedItems: [],
+    previousRound: {
+      round: 1,
+      headSha: 'abc123',
+      conclusion: { verdict: 'block', summary: '第一轮结论', blockers: [{ file: 'src/a.js', point: '旧问题' }], suggestions: [], nextSteps: [] },
+      items: [
+        { kind: 'blocker', file: 'src/a.js', point: '旧问题' },
+        { kind: 'suggestion', file: 'src/a.js', point: '旧建议' },
+      ],
+    },
+    explanations: [{
+      file: 'src/a.js',
+      status: 'done',
+      error: null,
+      // The finished analysis re-finds the round-1 blocker; the suggestion was not seen again.
+      explanation: { verdict: 'block', summary: '复现', issues: [{ severity: 'block', point: '旧问题', line: 1 }], suggestions: [] },
+      chat: [],
+      updatedAt: 150,
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const review = await plugin.review();
+    assert.equal(review.conclusion, null);
+    assert.notEqual(review.delta, null);
+    assert.equal(review.delta.preview, true);
+    assert.equal(review.delta.round, 2);
+    assert.equal(review.delta.previousRound, 1);
+    // 早期「已修复」= 本轮未再发现：the suggestion was not re-found by the finished analysis.
+    assert.deepEqual(review.delta.resolved, [{ kind: 'suggestion', file: 'src/a.js', point: '旧建议' }]);
+    assert.deepEqual(review.delta.stillOpen, [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }]);
+    assert.equal(typeof review.delta.comparedAt, 'number');
+    // The preview is derived only: the persisted history entry stays empty.
+    assert.equal(review.roundHistory[0].delta, null);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a persisted round delta wins over the per-file preview', async () => {
+  const persisted = {
+    round: 2,
+    previousRound: 1,
+    resolved: [],
+    stillOpen: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }],
+    comparedAt: 1234,
+  };
+  const record = legacyReview({
+    round: 2,
+    delta: persisted,
+    previousRound: { round: 1, headSha: 'abc123', conclusion: null, items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }] },
+    // The analysis re-finds the same point, but conclude's delta must be returned untouched.
+    explanations: [{
+      file: 'src/a.js',
+      status: 'done',
+      error: null,
+      explanation: { verdict: 'block', summary: '复现', issues: [{ severity: 'block', point: '旧问题', line: 1 }], suggestions: [] },
+      chat: [],
+      updatedAt: 150,
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const review = await plugin.review();
+    assert.deepEqual(review.delta, persisted);
+    assert.equal(review.delta.preview, undefined);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('no preview delta without previous items or without finished analyses', async () => {
+  // previousRound: null, even though the one analysis is done.
+  const noPrevious = legacyReview({});
+  // previousRound exists, but the file has not been analysed yet: nothing may be
+  // reported as resolved while its analysis is still pending.
+  const notAnalyzed = legacyReview({
+    number: 2,
+    previousRound: { round: 1, headSha: 'abc123', conclusion: null, items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }] },
+    explanations: [{
+      file: 'src/a.js',
+      status: 'pending',
+      error: null,
+      explanation: null,
+      chat: [],
+      updatedAt: 0,
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: noPrevious, 2: notAnalyzed } });
+  try {
+    assert.equal((await plugin.review(1)).delta, null);
+    assert.equal((await plugin.review(2)).delta, null);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 test('async /conclude: returns started, rejects duplicates with 409, appends a model version', async () => {
   const conclusionJson = JSON.stringify({
     verdict: 'block',
