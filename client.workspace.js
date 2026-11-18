@@ -943,7 +943,7 @@ window.__ModuleLoader__.load({
           t, review, prNumber, sidebar, list, selectedRoundNumber,
           versionPick, pickConclusionVersion,
           concludeBusy, concluding, concludeCancelBusy, cancelConclude, reviewBusy, runConclude,
-          openFile, explainedCount, phase,
+          openFile, explainedCount, fileFindings, phase,
           publishBusy, previewBusy, previewRefreshBusy, feedbackBusy, checkFeedback,
           preview, togglePreviewItem, staleInfo, requestPreview,
         } = model;
@@ -983,6 +983,11 @@ window.__ModuleLoader__.load({
                 onPublish: () => void requestPreview(),
                 autoReconclude: list?.autoReconclude === true,
                 staleInfo,
+                appendixSources: {
+                  risks: review?.report?.risks ?? [],
+                  findings: fileFindings ?? [],
+                  order: review?.report?.order ?? [],
+                },
               }),
               sidebar ? null : h('div', { className: 'prr-overview-chat' }, chat),
             ),

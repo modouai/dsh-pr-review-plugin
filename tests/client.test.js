@@ -88,6 +88,7 @@ const EXPOSED = [
   'findingsOf',
   'cleanCountOf',
   'ConclusionPage',
+  'ConclusionAppendix',
   'PublishPreviewSection',
   'WorkspaceConclusionPane',
 ];
@@ -3138,6 +3139,275 @@ test('ConclusionPage renders the pending card and the published conclusion', () 
   }));
   assert.ok(withDelta.textOnly.includes('第二轮最终结论'));
   assert.ok(!withDelta.textOnly.includes('复审对比'));
+});
+
+test('ConclusionPage mirrors the published comment structure', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const version = makeVersion(1, '最终结论摘要', { verdict: 'block' });
+  version.conclusion.blockers = [{ id: 'b1', file: 'src/a.js', line: 8, point: '阻塞问题' }];
+  version.conclusion.suggestions = [{ id: 's1', file: '', line: 0, point: '建议问题' }];
+  version.conclusion.nextSteps = ['补齐测试'];
+  const round = makeRound(1, { conclusions: [version] });
+  const review = makeReview({
+    round: 1,
+    roundHistory: [round],
+    conclusion: version.conclusion,
+    conclusionAt: 1000,
+    coverage: { analyzed: 1, total: 2, unanalyzed: ['src/b.js'] },
+    pull: { number: 7, title: 'PR 标题', url: 'https://example.test/pr/7' },
+    feedback: { comments: [], notes: [], states: { b1: { status: 'accepted', reason: '已认可' } } },
+  });
+  const view = fake.render(fake.React.createElement(parts.ConclusionPage, {
+    review,
+    t,
+    selectedRoundNumber: null,
+    versionPick: {},
+    onPickVersion: () => {},
+    onOpenFile: () => {},
+    explainedCount: 1,
+    totalFiles: 2,
+    concludeBusy: false,
+    reviewBusy: false,
+    onConclude: () => {},
+    concluding: null,
+    cancelBusy: false,
+    onCancelConclude: () => {},
+    preview: { markdown: 'preview', round: 1, version: 1, selectionSupported: true, selectedIds: ['b1'], items: [] },
+    onToggleInclude: () => {},
+    publishBusy: false,
+    previewBusy: false,
+    previewRefreshBusy: false,
+    feedbackBusy: false,
+    onCheckFeedback: () => {},
+    appendixSources: {
+      risks: [{ severity: 'block', file: 'src/a.js', point: '初筛风险' }],
+      findings: [{ file: 'src/a.js', issues: [{ severity: 'block', point: '文件发现', line: 8 }], suggestions: [] }],
+      order: [{ file: 'src/a.js', reason: '入口改动' }],
+    },
+  }));
+  const text = view.textOnly;
+  // The title carries the full verdict label; the card drops the pill row entirely.
+  assert.ok(text.includes('PR 审查结论：阻塞（必须修复后才能合并）'));
+  assert.equal(view.elements.some((element) => element.props?.className === 'prr-verdictline'), false);
+  assert.equal(view.elements.filter((element) => element.props?.className === 'prr-pill').length, 0);
+  // PR reference line under the title.
+  assert.ok(text.includes('#7 PR 标题'));
+  // Meta line leads with the reviewed commit and sits above the summary, like the comment.
+  assert.ok(text.includes('commit sha-1-0 · 第 1 轮'));
+  assert.ok(
+    text.indexOf('commit sha-1-0') >= 0
+    && text.indexOf('commit sha-1-0') < text.indexOf('最终结论摘要'),
+    'meta line must precede the summary',
+  );
+  // Sections stay numbered like the comment and keep file tag, feedback pill and publish toggle.
+  assert.ok(text.includes('src/a.js:8'));
+  assert.ok(text.includes('1.'));
+  assert.ok(text.includes('2.'));
+  assert.equal(view.elements.filter((element) => element.type === 'input').length, 2);
+  assert.ok(view.elements.some((element) => element.props?.['data-status'] === 'accepted'));
+  // Next steps render as visual checkboxes only.
+  assert.ok(view.elements.some((element) => element.props?.className === 'prr-nextbox'));
+  // Appendix is collapsed by default: summary line only, no section content.
+  assert.ok(text.includes('审查附录'));
+  assert.ok(!text.includes('总体初筛风险'));
+  assert.ok(!text.includes('复审对比'));
+  assert.ok(!text.includes('未分析文件'));
+});
+
+test('ConclusionPage shows the mirrored empty sections and no appendix without data', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const version = makeVersion(1, '干净结论');
+  const review = makeReview({
+    round: 1,
+    roundHistory: [makeRound(1, { conclusions: [version] })],
+    conclusion: version.conclusion,
+    conclusionAt: 1000,
+  });
+  const view = fake.render(fake.React.createElement(parts.ConclusionPage, {
+    review,
+    t,
+    selectedRoundNumber: null,
+    versionPick: {},
+    onPickVersion: () => {},
+    onOpenFile: () => {},
+    explainedCount: 0,
+    totalFiles: 0,
+    concludeBusy: false,
+    reviewBusy: false,
+    onConclude: () => {},
+    concluding: null,
+    cancelBusy: false,
+    onCancelConclude: () => {},
+    preview: null,
+    onToggleInclude: () => {},
+    publishBusy: false,
+    previewBusy: false,
+    previewRefreshBusy: false,
+    feedbackBusy: false,
+    onCheckFeedback: () => {},
+  }));
+  const text = view.textOnly;
+  assert.ok(text.includes('PR 审查结论：建议（可不修，择机处理）'));
+  assert.ok(text.includes('阻塞项'));
+  assert.ok(text.includes('无阻塞项。'));
+  assert.ok(text.includes('修改建议'));
+  assert.ok(text.includes('暂无。'));
+  assert.ok(text.includes('下一步'));
+  // Every appendix source is empty: the whole collapsible block stays away.
+  assert.ok(!text.includes('审查附录'));
+});
+
+test('ConclusionAppendix collapses by default, opens with defaultOpen and skips empty sources', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const sources = {
+    risks: [{ severity: 'block', file: 'src/a.js', point: '初筛风险' }],
+    findings: [{
+      file: 'src/a.js',
+      issues: [
+        { severity: 'block', point: '文件发现', line: 8 },
+        { severity: 'suggest', point: '提示发现', line: 9 },
+      ],
+      suggestions: ['文件建议'],
+    }],
+    order: [{ file: 'src/a.js', reason: '入口改动' }],
+  };
+  const delta = {
+    previousRound: 1,
+    round: 2,
+    resolved: [{ file: 'a.js', point: '已修复点' }],
+    stillOpen: [{ file: 'b.js', point: '仍未解决点' }],
+  };
+  const coverage = { analyzed: 1, total: 2, unanalyzed: ['src/b.js'] };
+  const collapsed = fake.render(fake.React.createElement(parts.ConclusionAppendix, { sources, delta, coverage, t }));
+  assert.ok(collapsed.textOnly.includes('审查附录'));
+  assert.ok(!collapsed.textOnly.includes('总体初筛风险'));
+  assert.ok(!collapsed.textOnly.includes('复审对比'));
+  assert.ok(!collapsed.textOnly.includes('未分析文件'));
+  // Closed state is a real closed details element, not just hidden content.
+  assert.ok(!collapsed.html.includes(' open="true"'));
+  assert.ok(collapsed.html.includes('prr-appendix'));
+  // The summary's own native toggle stays preventDefault-ed: the state re-render is the
+  // only thing allowed to apply the open attribute.
+  const summary = collapsed.elements.find((element) => element.type === 'summary');
+  assert.ok(summary, 'appendix must render a native summary element');
+  let prevented = false;
+  summary.props.onClick({ preventDefault: () => { prevented = true; } });
+  assert.ok(prevented, 'summary click must preventDefault the native toggle');
+
+  const open = fake.render(fake.React.createElement(parts.ConclusionAppendix, {
+    sources, delta, coverage, t, defaultOpen: true,
+  }));
+  const text = open.textOnly;
+  // The forced-open state really opens the details element.
+  assert.ok(open.html.includes(' open="true"'));
+  // Severity markers mirror the comment's appendix bullets ([阻塞]/[提示] issues, [建议] rows).
+  assert.ok(text.includes('[阻塞] src/a.js — 初筛风险'));
+  assert.ok(text.includes('[阻塞] src/a.js:8 — 文件发现'));
+  assert.ok(text.includes('[提示] src/a.js:9 — 提示发现'));
+  assert.ok(text.includes('[建议] src/a.js — 文件建议'));
+  assert.ok(text.includes('总体初筛风险'));
+  assert.ok(text.includes('初筛风险'));
+  assert.ok(text.includes('逐文件审查发现'));
+  assert.ok(text.includes('src/a.js:8'));
+  assert.ok(text.includes('审查顺序'));
+  assert.ok(text.includes('src/a.js — 入口改动'));
+  assert.ok(text.includes('复审对比'));
+  assert.ok(text.includes('已修复 1'));
+  assert.ok(text.includes('仍未解决 1'));
+  assert.ok(text.includes('已修复：a.js — 已修复点'));
+  assert.ok(text.includes('未分析文件'));
+  assert.ok(text.includes('src/b.js'));
+
+  const empty = fake.render(fake.React.createElement(parts.ConclusionAppendix, {
+    sources: { risks: [], findings: [], order: [] }, delta: null, coverage: null, t, defaultOpen: true,
+  }));
+  assert.equal(empty.textOnly, '');
+});
+
+test('ConclusionBlock carries the full verdict label for every verdict', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const cases = [
+    ['block', '阻塞（必须修复后才能合并）'],
+    ['suggest', '建议（可不修，择机处理）'],
+    ['pass', '通过（无阻塞项）'],
+  ];
+  for (const [verdict, label] of cases) {
+    const view = fake.render(fake.React.createElement(parts.ConclusionBlock, {
+      conclusion: { verdict, summary: 's', blockers: [], suggestions: [], nextSteps: [] },
+      t,
+      onOpenFile: () => {},
+    }));
+    assert.ok(view.textOnly.includes(`PR 审查结论：${label}`), `missing full label for ${verdict}`);
+  }
+});
+
+test('ConclusionPage historical rounds keep only their own appendix sources', () => {
+  const { parts, fake } = loadClient();
+  const t = translator(parts);
+  const version = makeVersion(1, '第二轮结论', { coverage: { analyzed: 1, total: 2, unanalyzed: ['src/b.js'] } });
+  const review = makeReview({
+    round: 3,
+    roundHistory: [
+      makeRound(1),
+      makeRound(2, {
+        conclusions: [version],
+        delta: { previousRound: 1, round: 2, resolved: [], stillOpen: [{ file: 'a.js', point: '仍未解决点' }] },
+      }),
+      makeRound(3, { conclusions: [makeVersion(2, '第三轮结论')] }),
+    ],
+  });
+  const props = (selectedRoundNumber) => ({
+    review, t, selectedRoundNumber,
+    versionPick: {}, onPickVersion: () => {},
+    onOpenFile: () => {}, explainedCount: 0, totalFiles: 0,
+    concludeBusy: false, reviewBusy: false, onConclude: () => {},
+    concluding: null, cancelBusy: false, onCancelConclude: () => {},
+    preview: null, onToggleInclude: () => {},
+    publishBusy: false, previewBusy: false, previewRefreshBusy: false,
+    feedbackBusy: false, onCheckFeedback: () => {},
+    appendixSources: { risks: [{ severity: 'block', file: '', point: '当前轮初筛风险' }], findings: [], order: [] },
+  });
+  // Historical: the appendix shows only the round's own delta/coverage, collapsed by default,
+  // and the meta line names the commit that round reviewed.
+  const historical = fake.render(fake.React.createElement(parts.ConclusionPage, props(2)));
+  assert.ok(historical.textOnly.includes('审查附录'));
+  assert.ok(historical.textOnly.includes('commit sha-2-0'));
+  assert.ok(!historical.textOnly.includes('复审对比'));
+  // Current round: the meta line carries the current head commit.
+  const current = fake.render(fake.React.createElement(parts.ConclusionPage, props(null)));
+  assert.ok(current.textOnly.includes('commit sha-3-0'));
+  // A historical round with no delta and no coverage has no appendix at all.
+  const bare = fake.render(fake.React.createElement(parts.ConclusionPage, {
+    ...props(2),
+    review: makeReview({
+      round: 3,
+      roundHistory: [
+        makeRound(1),
+        makeRound(2, { conclusions: [makeVersion(1, '无附录结论')] }),
+        makeRound(3),
+      ],
+    }),
+  }));
+  assert.ok(!bare.textOnly.includes('审查附录'));
+  // A pinned historical round must not inherit the CURRENT round's coverage: no version
+  // coverage of its own means no unanalyzed section, even while review.coverage has one.
+  const staleCoverage = fake.render(fake.React.createElement(parts.ConclusionPage, {
+    ...props(2),
+    review: makeReview({
+      round: 3,
+      coverage: { analyzed: 2, total: 2, unanalyzed: ['src/current.js'] },
+      roundHistory: [
+        makeRound(1),
+        makeRound(2, { conclusions: [makeVersion(1, '无覆盖历史结论')] }),
+        makeRound(3, { conclusions: [makeVersion(2, '第三轮结论')] }),
+      ],
+    }),
+  }));
+  assert.ok(!staleCoverage.textOnly.includes('审查附录'));
 });
 
 test('ConclusionBlock renders publish checkboxes when includeControl is set', () => {

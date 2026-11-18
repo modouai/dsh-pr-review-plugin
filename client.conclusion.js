@@ -10,7 +10,7 @@ window.__ModuleLoader__.load({
     /** Conclusion, feedback and coverage rendering, plus the markdown renderer they share. */
     return function createConclusion({ core }) {
       const {
-        Btn, VerdictPill, fill, formatClock, text, fileLineLabel, FEEDBACK_LABEL_KEYS,
+        Btn, fill, formatClock, shortSha, text, fileLineLabel, FEEDBACK_LABEL_KEYS,
         findingKey, STAGE_KEY,
       } = core;
 
@@ -142,74 +142,92 @@ window.__ModuleLoader__.load({
         return blocks.length === 0 ? null : h('div', { className: 'prr-md' }, blocks);
       }
 
+      /**
+       * Full per-verdict labels for the mirrored conclusion title, matching the host's
+       * comment heading (## PR 审查结论：<label> in llm.js COMMENT_VERDICT_LABELS).
+       */
+      const VERDICT_FULL_KEYS = {
+        block: 'verdictFullBlock',
+        suggest: 'verdictFullSuggest',
+        pass: 'verdictFullPass',
+      };
+
       function ConclusionBlock(props) {
         const conclusion = props.conclusion;
         if (conclusion === null || conclusion === undefined) return null;
         const states = props.feedbackStates ?? {};
         const include = props.includeControl ?? null;
-        const section = (title, items, withVerdict, kind) => {
+        const pull = props.pull ?? null;
+        const pullNumber = typeof pull?.number === 'number' && pull.number > 0 ? pull.number : 0;
+        const pullTitle = typeof pull?.title === 'string' ? pull.title.trim() : '';
+        // The chapter structure mirrors the published comment: items numbered continuously
+        // across 阻塞项 → 修改建议 (llm.js commentItems), an explicit empty line where the
+        // comment says 无阻塞项。/ 暂无。, no per-item verdict pill.
+        const blockerList = conclusion.blockers ?? [];
+        const section = (title, items, kind, emptyLabel, numberFrom) => {
           const list = items ?? [];
-          if (list.length === 0) return null;
           return h(
             'div',
             null,
             h('div', { className: 'prr-h2' }, title),
-            h(
-              'div',
-              { className: 'prr-card' },
-              list.map((item, index) => {
-                const idKey = typeof item.id === 'string' && item.id !== '' ? item.id : '';
-                const pointKey = findingKey(kind, item.file ?? '', item.point ?? '');
-                const state = states[idKey] ?? states[pointKey] ?? null;
-                const itemLine = Number.isFinite(item.line) && item.line > 0 ? Math.floor(item.line) : 0;
-                const fileLabel = fileLineLabel(item.file, itemLine);
-                return h(
+            list.length === 0
+              ? h('div', { className: 'prr-card' }, h('div', { className: 'prr-subtle' }, emptyLabel))
+              : h(
                   'div',
-                  { className: 'prr-rowitem', key: index },
-                  include !== null && idKey !== ''
-                    ? h(
-                        'label',
-                        { className: 'prr-include', title: props.t('publishInclude') },
-                        h('input', {
-                          type: 'checkbox',
-                          checked: include.isSelected(idKey),
-                          onChange: () => include.onToggle(idKey),
-                        }),
-                      )
-                    : null,
-                  withVerdict === true ? h(VerdictPill, { verdict: 'block', t: props.t }) : null,
-                  h(
-                    'div',
-                    { className: 'prr-rowmain' },
-                    item.file === ''
-                      ? null
-                      : h(
-                          'button',
-                          {
-                            type: 'button',
-                            className: 'prr-linklike prr-filetag',
-                            onClick: () => props.onOpenFile(item.file, itemLine),
-                            title: fileLabel,
-                          },
-                          fileLabel,
-                        ),
-                    h(
+                  { className: 'prr-card' },
+                  list.map((item, index) => {
+                    const idKey = typeof item.id === 'string' && item.id !== '' ? item.id : '';
+                    const pointKey = findingKey(kind, item.file ?? '', item.point ?? '');
+                    const state = states[idKey] ?? states[pointKey] ?? null;
+                    const itemLine = Number.isFinite(item.line) && item.line > 0 ? Math.floor(item.line) : 0;
+                    const fileLabel = fileLineLabel(item.file, itemLine);
+                    return h(
                       'div',
-                      { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
-                      h('div', { className: 'prr-text', style: { flex: 1 } }, item.point),
-                      state === null
-                        ? null
-                        : h(
-                            'span',
-                            { className: 'prr-fb-pill', 'data-status': state.status, title: state.reason ?? '' },
-                            props.t(FEEDBACK_LABEL_KEYS[state.status] ?? 'fbQuestion'),
-                          ),
-                    ),
-                    state === null || state.reason === '' ? null : h('div', { className: 'prr-fb-reason' }, state.reason),
-                  ),
-                );
-              }),
-            ),
+                      { className: 'prr-rowitem', key: index },
+                      include !== null && idKey !== ''
+                        ? h(
+                            'label',
+                            { className: 'prr-include', title: props.t('publishInclude') },
+                            h('input', {
+                              type: 'checkbox',
+                              checked: include.isSelected(idKey),
+                              onChange: () => include.onToggle(idKey),
+                            }),
+                          )
+                        : null,
+                      h('span', { className: 'prr-rownum' }, `${(numberFrom ?? 1) + index}.`),
+                      h(
+                        'div',
+                        { className: 'prr-rowmain' },
+                        item.file === ''
+                          ? null
+                          : h(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'prr-linklike prr-filetag',
+                                onClick: () => props.onOpenFile(item.file, itemLine),
+                                title: fileLabel,
+                              },
+                              fileLabel,
+                            ),
+                        h(
+                          'div',
+                          { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
+                          h('div', { className: 'prr-text', style: { flex: 1 } }, item.point),
+                          state === null
+                            ? null
+                            : h(
+                                'span',
+                                { className: 'prr-fb-pill', 'data-status': state.status, title: state.reason ?? '' },
+                                props.t(FEEDBACK_LABEL_KEYS[state.status] ?? 'fbQuestion'),
+                              ),
+                        ),
+                        state === null || state.reason === '' ? null : h('div', { className: 'prr-fb-reason' }, state.reason),
+                      ),
+                    );
+                  }),
+                ),
           );
         };
         const nextSteps = conclusion.nextSteps ?? [];
@@ -219,34 +237,52 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'prr-conclusion-head' },
-            h('span', { className: 'prr-h2', style: { margin: 0 } }, props.t('conclusion')),
+            h(
+              'div',
+              { className: 'prr-conclusion-title' },
+              fill(props.t('conclusionTitle'), {
+                verdict: props.t(VERDICT_FULL_KEYS[conclusion.verdict] ?? 'verdictFullSuggest'),
+              }),
+            ),
             props.headerExtra ?? null,
           ),
+          pullNumber > 0 || pullTitle !== ''
+            ? h(
+                'div',
+                { className: 'prr-conclusion-ref' },
+                pullNumber > 0 ? `#${pullNumber}${pullTitle === '' ? '' : ` ${pullTitle}`}` : pullTitle,
+              )
+            : null,
           h(
             'div',
             { className: 'prr-card' },
-            h(
-              'div',
-              { className: 'prr-verdictline' },
-              h(VerdictPill, { verdict: conclusion.verdict, t: props.t }),
-            ),
-            h('div', { className: 'prr-text' }, conclusion.summary),
+            // The comment puts its commit/round/version line above the summary body; mirror that.
             props.metaLine === undefined || props.metaLine === null
               ? null
               : h('div', { className: 'prr-conclusion-meta' }, props.metaLine),
+            h('div', { className: 'prr-text' }, conclusion.summary),
           ),
-          section(props.t('blockers'), conclusion.blockers, true, 'blocker'),
-          section(props.t('suggestions'), conclusion.suggestions, false, 'suggestion'),
-          nextSteps.length === 0
-            ? null
-            : h(
-                'div',
-                { className: 'prr-card' },
-                h('div', { className: 'prr-h2', style: { marginTop: 0 } }, props.t('nextSteps')),
-                nextSteps.map((step, index) =>
-                  h('div', { className: 'prr-rowitem', key: index }, h('div', { className: 'prr-rowmain prr-text' }, step)),
+          section(props.t('blockers'), blockerList, 'blocker', props.t('noBlockers'), 1),
+          section(props.t('suggestions'), conclusion.suggestions, 'suggestion', props.t('noneYet'), blockerList.length + 1),
+          h(
+            'div',
+            null,
+            h('div', { className: 'prr-h2' }, props.t('nextSteps')),
+            nextSteps.length === 0
+              ? h('div', { className: 'prr-card' }, h('div', { className: 'prr-subtle' }, props.t('noneYet')))
+              : h(
+                  'div',
+                  { className: 'prr-card' },
+                  nextSteps.map((step, index) =>
+                    h(
+                      'div',
+                      { className: 'prr-rowitem', key: index },
+                      h('span', { className: 'prr-nextbox', 'aria-hidden': 'true' }),
+                      h('div', { className: 'prr-rowmain prr-text' }, step),
+                    ),
+                  ),
                 ),
-              ),
+          ),
         );
       }
 
@@ -397,9 +433,16 @@ window.__ModuleLoader__.load({
         );
       }
 
-      /** One-line conclusion metadata: round, version, generated time, coverage, human/published. */
-      function conclusionMetaLine(review, roundNumber, version, publishedEntries, isCurrent, t) {
-        const parts = [fill(t('metaRound'), { round: roundNumber })];
+      /**
+       * One-line conclusion metadata: commit, round, version, generated time, coverage,
+       * human/published. The commit leads like the published comment's meta line and renders
+       * only when the caller passes a non-empty sha (both ConclusionPage call sites pass it
+       * explicitly: the historical round's own head, the current round's review head).
+       */
+      function conclusionMetaLine(review, roundNumber, version, publishedEntries, isCurrent, t, headSha) {
+        const parts = [];
+        if (typeof headSha === 'string' && headSha !== '') parts.push(`commit ${shortSha(headSha)}`);
+        parts.push(fill(t('metaRound'), { round: roundNumber }));
         parts.push(fill(t('versionOption'), { version: version.version }));
         const rawCreated = version.createdAt ?? review?.conclusionAt ?? 0;
         const stamp = formatClock(typeof rawCreated === 'number' ? rawCreated : 0);

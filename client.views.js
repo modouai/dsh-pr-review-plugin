@@ -749,6 +749,109 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * The published comment's foldable appendix, mirrored on the page: initial-screen risks,
+       * per-file findings, reading order, the round comparison and the unanalyzed files.
+       * Sections with no data are skipped and the whole block stays away when every source is
+       * empty; collapsed by default, content mounts only while open (so a collapsed render
+       * never leaks section text).
+       */
+      function ConclusionAppendix(props) {
+        const { sources, delta, coverage, t } = props;
+        const [open, setOpen] = React.useState(props.defaultOpen === true);
+        const risks = Array.isArray(sources?.risks) ? sources.risks : [];
+        const order = Array.isArray(sources?.order) ? sources.order : [];
+        const rows = findingsOf(Array.isArray(sources?.findings) ? sources.findings : []);
+        const resolved = Array.isArray(delta?.resolved) ? delta.resolved : [];
+        const stillOpen = Array.isArray(delta?.stillOpen) ? delta.stillOpen : [];
+        const unanalyzed = Array.isArray(coverage?.unanalyzed) ? coverage.unanalyzed : [];
+        const describe = (item) => {
+          if (item === null || typeof item !== 'object') return '';
+          const file = typeof item.file === 'string' ? item.file : '';
+          const point = typeof item.point === 'string' && item.point !== ''
+            ? item.point
+            : (typeof item.reason === 'string' ? item.reason : '');
+          if (file === '') return point;
+          return point === '' ? file : `${file} — ${point}`;
+        };
+        // Severity markers mirror the comment's appendix bullets (llm.js COMMENT_SEVERITY_LABELS):
+        // `[阻塞] `/`[提示] ` for issue severity, `[建议] ` for per-file suggestion rows.
+        const severityPrefix = (severity) => `[${t(severity === 'block' ? 'verdictBlock' : 'severityHint')}] `;
+        const line = (label, key) => h('div', { className: 'prr-appendix-line', key }, label);
+        const section = (title, body, key) => h(
+          'div',
+          { className: 'prr-appendix-section', key },
+          h('div', { className: 'prr-h2' }, title),
+          body,
+        );
+        const sections = [];
+        if (risks.length > 0) {
+          sections.push(section(t('appendixRisks'), h(
+            'div',
+            null,
+            risks
+              .filter((item) => item !== null && typeof item === 'object')
+              .map((item, index) => line(`${severityPrefix(item?.severity)}${describe(item)}`, `r-${index}`)),
+          ), 'risks'));
+        }
+        if (rows.length > 0) {
+          sections.push(section(t('appendixFiles'), h(
+            'div',
+            null,
+            rows.map((row, index) => {
+              const base = row.file === '' ? row.point : `${fileLineLabel(row.file, row.line)} — ${row.point}`;
+              return line(
+                row.kind === 'suggestion'
+                  ? `[${t('suggestionTag')}] ${base}`
+                  : `${severityPrefix(row.severity)}${base}`,
+                `f-${index}`,
+              );
+            }),
+          ), 'files'));
+        }
+        if (order.length > 0) {
+          sections.push(section(t('appendixOrder'), h(
+            'div',
+            null,
+            order.map((item, index) => line(`${index + 1}. ${describe(item)}`, `o-${index}`)),
+          ), 'order'));
+        }
+        if (resolved.length > 0 || stillOpen.length > 0) {
+          sections.push(section(t('appendixDelta'), h(
+            'div',
+            null,
+            line(`${t('deltaResolved')} ${resolved.length} · ${t('deltaStillOpen')} ${stillOpen.length}`, 'd-sum'),
+            resolved.map((item, index) => line(`${t('deltaResolved')}：${describe(item)}`, `d-r-${index}`)),
+            stillOpen.map((item, index) => line(`${t('deltaStillOpen')}：${describe(item)}`, `d-s-${index}`)),
+          ), 'delta'));
+        }
+        if (unanalyzed.length > 0) {
+          sections.push(section(t('appendixUnanalyzed'), h(
+            'div',
+            null,
+            unanalyzed.map((file, index) => line(file, `u-${index}`)),
+          ), 'unanalyzed'));
+        }
+        if (sections.length === 0) return null;
+        return h(
+          'details',
+          // Controlled open: the summary's own toggle is preventDefault-ed and the state
+          // re-render applies the attribute, so content only mounts while open.
+          { className: 'prr-appendix', open: open === true ? true : undefined },
+          h(
+            'summary',
+            {
+              onClick: (event) => {
+                event.preventDefault();
+                setOpen((value) => !value);
+              },
+            },
+            t('appendixTitle'),
+          ),
+          open ? sections : null,
+        );
+      }
+
+      /**
        * Conclusion page: the versioned decision (card, items with publish toggles, next
        * steps), the live comment preview, published records and the action footer. Dialogue
        * records (author replies, cross-round delta) live on the overview page.
@@ -822,6 +925,19 @@ window.__ModuleLoader__.load({
           actionsBridge.setNotice(null);
         }, []);
 
+        // The published comment's appendix, mirrored: the current round may add the report's
+        // risks / per-file findings / reading order, while every round carries its own delta
+        // and unanalyzed files. A pinned historical round never inherits the CURRENT round's
+        // coverage — only its own version's persisted coverage counts there.
+        const appendix = h(ConclusionAppendix, {
+          sources: isCurrent ? (props.appendixSources ?? null) : null,
+          delta: isCurrent ? (review.delta ?? selectedRound?.delta ?? null) : (selectedRound?.delta ?? null),
+          coverage: isCurrent
+            ? (selectedVersion?.coverage ?? review.coverage ?? null)
+            : (selectedVersion?.coverage ?? null),
+          t,
+        });
+
         if (!isCurrent) {
           return h(
             'div',
@@ -832,11 +948,15 @@ window.__ModuleLoader__.load({
               : h(ConclusionBlock, {
                   conclusion: selectedVersion.conclusion,
                   t,
+                  pull: review.pull ?? null,
                   onOpenFile: props.onOpenFile,
                   feedbackStates,
                   headerExtra: versionHeader,
-                  metaLine: selectedVersion === null ? null : conclusionMetaLine(review, roundNumber, selectedVersion, publishedEntries, isCurrent, t),
+                  metaLine: selectedVersion === null
+                    ? null
+                    : conclusionMetaLine(review, roundNumber, selectedVersion, publishedEntries, isCurrent, t, selectedRound?.headSha ?? ''),
                 }),
+            appendix,
             h(PublishedBlock, { entries: publishedEntries, t }),
             h('div', { className: 'prr-subtle', style: { marginTop: '10px' } }, t('historyReadOnly')),
           );
@@ -886,7 +1006,7 @@ window.__ModuleLoader__.load({
               onToggle: props.onToggleInclude,
             }
           : null;
-        const metaLine = conclusionMetaLine(review, roundNumber, selectedVersion, publishedEntries, isCurrent, t);
+        const metaLine = conclusionMetaLine(review, roundNumber, selectedVersion, publishedEntries, isCurrent, t, review.headSha);
 
         return h(
           'div',
@@ -894,12 +1014,14 @@ window.__ModuleLoader__.load({
           h(ConclusionBlock, {
             conclusion: selectedVersion.conclusion,
             t,
+            pull: review.pull ?? null,
             onOpenFile: props.onOpenFile,
             feedbackStates,
             headerExtra: versionHeader,
             metaLine,
             includeControl,
           }),
+          appendix,
           h(PublishPreviewSection, {
             preview: props.preview,
             busy: props.previewBusy,
@@ -1019,7 +1141,8 @@ window.__ModuleLoader__.load({
 
       return {
         FilesPane, PhaseBar, FindingList, findingsOf, cleanCountOf, DiffView, FullFileView,
-        FileDetailPanel, ChatBox, OverviewPage, ConclusionPage, PublishPreviewSection, WorkspaceCenter,
+        FileDetailPanel, ChatBox, OverviewPage, ConclusionPage, ConclusionAppendix,
+        PublishPreviewSection, WorkspaceCenter,
       };
     };
   },
