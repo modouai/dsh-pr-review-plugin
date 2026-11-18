@@ -80,9 +80,13 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'prr-pane-head' },
             h('span', { className: 'prr-navrow-mark', 'data-tone': filesTone }),
-            analyzing !== null ? h('span', { className: 'prr-spinner-sm', 'aria-hidden': 'true' }) : null,
             `${t('files')}`,
-            h('span', { className: 'prr-count', title: analyzing === null ? undefined : analyzing.current }, countLabel),
+            h(
+              'span',
+              { className: 'prr-count', title: analyzing === null ? undefined : analyzing.current },
+              analyzing !== null ? h('span', { className: 'prr-spinner-sm', 'aria-hidden': 'true' }) : null,
+              countLabel,
+            ),
             props.manual === true && analyzing === null && files.length > 0
               ? h(Btn, {
                   small: true,

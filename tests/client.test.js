@@ -3570,6 +3570,12 @@ test('FilesPane pins a conclusion entry with live badges', () => {
   const spinners = (rendered) => rendered.elements.filter((element) => element.props?.className === 'prr-spinner-sm');
   assert.equal(spinners(view).length, 0);
   assert.equal(spinners(batching).length, 2);
+  // The files-head spinner sits in the right-aligned count, after the label — like the
+  // rail entries' spinners — and stays absent while idle.
+  const countSpan = batching.elements.find((element) => element.props?.className === 'prr-count');
+  assert.equal(countSpan.children[0]?.props?.className, 'prr-spinner-sm');
+  const idleCount = view.elements.find((element) => element.props?.className === 'prr-count');
+  assert.ok(!idleCount.children.some((child) => child?.props?.className === 'prr-spinner-sm'));
   const concluding = fake.render(fake.React.createElement(parts.FilesPane, {
     ...base,
     phase: { phase: 'concluding', progress: null, nextAction: null, version: 0 },
