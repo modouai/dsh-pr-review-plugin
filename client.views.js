@@ -48,8 +48,9 @@ window.__ModuleLoader__.load({
           ? `${files.length} ${t('fileUnit')}`
           : fill(t('analyzingFiles'), { done, total: analyzing.total })
             + (failed > 0 ? fill(t('analyzingFailed'), { failed }) : '');
-        const failedFiles = (review?.explanations ?? []).filter((entry) => entry?.status === 'error').length;
-        const analyzedFiles = cleanCountOf(review).done;
+        const fileCounts = React.useMemo(() => cleanCountOf(review), [review]);
+        const failedFiles = fileCounts.failed;
+        const analyzedFiles = fileCounts.done;
         const filesTone = filesBadgeTone(analyzing, failedFiles, analyzedFiles, files.length);
         return h(
           'aside',
@@ -221,14 +222,16 @@ window.__ModuleLoader__.load({
         const entries = Array.isArray(review?.explanations) ? review.explanations : [];
         let done = 0;
         let clean = 0;
+        let failed = 0;
         for (const entry of entries) {
           if (entry === null || typeof entry !== 'object') continue;
+          if (entry.status === 'error') failed += 1;
           if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
           done += 1;
           const issues = Array.isArray(entry.explanation.issues) ? entry.explanation.issues : [];
           if (issues.length === 0) clean += 1;
         }
-        return { done, clean };
+        return { done, clean, failed };
       }
 
       function DiffView(props) {

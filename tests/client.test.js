@@ -377,6 +377,23 @@ function plain(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+/**
+ * First raw (unexpanded) element matching `match`, children included. Hook-free components
+ * can be called directly, so their returned trees expose the props handed to child elements.
+ */
+function findElement(node, match) {
+  if (node === null || node === undefined || typeof node !== 'object') return null;
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = findElement(item, match);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (match(node)) return node;
+  return findElement(node.props?.children, match);
+}
+
 /** Localized `t()` straight from the client DICT (zh by default). */
 function translator(parts, locale = 'zh') {
   const table = parts.DICT[locale];
@@ -2644,6 +2661,42 @@ test('the workspace view renders the open file in the narrow sidebar layout', ()
   assert.ok(view.textOnly.includes('src/a.js'), 'the diff head names the open file');
   assert.ok(view.textOnly.includes('+12') && view.textOnly.includes('-3'), 'the diff head shows the file stats');
   assert.ok(view.textOnly.includes(t('wrapOn')), 'the wrap toggle uses the active locale');
+
+  // The conclusion page replaces the file view even in a narrow sidebar: one content pane,
+  // no analysis aside, and the diff/analysis toggle loses its meaning and disappears.
+  const conclusionModel = {
+    ...model,
+    mode: 'conclusion',
+    filePath: '',
+    versionPick: {},
+    pickConclusionVersion: () => {},
+    concludeBusy: false,
+    concluding: null,
+    concludeCancelBusy: false,
+    cancelConclude: () => {},
+    reviewBusy: false,
+    runConclude: () => {},
+    explainedCount: 0,
+    fileFindings: [],
+    phase: { phase: 'published', progress: null, nextAction: 'append', version: 1 },
+    publishBusy: false,
+    previewBusy: false,
+    previewRefreshBusy: false,
+    feedbackBusy: false,
+    checkFeedback: () => {},
+    preview: null,
+    togglePreviewItem: () => {},
+    staleInfo: null,
+    requestPreview: () => {},
+  };
+  const conclusion = fake.render(fake.React.createElement(parts.WorkspaceView, { model: conclusionModel }));
+  const conclusionClasses = new Set(conclusion.elements.flatMap((element) => (
+    typeof element.props?.className === 'string' ? element.props.className.split(' ') : []
+  )));
+  assert.ok(conclusionClasses.has('prr-overview-pane'), 'the conclusion page renders as the single content pane');
+  assert.ok(!conclusionClasses.has('prr-detail'), 'the conclusion page skips the analysis aside');
+  assert.ok(!conclusionClasses.has('prr-subseg'), 'the conclusion page drops the narrow diff/analysis toggle');
+  assert.ok(conclusion.elements.some((element) => element.props?.className === 'prr-files'), 'the file list stays visible');
 });
 
 test('dragged columns are clamped to usable ranges and can be reset', () => {
@@ -2989,7 +3042,7 @@ test('cleanCountOf counts finished analyses without issues', () => {
       { file: 'c.js', status: 'error', explanation: null },
     ],
   };
-  assert.deepEqual(plain(parts.cleanCountOf(review)), { done: 2, clean: 1 });
+  assert.deepEqual(plain(parts.cleanCountOf(review)), { done: 2, clean: 1, failed: 1 });
 });
 
 test('overviewFooter gates publish and notices by page', () => {
@@ -3536,6 +3589,33 @@ test('FilesPane pins a conclusion entry with live badges', () => {
   assert.ok(active.textOnly.includes('v3 已发布'));
   const activeTones = active.elements.filter((element) => element.props?.className === 'prr-navrow-badge');
   assert.equal(activeTones.some((element) => element.props?.['data-tone'] === 'ok'), true);
+});
+
+test('the conclusion pane resets the publish preview when the version changes', () => {
+  const { parts } = loadClient();
+  const picked = [];
+  const previews = [];
+  const model = {
+    t: translator(parts),
+    review: makeReview({ round: 2 }),
+    prNumber: 7,
+    sidebar: true,
+    list: {},
+    selectedRoundNumber: 2,
+    versionPick: {},
+    pickConclusionVersion: (round, version, latestVersion) => picked.push([round, version, latestVersion]),
+    requestPreview: (options) => previews.push(options),
+    staleInfo: null,
+    fileFindings: [],
+  };
+  // The pane is a hook-free element builder, so the test can call it directly and read the
+  // raw props the conclusion page receives instead of expanding the whole subtree.
+  const tree = parts.WorkspaceConclusionPane({ model, paneHeader: null, chat: null });
+  const page = findElement(tree, (node) => node.type === parts.ConclusionPage);
+  assert.ok(page, 'the conclusion pane renders the conclusion page');
+  page.props.onPickVersion(2, 1, 2);
+  assert.deepEqual(plain(picked), [[2, 1, 2]], 'the version pick still reaches the selection hook');
+  assert.deepEqual(plain(previews), [{ quiet: true }], 'a version switch re-fetches the preview quietly');
 });
 
 test('ConclusionPage keeps its hook order across pending/historical/current transitions', () => {

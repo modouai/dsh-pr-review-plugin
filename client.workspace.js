@@ -98,11 +98,13 @@ window.__ModuleLoader__.load({
           roundPick, setRoundPick, versionPick, setVersionPick, selectRound, pickConclusionVersion,
         } = useRoundSelection(review, mode, setMode);
         const concluding = review?.concluding ?? null;
+        // Staleness belongs to the live round only: a pinned historical round is a read-only
+        // snapshot, so it never claims to be stale or to have updates.
         const staleInfo = React.useMemo(() => {
-          if (review === null || review === undefined) return null;
+          if (review === null || review === undefined || selectedIsCurrent === false) return null;
           const current = reviewRounds.length === 0 ? null : reviewRounds[reviewRounds.length - 1];
           return staleInfoOf(review, versionsOf(review, current, true));
-        }, [review, reviewRounds]);
+        }, [review, reviewRounds, selectedIsCurrent]);
         const phase = React.useMemo(
           () => derivePhase(review, staleInfo, { manual: list?.autoAnalyze === false }),
           [review, staleInfo, list],
@@ -117,7 +119,8 @@ window.__ModuleLoader__.load({
           previousPhaseRef.current = phase.phase;
           if (!shouldAutoSwitchPhase(previous, phase.phase, mode, selectedIsCurrent)) return;
           setMode('conclusion');
-        }, [phase, mode, selectedIsCurrent]);
+          // `phase` is a fresh object per poll; only the phase string may re-fire this effect.
+        }, [phase.phase, mode, selectedIsCurrent]);
 
         const initialRef = React.useRef({ number: props.initialNumber, file: props.initialFile });
         const rememberRef = React.useRef(props.onRemember);
@@ -749,6 +752,21 @@ window.__ModuleLoader__.load({
           phase,
         });
 
+        // One content decision shared by the sidebar and non-sidebar layouts: the conclusion
+        // page wins, then the overview; a file view is either the collapsed single pane
+        // (narrow sidebars) or the center/detail pair.
+        const contentPane = conclusionMode
+          ? conclusionPane
+          : overviewPane;
+        const fileViewPane = narrowFile
+          ? h(
+              'section',
+              { className: 'prr-overview-pane' },
+              paneHeader,
+              sidebarPane === 'analysis' ? analysisPane : center,
+            )
+          : h(React.Fragment, null, center, resizer('detail'), fileDetailPane);
+
         return h(
           React.Fragment,
           null,
@@ -769,30 +787,9 @@ window.__ModuleLoader__.load({
                 )
               : noOpenPrs
                 ? h('div', { className: 'prr-zero', key: 'no-prs', style: { padding: '32px 24px' } }, t('emptyPr'))
-                : sidebar
-                  ? (conclusionMode
-                      ? h('div', { className: 'prr-body' }, filesPane, resizer('files'), conclusionPane)
-                      : overviewMode
-                        ? h('div', { className: 'prr-body' }, filesPane, resizer('files'), overviewPane)
-                        : narrowFile
-                          ? h(
-                              'div',
-                              { className: 'prr-body' },
-                              filesPane,
-                              resizer('files'),
-                              h(
-                                'section',
-                                { className: 'prr-overview-pane' },
-                                paneHeader,
-                                sidebarPane === 'analysis' ? analysisPane : center,
-                              ),
-                            )
-                          : h('div', { className: 'prr-body' }, filesPane, resizer('files'), center, resizer('detail'), fileDetailPane))
-                  : (conclusionMode
-                      ? h('div', { className: 'prr-body' }, filesPane, resizer('files'), conclusionPane)
-                      : overviewMode
-                        ? h('div', { className: 'prr-body' }, filesPane, resizer('files'), overviewPane)
-                        : h('div', { className: 'prr-body' }, filesPane, resizer('files'), center, resizer('detail'), fileDetailPane)),
+                : (conclusionMode || overviewMode
+                    ? h('div', { className: 'prr-body' }, filesPane, resizer('files'), contentPane)
+                    : h('div', { className: 'prr-body' }, filesPane, resizer('files'), fileViewPane)),
             sidebar
               ? h(
                   'div',
@@ -963,7 +960,12 @@ window.__ModuleLoader__.load({
                 t,
                 selectedRoundNumber,
                 versionPick,
-                onPickVersion: pickConclusionVersion,
+                onPickVersion: (round, version, latestVersion) => {
+                  pickConclusionVersion(round, version, latestVersion);
+                  // A version switch changes the item list: re-fetch quietly so the
+                  // selection resets to the new version's defaults instead of leaking.
+                  void requestPreview({ quiet: true });
+                },
                 concludeBusy,
                 concluding,
                 cancelBusy: concludeCancelBusy,

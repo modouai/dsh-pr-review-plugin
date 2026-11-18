@@ -93,12 +93,12 @@ test('phase and conclusion badge text follow the phase', () => {
   const analyzing = { phase: 'analyzing', progress: { done: 12, total: 30, failed: 2 }, nextAction: null, version: 0 };
   assert.equal(
     parts.phaseStateText(analyzing, t),
-    'badgeAnalyzing-fallback badgeAnalyzingFailed-fallback',
+    'badgeAnalyzing badgeAnalyzingFailed',
   );
 });
 ```
 
-> 注意：最后这条断言依赖 `fill()` 对缺失 key 的行为。若 `fill` 对未知 key 原样返回模板（含 `{done}`），就按实际输出改断言——先跑一次看输出再定字符串，断言改为精确等于实际拼接结果。
+> 注意：断言的最终值已对照 `fill()` 语义校准并验证——不含占位符的模板原样返回，所以测试里 `t` 直返 key 时，拼接结果就是这两个裸 key。
 
 - [ ] **Step 3: 运行测试确认失败**
 
