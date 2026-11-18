@@ -586,6 +586,80 @@ test('no preview delta without previous items or without finished analyses', asy
   }
 });
 
+test('an all-clean round with every analysis done shows every previous item as resolved', async () => {
+  const files = [
+    { path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+    { path: 'src/b.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+  ];
+  const cleanExplanation = { verdict: 'pass', summary: '没有发现', issues: [], suggestions: [] };
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    delta: null,
+    files,
+    published: [],
+    publishedItems: [],
+    previousRound: {
+      round: 1,
+      headSha: 'abc123',
+      conclusion: null,
+      items: [
+        { kind: 'blocker', file: 'src/a.js', point: '旧问题' },
+        { kind: 'suggestion', file: 'src/b.js', point: '旧建议' },
+      ],
+    },
+    explanations: [
+      { file: 'src/a.js', status: 'done', error: null, explanation: cleanExplanation, chat: [], updatedAt: 150 },
+      { file: 'src/b.js', status: 'done', error: null, explanation: cleanExplanation, chat: [], updatedAt: 150 },
+    ],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const review = await plugin.review();
+    // Zero findings plus full coverage is the honest「全部已修复」case.
+    assert.equal(review.delta.preview, true);
+    assert.deepEqual(review.delta.resolved, [
+      { kind: 'blocker', file: 'src/a.js', point: '旧问题' },
+      { kind: 'suggestion', file: 'src/b.js', point: '旧建议' },
+    ]);
+    assert.deepEqual(review.delta.stillOpen, []);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('zero findings with an analysis still pending stays hidden', async () => {
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    delta: null,
+    files: [
+      { path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+      { path: 'src/b.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+    ],
+    previousRound: {
+      round: 1,
+      headSha: 'abc123',
+      conclusion: null,
+      items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }],
+    },
+    explanations: [
+      // Only one of two files analysed, and it found nothing: not yet honest to report resolved.
+      { file: 'src/a.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: '没有发现', issues: [], suggestions: [] }, chat: [], updatedAt: 150 },
+    ],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    assert.equal((await plugin.review()).delta, null);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 test('async /conclude: returns started, rejects duplicates with 409, appends a model version', async () => {
   const conclusionJson = JSON.stringify({
     verdict: 'block',

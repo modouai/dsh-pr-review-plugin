@@ -243,7 +243,10 @@ function serializeReview(record) {
  * Live resolved-vs-still-open preview from the finished per-file findings, for the
  * window before a conclusion exists. Honesty boundary: an early「已修复」only means
  * 「本轮未再发现」— analyses that have not finished cannot clear a previous item, so
- * the preview sharpens as analyses complete. The result is ephemeral (never written
+ * the preview sharpens as analyses complete. Completeness rule: once every file is
+ * analysed, zero findings honestly means 全部已修复 and every previous item shows as
+ * resolved; while analyses are still incomplete and nothing has been found yet the
+ * preview stays hidden (不可知, not 已修复). The result is ephemeral (never written
  * to the record, the cache, or the round history); the persisted conclusion delta
  * that conclude writes always wins over it (see reviewDeltaOf).
  */
@@ -254,9 +257,12 @@ function previewDeltaOf(record) {
   const entries = record.explanations instanceof Map
     ? Array.from(record.explanations, ([filePath, entry]) => ({ ...entry, file: filePath }))
     : (Array.isArray(record.explanations) ? record.explanations : []);
+  const totalFiles = Array.isArray(record.files) ? record.files.length : 0;
   const current = [];
+  let analyzedFiles = 0;
   for (const entry of entries) {
     if (entry === null || typeof entry !== 'object' || entry.status !== 'done') continue;
+    analyzedFiles += 1;
     if (entry.explanation === null || entry.explanation === undefined) continue;
     const file = typeof entry.file === 'string' ? entry.file : '';
     for (const issue of Array.isArray(entry.explanation.issues) ? entry.explanation.issues : []) {
@@ -268,7 +274,9 @@ function previewDeltaOf(record) {
       });
     }
   }
-  if (current.length === 0) return null;
+  // An all-clean round is only honest once nothing is left un-analysed.
+  const analysesComplete = totalFiles > 0 && analyzedFiles >= totalFiles;
+  if (current.length === 0 && !analysesComplete) return null;
   const compared = compareComments(previousItems, current);
   return {
     round: record.round ?? 1,
