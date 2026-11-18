@@ -15,7 +15,8 @@ window.__ModuleLoader__.load({
         Btn, FileRow, VerdictPill, isAnalyzing, fill, text, suggestionText, cleanStepTitle,
         parseUnifiedDiff, hunkRange, mapWalkthroughToHunks, publishedOfRound, roundsOf,
         staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge, shortSha,
-        phaseStateText, conclusionBadgeText, conclusionBadgeTone, fileLineLabel, overviewFooterVisible,
+        phaseStateText, conclusionBadgeText, conclusionBadgeTone, processBadgeTone, filesBadgeTone,
+        fileLineLabel, overviewFooterVisible,
       } = core;
       const {
         RoundMeta, DeltaBlock, VersionSelector,
@@ -28,7 +29,8 @@ window.__ModuleLoader__.load({
       /**
        * Left column: the overview entry, the changed-file header, the file list, and — on the
        * row right below the list — the conclusion entry. The rail order is the review's
-       * reading order: overview, files, conclusion; badges carry the live state and tone.
+       * reading order: overview, files, conclusion; badges and leading dots carry the
+       * live state and tone.
        */
       function FilesPane(props) {
         const {
@@ -46,6 +48,9 @@ window.__ModuleLoader__.load({
           ? `${files.length} ${t('fileUnit')}`
           : fill(t('analyzingFiles'), { done, total: analyzing.total })
             + (failed > 0 ? fill(t('analyzingFailed'), { failed }) : '');
+        const failedFiles = (review?.explanations ?? []).filter((entry) => entry?.status === 'error').length;
+        const analyzedFiles = cleanCountOf(review).done;
+        const filesTone = filesBadgeTone(analyzing, failedFiles, analyzedFiles, files.length);
         return h(
           'aside',
           { className: 'prr-files', style },
@@ -54,16 +59,18 @@ window.__ModuleLoader__.load({
             {
               type: 'button',
               className: 'prr-navrow',
+              'data-tone': processBadgeTone(phase),
               'data-active': overviewMode === true ? 'true' : 'false',
               onClick: () => onSelectOverview(),
             },
-            h('span', { className: 'prr-navrow-mark' }),
+            h('span', { className: 'prr-navrow-mark', 'data-tone': processBadgeTone(phase) }),
             t('overview'),
-            h('span', { className: 'prr-navrow-badge' }, phaseStateText(phase, t)),
+            h('span', { className: 'prr-navrow-badge', 'data-tone': processBadgeTone(phase) }, phaseStateText(phase, t)),
           ),
           h(
             'div',
             { className: 'prr-pane-head' },
+            h('span', { className: 'prr-navrow-mark', 'data-tone': filesTone }),
             `${t('files')}`,
             h('span', { className: 'prr-count', title: analyzing === null ? undefined : analyzing.current }, countLabel),
             props.manual === true && analyzing === null && files.length > 0
@@ -102,7 +109,7 @@ window.__ModuleLoader__.load({
                 'data-active': conclusionMode === true ? 'true' : 'false',
                 onClick: () => onSelectConclusion(),
               },
-              h('span', { className: 'prr-navrow-mark' }),
+              h('span', { className: 'prr-navrow-mark', 'data-tone': conclusionBadgeTone(phase) }),
               t('conclusionNav'),
               h('span', { className: 'prr-navrow-badge', 'data-tone': conclusionBadgeTone(phase) }, conclusionBadgeText(phase, t)),
             ),

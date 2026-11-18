@@ -84,6 +84,8 @@ const EXPOSED = [
   'phaseStateText',
   'conclusionBadgeText',
   'conclusionBadgeTone',
+  'processBadgeTone',
+  'filesBadgeTone',
   'PhaseBar',
   'FindingList',
   'findingsOf',
@@ -2859,6 +2861,31 @@ test('conclusionBadgeTone maps phases to badge tones', () => {
   assert.equal(tone('error'), 'danger');
 });
 
+test('processBadgeTone maps phases to the overview entry tones', () => {
+  const { parts } = loadClient();
+  const tone = (phase) => parts.processBadgeTone({ phase, progress: null, nextAction: null, version: 0 });
+  assert.equal(parts.processBadgeTone(null), 'none');
+  assert.equal(tone('error'), 'danger');
+  assert.equal(tone('reviewing'), 'info');
+  assert.equal(tone('analyzing'), 'info');
+  assert.equal(tone('concluding'), 'info');
+  assert.equal(tone('ready'), 'ok');
+  assert.equal(tone('concluded'), 'ok');
+  assert.equal(tone('concluded-stale'), 'ok');
+  assert.equal(tone('published'), 'ok');
+  assert.equal(tone('published-stale'), 'ok');
+});
+
+test('filesBadgeTone maps the analysis progress to header tones', () => {
+  const { parts } = loadClient();
+  assert.equal(parts.filesBadgeTone({ done: 3, total: 14, failed: 0, current: 'x' }, 0, 3, 14), 'info');
+  assert.equal(parts.filesBadgeTone({ done: 1, total: 2, failed: 1 }, 1, 1, 2), 'info');
+  assert.equal(parts.filesBadgeTone(null, 2, 5, 8), 'danger');
+  assert.equal(parts.filesBadgeTone(null, 0, 14, 14), 'ok');
+  assert.equal(parts.filesBadgeTone(null, 0, 0, 0), 'none');
+  assert.equal(parts.filesBadgeTone(null, 0, 5, 14), 'none');
+});
+
 test('shouldAutoSwitchPhase only lands on the conclusion after the conclude job finishes', () => {
   const { parts } = loadClient();
   const decides = parts.shouldAutoSwitchPhase;
@@ -3478,6 +3505,28 @@ test('FilesPane pins a conclusion entry with live badges', () => {
   assert.ok(view.elements.some((element) => element.props?.className === 'prr-files-tail'));
   const tones = view.elements.filter((element) => element.props?.className === 'prr-navrow-badge');
   assert.equal(tones.some((element) => element.props?.['data-tone'] === 'none'), true);
+  // Both rail entries carry a tone: overview is ok while the phase is ready, conclusion none.
+  const navrows = view.elements.filter((element) => element.props?.className === 'prr-navrow');
+  assert.equal(navrows.length, 2);
+  assert.deepEqual(
+    navrows.map((element) => element.props?.['data-tone']).sort(),
+    ['none', 'ok'],
+  );
+  assert.equal(tones.some((element) => element.props?.['data-tone'] === 'ok'), true);
+  // Every leading mark is toned: overview ok, conclusion none, files header none (nothing run).
+  const marks = view.elements.filter((element) => element.props?.className === 'prr-navrow-mark');
+  assert.equal(marks.length, 3);
+  assert.deepEqual(
+    marks.map((element) => element.props?.['data-tone']).sort(),
+    ['none', 'none', 'ok'],
+  );
+  // A running batch turns the files-header dot info.
+  const batching = fake.render(fake.React.createElement(parts.FilesPane, {
+    ...base,
+    analyzing: { done: 3, total: 14, failed: 0, current: 'src/a.js' },
+  }));
+  const batchingMarks = batching.elements.filter((element) => element.props?.className === 'prr-navrow-mark');
+  assert.equal(batchingMarks.some((element) => element.props?.['data-tone'] === 'info'), true);
 
   const active = fake.render(fake.React.createElement(parts.FilesPane, {
     ...base,
