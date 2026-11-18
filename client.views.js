@@ -52,6 +52,9 @@ window.__ModuleLoader__.load({
         const failedFiles = fileCounts.failed;
         const analyzedFiles = fileCounts.done;
         const filesTone = filesBadgeTone(analyzing, failedFiles, analyzedFiles, files.length);
+        const processing = phase !== null && phase !== undefined
+          && (phase.phase === 'reviewing' || phase.phase === 'analyzing' || phase.phase === 'concluding');
+        const concluding = phase !== null && phase !== undefined && phase.phase === 'concluding';
         return h(
           'aside',
           { className: 'prr-files', style },
@@ -66,12 +69,18 @@ window.__ModuleLoader__.load({
             },
             h('span', { className: 'prr-navrow-mark', 'data-tone': processBadgeTone(phase) }),
             t('overview'),
-            h('span', { className: 'prr-navrow-badge', 'data-tone': processBadgeTone(phase) }, phaseStateText(phase, t)),
+            h(
+              'span',
+              { className: 'prr-navrow-badge', 'data-tone': processBadgeTone(phase) },
+              processing === true ? h('span', { className: 'prr-spinner-sm', 'aria-hidden': 'true' }) : null,
+              phaseStateText(phase, t),
+            ),
           ),
           h(
             'div',
             { className: 'prr-pane-head' },
             h('span', { className: 'prr-navrow-mark', 'data-tone': filesTone }),
+            analyzing !== null ? h('span', { className: 'prr-spinner-sm', 'aria-hidden': 'true' }) : null,
             `${t('files')}`,
             h('span', { className: 'prr-count', title: analyzing === null ? undefined : analyzing.current }, countLabel),
             props.manual === true && analyzing === null && files.length > 0
@@ -112,7 +121,12 @@ window.__ModuleLoader__.load({
               },
               h('span', { className: 'prr-navrow-mark', 'data-tone': conclusionBadgeTone(phase) }),
               t('conclusionNav'),
-              h('span', { className: 'prr-navrow-badge', 'data-tone': conclusionBadgeTone(phase) }, conclusionBadgeText(phase, t)),
+              h(
+                'span',
+                { className: 'prr-navrow-badge', 'data-tone': conclusionBadgeTone(phase) },
+                concluding === true ? h('span', { className: 'prr-spinner-sm', 'aria-hidden': 'true' }) : null,
+                conclusionBadgeText(phase, t),
+              ),
             ),
           ),
         );
@@ -122,11 +136,17 @@ window.__ModuleLoader__.load({
       function PhaseBar(props) {
         const { phase, round, t } = props;
         if (phase === null || phase === undefined) return null;
+        const spinning = phase.phase === 'reviewing' || phase.phase === 'analyzing' || phase.phase === 'concluding';
         return h(
           'div',
           { className: 'prr-phasebar' },
           h('span', null, fill(t('phaseRound'), { round: round ?? 1 })),
-          h('span', null, phaseStateText(phase, t)),
+          h(
+            'span',
+            null,
+            spinning === true ? h('span', { className: 'prr-spinner-sm', 'aria-hidden': 'true' }) : null,
+            phaseStateText(phase, t),
+          ),
         );
       }
 

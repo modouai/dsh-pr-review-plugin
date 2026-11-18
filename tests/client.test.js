@@ -2284,6 +2284,9 @@ test('the review root reserves the composer band and lets the content scroll its
   assert.ok(filelist.includes('flex:0 1 auto'));
   assert.ok(!cssRule(css, '.prr-files-tail').includes('margin-top:auto'));
   assert.ok(css.includes('.prr-navrow-badge[data-tone="ok"]'));
+  const spinnerSm = cssRule(css, '.prr-spinner-sm');
+  assert.ok(spinnerSm, 'small spinner rule missing');
+  assert.ok(spinnerSm.includes('animation'));
 });
 
 test('round pill CSS keeps the tone and marks the selection without a brand ring', () => {
@@ -2968,6 +2971,14 @@ test('PhaseBar renders the round and the phase text', () => {
   }));
   assert.ok(view.textOnly.includes('第 2 轮'));
   assert.ok(view.textOnly.includes('分析 12/30'));
+  // The analyzing bar spins; a settled phase renders no spinner at all.
+  assert.ok(view.elements.some((element) => String(element.props?.className ?? '').includes('prr-spinner')));
+  const settled = fake.render(fake.React.createElement(parts.PhaseBar, {
+    phase: { phase: 'ready', progress: null, nextAction: null, version: 0 },
+    round: 2,
+    t,
+  }));
+  assert.ok(!settled.elements.some((element) => String(element.props?.className ?? '').includes('prr-spinner')));
   const empty = fake.render(fake.React.createElement(parts.PhaseBar, { phase: null, round: 1, t }));
   assert.equal(empty.textOnly, '');
 });
@@ -3535,10 +3546,20 @@ test('FilesPane pins a conclusion entry with live badges', () => {
   // A running batch turns the files-header dot info.
   const batching = fake.render(fake.React.createElement(parts.FilesPane, {
     ...base,
+    phase: { phase: 'analyzing', progress: { done: 3, total: 14, failed: 0 }, nextAction: null, version: 0 },
     analyzing: { done: 3, total: 14, failed: 0, current: 'src/a.js' },
   }));
   const batchingMarks = batching.elements.filter((element) => element.props?.className === 'prr-navrow-mark');
   assert.equal(batchingMarks.some((element) => element.props?.['data-tone'] === 'info'), true);
+  // In-progress states spin: analyzing spins the overview badge and the files head only.
+  const spinners = (rendered) => rendered.elements.filter((element) => element.props?.className === 'prr-spinner-sm');
+  assert.equal(spinners(view).length, 0);
+  assert.equal(spinners(batching).length, 2);
+  const concluding = fake.render(fake.React.createElement(parts.FilesPane, {
+    ...base,
+    phase: { phase: 'concluding', progress: null, nextAction: null, version: 0 },
+  }));
+  assert.equal(spinners(concluding).length, 2);
 
   const active = fake.render(fake.React.createElement(parts.FilesPane, {
     ...base,
