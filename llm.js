@@ -306,16 +306,15 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
     '  "logic": "整体逻辑分析（只写全局）：这个文件原来做什么 → 现在整体变成怎样 → 函数/模块的上下游调用关系 → 数据与状态怎么流动 → 关键边界条件与错误路径。不要复述 walkthrough 中各段落的具体改动细节。篇幅随改动规模自适应：大改动 400-800 字，小改动 200-400 字即可，不要为凑字数填充。",',
     '  "walkthrough": [{ "title": "段落/函数名 + 一句话作用（如「cleanupInterruptedMacInstall：启动时清理中断残留」），不要写 hunk 编号", "detail": "用人话讲清：这段做了什么、为什么需要它、影响谁、有什么风险；2-5 句；不要复述 logic 的整体链路，不要把审查意见写进来", "hunk": 1, "context": { "label": "所属函数/类名", "startLine": 230, "endLine": 275 } }],',
     '  "changes": "逐类说明具体变化：新增了什么、删除了什么、重命名/移动了什么",',
-    '  "concerns": [{ "severity": "block | suggest", "point": "问题 + 影响 + 修法（一条只写一个核心问题）", "line": 0 }],',
+    '  "concerns": [{ "severity": "block | suggest", "point": "问题 + 影响（一条只写一个核心问题）", "suggestion": "具体修法（可选；没有明确修法就省略，不要把修法写进 point）", "line": 0 }],',
     '  "evidenceNeeds": [{ "concern": 1, "kind": "callers | definition | callee | schema | test | file", "path": "文件路径", "symbol": "符号名", "reason": "为什么需要它" }],',
-    '  "suggestions": ["可执行的修改建议"],',
     '  "verdict": "block | suggest | pass"',
     '}',
-    'logic 只写全局、walkthrough 只写局部，两者不得互相复述；walkthrough 按 diff 规模 1-3 条（改动很小时 1 条即可）、按 diff 的 hunk 顺序覆盖主要改动；hunk 是该条分析对应的 diff hunk 序号（从 1 开始，按 @@ 出现顺序计数），不确定写 0；title 禁止出现「hunk」「第 N 段」这类编号；detail 面向第一次读这段代码的人，术语首次出现要顺带解释，问题与建议写到 concerns/suggestions，不要写进 walkthrough；',
+    'logic 只写全局、walkthrough 只写局部，两者不得互相复述；walkthrough 按 diff 规模 1-3 条（改动很小时 1 条即可）、按 diff 的 hunk 顺序覆盖主要改动；hunk 是该条分析对应的 diff hunk 序号（从 1 开始，按 @@ 出现顺序计数），不确定写 0；title 禁止出现「hunk」「第 N 段」这类编号；detail 面向第一次读这段代码的人，术语首次出现要顺带解释，问题与建议写到 concerns，不要写进 walkthrough；',
     'context 用于在 diff 里展开这段改动所属的完整函数/类：label 写函数/类名，startLine/endLine 是它在上面「完整内容」里的起止行号（用给出的行号，1-based，跨语言通用）；该段改动不在任何函数/类内（如 Markdown、配置文件）或你不确定时，context 写 null。',
     '同时看测试：这次改动需要补充或更新哪些测试；如果只给了实现、没有相关测试，在 summary 里点明这个测试空白。',
-    '如果这次改动引入重复分支、兼容回退或单次使用的包装层，用 suggest 指出可化简之处。',
-    'concerns 为空数组表示没有发现问题；line 用 diff 中的新文件行号，不确定写 0。',
+    '如果这次改动引入重复分支、兼容回退或单次使用的包装层，在 concerns 里用 suggest 指出可化简之处；纯改进点（补测试、抽公共 helper 等没有具体缺陷的）也必须作为 severity 为 suggest 的 concern 输出，修法写进 suggestion。',
+    'concerns 为空数组表示没有发现问题；point 只写问题与影响，不要把修法混进 point；line 用 diff 中的新文件行号，不确定写 0。',
     'evidenceNeeds 必须覆盖每个 concern（concern 是 1-based 序号）：kind=file 指向本文件也算取证；无法核实的由复审放进未验证项，不要写进 point。',
   ].join('\n');
   return { system: reviewerSystem(language), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 12000, timeoutMs: 600_000 };
@@ -339,15 +338,15 @@ function verifierSystem(language) {
 function verifyPromptBody(header, concerns, evidence, missing, language, extra = {}) {
   const list = Array.isArray(concerns) ? concerns : [];
   const missingList = Array.isArray(missing) ? missing : [];
-  const suggestions = Array.isArray(extra.suggestions)
-    ? extra.suggestions.filter((item) => typeof item === 'string' && item.trim() !== '')
-    : [];
   const diffText = typeof extra.diffText === 'string' ? extra.diffText.trim() : '';
   const candidateLines = list.length === 0
     ? ['（无候选问题）']
     : list.map((item, index) => {
         const where = item.file === '' ? '' : ` [${item.file}${item.line > 0 ? `:${item.line}` : ''}]`;
-        return `${index + 1}. [${item.severity}]${where} ${item.point}`;
+        const advice = typeof item.suggestion === 'string' && item.suggestion !== ''
+          ? `\n   —— ${language === 'en' ? 'Suggestion' : '建议'}：${item.suggestion}`
+          : '';
+        return `${index + 1}. [${item.severity}]${where} ${item.point}${advice}`;
       });
   const missingLines = missingList.length === 0 ? ['（无）'] : missingList.map((item) => `- ${item}`);
   const lines = [
@@ -363,10 +362,7 @@ function verifyPromptBody(header, concerns, evidence, missing, language, extra =
     ...missingLines,
   ];
   if (diffText !== '') {
-    lines.push('', '## 该文件的 diff（用来判断建议是否已经实现）', diffText);
-  }
-  if (suggestions.length > 0) {
-    lines.push('', '## 候选改进建议（index 从 1 开始）', ...suggestions.map((item, index) => `${index + 1}. ${item}`));
+    lines.push('', '## 该文件的 diff（用来判断候选是否已经实现）', diffText);
   }
   lines.push(
     '',
@@ -383,19 +379,11 @@ function verifyPromptBody(header, concerns, evidence, missing, language, extra =
     '只看候选与证据，不要引用第一轮的推理，也不要重新审查整个文件。',
     '如果证据里发现了新的、可确认的问题，写进 extraIssues，带上 confidence 并确保能引用证据中的代码；否则不要输出。',
     '规范类问题必须引用规范原文（如「CLAUDE.md 要求……」），没有原文就按未验证处理。',
+    '候选（含纯 suggest 改进点）已经由本次 diff 或现有代码实现、或只是复述现状的，confidence 打 24 以下直接丢弃；不要因为「有价值」而保留已实现的条目。',
   );
-  if (suggestions.length > 0) {
-    lines.push(
-      '对每条候选改进建议给出 keep：如果该建议已经由本次 diff 或现有代码实现，keep 为 false 并写明 reason；仍存在缺口才为 true。',
-      '不要因为建议「有价值」而保留已经实现的条目。每条建议都必须返回一条 suggestionResult（index 从 1 开始）。',
-    );
-  }
   lines.push('', '请输出严格 JSON（不要输出 JSON 以外的解释）：', '{');
-  lines.push('  "results": [{ "index": 1, "confidence": 85, "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0, "missing": "" }],');
-  lines.push('  "extraIssues": [{ "confidence": 90, "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0 }]' + (suggestions.length > 0 ? ',' : ''));
-  if (suggestions.length > 0) {
-    lines.push('  "suggestionResults": [{ "index": 1, "keep": true, "reason": "" }]');
-  }
+  lines.push('  "results": [{ "index": 1, "confidence": 85, "severity": "block | suggest", "point": "问题 + 影响", "suggestion": "具体修法（可选；沿用候选的修法或按证据修正）", "line": 0, "missing": "" }],');
+  lines.push('  "extraIssues": [{ "confidence": 90, "severity": "block | suggest", "point": "问题 + 影响", "suggestion": "具体修法（可选）", "line": 0 }]');
   lines.push('}', language === 'en' ? 'Write the human-readable fields in English.' : '');
   return lines.filter((line) => line !== '').join('\n');
 }
@@ -438,7 +426,7 @@ export function buildExplainVerifyPrompt(pull, file, concerns, evidence, missing
           evidence,
           missing,
           language,
-          { suggestions: options.suggestions, diffText: options.diffText },
+          { diffText: options.diffText },
         ),
       }],
     }],
@@ -652,7 +640,9 @@ export function normalizeConcerns(raw) {
       severity: item.severity === 'block' ? 'block' : 'suggest',
       file: typeof item.file === 'string' ? item.file : '',
       point: typeof item.point === 'string' ? item.point.trim() : '',
-      line: typeof item.line === 'number' && Number.isFinite(item.line) ? Math.floor(item.line) : 0,
+      suggestion: typeof item.suggestion === 'string' ? item.suggestion.trim() : '',
+      // Same hardening as findingsOf: only positive finite line numbers survive.
+      line: typeof item.line === 'number' && Number.isFinite(item.line) && item.line > 0 ? Math.floor(item.line) : 0,
     }))
     .filter((item) => item.point !== '');
 }
@@ -725,9 +715,14 @@ export function partitionVerdicts(raw, concerns) {
       : (fallback?.point ?? '');
     if (point === '' || seen.has(point)) return;
     seen.add(point);
+    // One suggestion per finding: the verifier's rewrite wins, else the candidate's own.
+    const modelSuggestion = typeof item?.suggestion === 'string' ? item.suggestion.trim() : '';
+    const fallbackSuggestion = typeof fallback?.suggestion === 'string' ? fallback.suggestion.trim() : '';
+    const suggestion = modelSuggestion !== '' ? modelSuggestion : fallbackSuggestion;
     issues.push({
       severity: severityOf(item, fallback),
       point,
+      suggestion,
       line: typeof item?.line === 'number' && Number.isFinite(item.line)
         ? Math.floor(item.line)
         : (fallback?.line ?? 0),
@@ -806,28 +801,6 @@ export function partitionVerdicts(raw, concerns) {
     }
   }
   return { issues, unverified, dropped };
-}
-
-/**
- * Suggestions are reviewed too: the verifier marks ones the diff already implements.
- * A suggestion without a verdict is kept (the verifier may have skipped it); only an
- * explicit `keep: false` removes it.
- */
-export function partitionSuggestions(raw, suggestions) {
-  const list = Array.isArray(suggestions) ? suggestions : [];
-  const byIndex = new Map();
-  for (const item of Array.isArray(raw?.suggestionResults) ? raw.suggestionResults : []) {
-    if (item === null || typeof item !== 'object') continue;
-    if (Number.isInteger(item.index) && item.index >= 1) byIndex.set(item.index, item);
-  }
-  const kept = [];
-  let dropped = 0;
-  list.forEach((suggestion, index) => {
-    const verdict = byIndex.get(index + 1);
-    if (verdict !== undefined && verdict.keep === false) dropped += 1;
-    else kept.push(suggestion);
-  });
-  return { kept, dropped };
 }
 
 /** The triage pass output: display fields plus candidate problems, before any verification. */

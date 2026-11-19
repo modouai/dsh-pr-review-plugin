@@ -32,7 +32,6 @@ import {
   normalizeReport,
   normalizeUnverified,
   normalizeVerdict,
-  partitionSuggestions,
   partitionVerdicts,
   parseFeedbackReply,
   platformLabel,
@@ -537,7 +536,12 @@ test('explain prompt: test gaps, adaptive length and the issue shape', () => {
   const text = prompt.messages[0].content[0].text;
   assert.match(text, /同时看测试/);
   assert.match(text, /篇幅随改动规模自适应/);
-  assert.match(text, /问题 \+ 影响 \+ 修法/);
+  assert.match(text, /问题 \+ 影响（一条只写一个核心问题）/);
+  // 一条意见自带建议；不再有独立的 suggestions 输出。
+  assert.ok(!text.includes('"suggestions"'));
+  assert.ok(text.includes('"suggestion"'));
+  assert.ok(text.includes('不要把修法混进 point'));
+  assert.ok(text.includes('纯改进点'));
 });
 
 test('prompt language normalizes case and region tags and falls back to Chinese', () => {
@@ -697,8 +701,19 @@ test('index.js re-exports buildCommentMarkdown from llm.js', async () => {
 test('normalizeConcerns / normalizeEvidenceNeeds drop malformed entries', () => {
   assert.deepEqual(
     normalizeConcerns([{ point: '  p  ', severity: 'block', file: 'a.js' }, { point: '   ' }, null]),
-    [{ severity: 'block', file: 'a.js', point: 'p', line: 0 }],
+    [{ severity: 'block', file: 'a.js', point: 'p', suggestion: '', line: 0 }],
   );
+  // suggestion 归一：trim 处理，缺失或空白补空串。
+  const concerns = normalizeConcerns([
+    { severity: 'block', point: ' p ', suggestion: ' 修法 ', line: 2 },
+    { severity: 'suggest', point: 'q', suggestion: '   ' },
+    { point: 'no-suggestion' },
+  ]);
+  assert.deepEqual(concerns, [
+    { severity: 'block', file: '', point: 'p', suggestion: '修法', line: 2 },
+    { severity: 'suggest', file: '', point: 'q', suggestion: '', line: 0 },
+    { severity: 'suggest', file: '', point: 'no-suggestion', suggestion: '', line: 0 },
+  ]);
   assert.deepEqual(
     normalizeEvidenceNeeds([
       { concern: 2, kind: 'callers', path: '  x.js  ' },
@@ -710,6 +725,16 @@ test('normalizeConcerns / normalizeEvidenceNeeds drop malformed entries', () => 
       { concern: 1, kind: 'definition', path: '', symbol: 'startReview', reason: '' },
     ],
   );
+});
+
+test('normalizeConcerns hardens lines like findingsOf: only positive finite integers survive', () => {
+  const concerns = normalizeConcerns([
+    { point: 'a', line: NaN },
+    { point: 'b', line: -3 },
+    { point: 'c', line: 7.9 },
+    { point: 'd', line: 4 },
+  ]);
+  assert.deepEqual(concerns.map((item) => item.line), [0, 0, 7, 4]);
 });
 
 test('normalizeUnverified keeps only points with text', () => {
@@ -740,6 +765,20 @@ test('partitionVerdicts: 80 is a finding, 25-79 is unverified, below 25 is dropp
   assert.equal(issues[0].severity, 'block');
   assert.deepEqual(unverified, [{ point: 'B2', missing: '缺调用方' }]);
   assert.equal(dropped, 1, 'below-25 scores are dropped and counted');
+});
+
+test('partitionVerdicts keeps the suggestion the model rewrote, else carries the candidate one', () => {
+  const kept = partitionVerdicts(
+    { results: [{ index: 1, confidence: 90, point: '重写后的问题', suggestion: '重写后的修法', line: 7 }] },
+    [{ severity: 'block', file: '', point: '候选', suggestion: '候选修法', line: 0 }],
+  );
+  assert.equal(kept.issues[0].suggestion, '重写后的修法');
+  // 模型没给 suggestion 时沿用候选的修法。
+  const carried = partitionVerdicts(
+    { results: [{ index: 1, confidence: 85, point: 'x' }] },
+    [{ severity: 'suggest', file: '', point: '候选', suggestion: '候选修法', line: 0 }],
+  );
+  assert.equal(carried.issues[0].suggestion, '候选修法');
 });
 
 test('partitionVerdicts dedupes confirmed points and tolerates junk', () => {
@@ -826,32 +865,35 @@ test('normalizeEvidenceNeeds accepts every documented kind', () => {
   }
 });
 
-test('partitionSuggestions drops only explicitly rejected suggestions', () => {
-  const { kept, dropped } = partitionSuggestions({
-    suggestionResults: [{ index: 1, keep: false }, { index: 3, keep: true }, null],
-  }, ['已实现', '未表态', '保留']);
-  assert.deepEqual(kept, ['未表态', '保留']);
-  assert.equal(dropped, 1);
-});
-
-test('the verifier prompt carries suggestions and the diff when given', () => {
+test('the verifier prompt keeps the diff for implemented-checks and asks for a suggestion field', () => {
   const prompt = buildExplainVerifyPrompt(
-    { repo: 'r', number: 1, title: 't' },
-    { path: 'README.md', status: 'modified', additions: 2, deletions: 0 },
+    { platform: 'github', repo: 'o/r', number: 1, title: 't' },
+    { path: 'a.js', status: 'modified', additions: 2, deletions: 1 },
+    [{ severity: 'suggest', file: '', point: '抽 helper', suggestion: '抽成函数', line: 0 }],
+    '证据',
     [],
-    '',
-    [],
-    {
-      language: 'zh',
-      suggestions: ['补齐三行配置'],
-      diffText: '+evidenceVerify: true\n+evidenceMaxFiles: 6',
-    },
+    { diffText: '@@ -1 +1,2 @@\n+2' },
   );
   const text = prompt.messages[0].content[0].text;
-  assert.match(text, /## 候选改进建议/);
-  assert.match(text, /1\. 补齐三行配置/);
-  assert.match(text, /## 该文件的 diff/);
-  assert.match(text, /"suggestionResults"/);
+  assert.ok(text.includes('## 该文件的 diff'));
+  assert.ok(!text.includes('候选改进建议'));
+  assert.ok(text.includes('抽成函数'));
+  assert.ok(text.includes('"suggestion"'));
+  assert.ok(!text.includes('suggestionResult'));
+});
+
+test('verifier prompt tells the model to score already-implemented candidates low', () => {
+  const prompt = buildExplainVerifyPrompt(
+    { platform: 'github', repo: 'o/r', number: 1, title: 't' },
+    { path: 'a.js', status: 'modified', additions: 0, deletions: 0 },
+    [{ severity: 'suggest', file: '', point: '纯改进点', suggestion: '', line: 0 }],
+    '证据',
+    [],
+    {},
+  );
+  const text = prompt.messages[0].content[0].text;
+  assert.ok(text.includes('已实现'));
+  assert.ok(!text.includes('suggestionResult'));
 });
 
 test('a candidate the verifier did not answer becomes an unverified note', () => {
