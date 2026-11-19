@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
       core, components, conclusion,
     }) {
       const {
-        Btn, FileRow, VerdictPill, isAnalyzing, fill, text, suggestionText, cleanStepTitle,
+        Btn, FileRow, VerdictPill, isAnalyzing, fill, text, cleanStepTitle,
         parseUnifiedDiff, hunkRange, mapWalkthroughToHunks, publishedOfRound, roundsOf,
         staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge, shortSha,
         phaseStateText, overviewStateText, conclusionBadgeText, conclusionBadgeTone, processBadgeTone, filesBadgeTone,
@@ -156,34 +156,30 @@ window.__ModuleLoader__.load({
 
       /**
        * Flatten the per-file findings into the page's single ordered list: block first, then
-       * suggest, then suggestions; ties break by path and line. This is the one place the
-       * overview speaks about findings — detail pages and the conclusion reference, not repeat.
+       * suggest; ties break by path and line. Each row carries its own suggestion, rendered
+       * inline. This is the one place the overview speaks about findings.
        */
       function findingsOf(groups) {
         const rows = [];
         for (const group of Array.isArray(groups) ? groups : []) {
           if (group === null || typeof group !== 'object') continue;
           const file = typeof group.file === 'string' ? group.file : '';
-          for (const issue of Array.isArray(group.issues) ? group.issues : []) {
-            if (issue === null || typeof issue !== 'object') continue;
-            const point = typeof issue.point === 'string' ? issue.point.trim() : '';
+          for (const finding of Array.isArray(group.findings) ? group.findings : []) {
+            if (finding === null || typeof finding !== 'object') continue;
+            const point = typeof finding.point === 'string' ? finding.point.trim() : '';
             if (point === '') continue;
             rows.push({
-              kind: 'issue',
-              severity: issue.severity === 'block' ? 'block' : 'suggest',
-              file,
-              line: Number.isFinite(issue.line) && issue.line > 0 ? Math.floor(issue.line) : 0,
+              severity: finding.severity === 'block' ? 'block' : 'suggest',
               point,
+              suggestion: typeof finding.suggestion === 'string' ? finding.suggestion : '',
+              file,
+              line: Number.isFinite(finding.line) && finding.line > 0 ? Math.floor(finding.line) : 0,
             });
           }
-          for (const suggestion of Array.isArray(group.suggestions) ? group.suggestions : []) {
-            const point = suggestionText(suggestion).trim();
-            if (point === '') continue;
-            rows.push({ kind: 'suggestion', severity: 'suggestion', file, line: 0, point });
-          }
         }
-        const rank = { block: 0, suggest: 1, suggestion: 2 };
-        rows.sort((a, b) => rank[a.severity] - rank[b.severity] || a.file.localeCompare(b.file) || a.line - b.line);
+        rows.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'block' ? -1 : 1)
+          || a.file.localeCompare(b.file)
+          || a.line - b.line);
         return rows;
       }
 
@@ -197,7 +193,7 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'prr-card' },
           rows.map((row, index) => {
-            const key = `${row.kind}-${row.file}-${row.line}-${index}`;
+            const key = `${row.file}-${row.line}-${index}`;
             const open = openKey === key;
             const label = row.file === '' ? row.point : `${fileLineLabel(row.file, row.line)} — ${row.point}`;
             return h(
@@ -212,9 +208,7 @@ window.__ModuleLoader__.load({
                   title: row.point,
                   onClick: () => setOpenKey(open ? null : key),
                 },
-                row.kind === 'suggestion'
-                  ? h('span', { className: 'prr-tag' }, t('suggestionTag'))
-                  : h(VerdictPill, { verdict: row.severity, t }),
+                h(VerdictPill, { verdict: row.severity, t }),
                 h('span', { className: 'prr-finding-point' }, label),
                 h('span', { className: 'prr-finding-caret', 'aria-hidden': 'true' }, open ? '▾' : '▸'),
               ),
@@ -223,6 +217,14 @@ window.__ModuleLoader__.load({
                     'div',
                     { className: 'prr-finding-detail' },
                     h('div', { className: 'prr-text' }, row.point),
+                    row.suggestion === ''
+                      ? null
+                      : h(
+                          'div',
+                          { className: 'prr-text' },
+                          h('span', { className: 'prr-tag' }, t('suggestionTag')),
+                          ` ${row.suggestion}`,
+                        ),
                     row.file === ''
                       ? null
                       : h(
@@ -458,7 +460,7 @@ window.__ModuleLoader__.load({
         );
       }
 
-      /** Per-file review detail: logic, walkthrough, changes, findings, suggestions. */
+      /** Per-file review detail: logic, walkthrough, changes, and the one findings list. */
       function FileDetailPanel(props) {
         const { t, filePath, explanation } = props;
         if (explanation === null || explanation === undefined) {
@@ -503,6 +505,14 @@ window.__ModuleLoader__.load({
                       'div',
                       { className: 'prr-rowmain' },
                       h('div', { className: 'prr-text' }, issue.point),
+                      (typeof issue.suggestion === 'string' && issue.suggestion !== '')
+                        ? h(
+                            'div',
+                            { className: 'prr-text' },
+                            h('span', { className: 'prr-tag' }, t('suggestionTag')),
+                            ` ${issue.suggestion}`,
+                          )
+                        : null,
                       issue.line > 0
                         ? h('div', { className: 'prr-subtle' }, `${t('severityLine')} ${issue.line}`)
                         : null,
@@ -512,25 +522,6 @@ window.__ModuleLoader__.load({
               ),
             );
         const unverified = h(UnverifiedBlock, { t, items: detail.unverified });
-        const suggestions = (detail.suggestions ?? []).length === 0
-          ? null
-          : h(
-              'div',
-              null,
-              h('div', { className: 'prr-h2' }, t('fileSuggestions')),
-              h(
-                'div',
-                { className: 'prr-card' },
-                detail.suggestions.map((item, index) => {
-                  const text = suggestionText(item);
-                  return text === '' ? null : h(
-                    'div',
-                    { className: 'prr-rowitem', key: index },
-                    h('div', { className: 'prr-rowmain prr-text' }, text),
-                  );
-                }),
-              ),
-            );
         return h(
           'div',
           null,
@@ -554,7 +545,6 @@ window.__ModuleLoader__.load({
           section(t('changes'), detail.changes),
           issues,
           unverified,
-          suggestions,
         );
       }
 
@@ -733,7 +723,7 @@ window.__ModuleLoader__.load({
         }
 
         const findingCount = (props.fileFindings ?? []).reduce(
-          (sum, group) => sum + (group.issues?.length ?? 0) + (group.suggestions?.length ?? 0),
+          (sum, group) => sum + (group.findings?.length ?? 0),
           0,
         );
         const clean = cleanCountOf(review);
@@ -808,7 +798,7 @@ window.__ModuleLoader__.load({
           return point === '' ? file : `${file} — ${point}`;
         };
         // Severity markers mirror the comment's appendix bullets (llm.js COMMENT_SEVERITY_LABELS):
-        // `[阻塞] `/`[提示] ` for issue severity, `[建议] ` for per-file suggestion rows.
+        // `[阻塞] `/`[提示] ` for the finding, with its suggestion as a `[建议] ` line below.
         const severityPrefix = (severity) => `[${t(severity === 'block' ? 'verdictBlock' : 'severityHint')}] `;
         const line = (label, key) => h('div', { className: 'prr-appendix-line', key }, label);
         const section = (title, body, key) => h(
@@ -831,14 +821,11 @@ window.__ModuleLoader__.load({
           sections.push(section(t('appendixFiles'), h(
             'div',
             null,
-            rows.map((row, index) => {
+            rows.flatMap((row, index) => {
               const base = row.file === '' ? row.point : `${fileLineLabel(row.file, row.line)} — ${row.point}`;
-              return line(
-                row.kind === 'suggestion'
-                  ? `[${t('suggestionTag')}] ${base}`
-                  : `${severityPrefix(row.severity)}${base}`,
-                `f-${index}`,
-              );
+              const main = line(`${severityPrefix(row.severity)}${base}`, `f-${index}`);
+              if (row.suggestion === '') return [main];
+              return [main, line(`[${t('suggestionTag')}] ${row.suggestion}`, `fs-${index}`)];
             }),
           ), 'files'));
         }

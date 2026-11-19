@@ -1424,52 +1424,13 @@ test('selecting a round follows the latest on the overview or pins history onto 
   });
 });
 
-test('per-file suggestions render as text whether stored as a string or an object', () => {
-  const client = loadClient();
-  const version = makeVersion(1, '结论');
-  const review = makeReview({
-    round: 1,
-    conclusionAt: version.createdAt,
-    conclusion: version.conclusion,
-    roundHistory: [makeRound(1, { conclusions: [version] })],
-  });
-  // Model output stores plain strings; a review_update_analysis write stores { point, line }.
-  // Blank and malformed entries must not render an empty suggestion row.
-  const { textOnly, elements } = renderOverview(client, review, {
-    fileFindings: [
-      {
-        file: 'src/a.js',
-        issues: [],
-        suggestions: [
-          '模型写的建议',
-          { point: '工具写的建议', line: 12 },
-          { text: '只有 text 的建议' },
-          { point: '   ', text: 'point 为空时回退 text' },
-          { point: '   ' },
-          {},
-          null,
-          42,
-        ],
-      },
-    ],
-  });
-
-  assert.match(textOnly, /模型写的建议/);
-  assert.match(textOnly, /工具写的建议/);
-  assert.match(textOnly, /只有 text 的建议/);
-  assert.match(textOnly, /point 为空时回退 text/);
-  assert.doesNotMatch(textOnly, /\[object Object\]/);
-  // The findings list renders one collapsed row per valid suggestion; blank and malformed
-  // entries are dropped by the flattener and render no row at all.
-  const rows = elements.filter((node) => node.props.className === 'prr-finding');
-  assert.equal(rows.length, 4, 'blank and malformed suggestions render no row');
-});
-
-test('the file detail renders suggestion objects written by review_update_analysis', () => {
+test('the file detail renders one findings list where each row may carry a suggestion', () => {
   const client = loadClient();
   const { parts, fake } = client;
+  const t = translator(parts);
+  // 服务端 explanation 永远是合并形状：每条意见自带 suggestion（'' = 无建议），无 suggestions 键。
   const { textOnly, elements } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
-    t: translator(parts),
+    t,
     filePath: 'src/a.js',
     explanation: {
       status: 'done',
@@ -1478,17 +1439,58 @@ test('the file detail renders suggestion objects written by review_update_analys
         summary: '文件摘要',
         logic: '',
         changes: '',
-        issues: [],
-        suggestions: ['纯文本建议', { point: '对象建议', line: 3 }, null, { point: '  ' }],
+        issues: [
+          { severity: 'block', point: '会崩', suggestion: '加判空', line: 3 },
+          { severity: 'suggest', point: '补测试', suggestion: '', line: 0 },
+        ],
       },
     },
     onExplain: () => {},
   }));
 
-  assert.match(textOnly, /纯文本建议/);
-  assert.match(textOnly, /对象建议/);
-  const rows = elements.filter((node) => node.props.className === 'prr-rowmain prr-text');
-  assert.equal(rows.length, 2, 'blank suggestions render no row');
+  // 只有一个意见区块：fileSuggestions 键已删除，旧「改进建议」区块不得再出现。
+  const titles = elements.filter((node) => node.props.className === 'prr-h2' && node.children === t('issues'));
+  assert.equal(titles.length, 1, 'the findings section renders exactly once');
+  assert.doesNotMatch(textOnly, /改进建议/);
+  assert.match(textOnly, /会崩/);
+  assert.match(textOnly, /补测试/);
+  // 有建议的意见行内联渲染建议块（suggestionTag 标签 + 建议文本）；无建议行不渲染。
+  const tags = elements.filter((node) => node.props.className === 'prr-tag');
+  assert.equal(tags.length, 1, 'only the row carrying a suggestion renders the suggestion tag');
+  assert.match(textOnly, /加判空/);
+});
+
+test('the file detail renders the merged findings a review_update_analysis write produces', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const t = translator(parts);
+  // 工具写回的合并意见：suggestion 直接跟在各自 point 后渲染，行号随行展示。
+  const { textOnly, elements } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t,
+    filePath: 'src/a.js',
+    explanation: {
+      status: 'done',
+      explanation: {
+        verdict: 'suggest',
+        summary: '文件摘要',
+        logic: '',
+        changes: '',
+        issues: [
+          { severity: 'suggest', point: '提取常量', suggestion: '把魔数移到模块顶部', line: 12 },
+          { severity: 'block', point: '空指针', suggestion: '', line: 7 },
+        ],
+      },
+    },
+    onExplain: () => {},
+  }));
+
+  assert.match(textOnly, /提取常量/);
+  assert.match(textOnly, /把魔数移到模块顶部/);
+  assert.match(textOnly, /空指针/);
+  assert.match(textOnly, /行 12/);
+  assert.match(textOnly, /行 7/);
+  const tags = elements.filter((node) => node.props.className === 'prr-tag');
+  assert.equal(tags.length, 1, 'blank suggestions render no suggestion block');
 });
 
 test('the detail header keeps only the pane title', () => {
@@ -3043,34 +3045,128 @@ test('PhaseBar renders the round and the phase text', () => {
 
 test('findingsOf flattens and orders file findings', () => {
   const { parts } = loadClient();
+  // 合并形状：每条意见四键，suggestion '' 表示无建议。
   const groups = [
-    { file: 'src/b.js', issues: [{ severity: 'suggest', point: 'b 问题', line: 3 }], suggestions: ['b 建议'] },
-    { file: 'src/a.js', issues: [{ severity: 'block', point: 'a 阻塞', line: 8 }, { severity: 'suggest', point: 'a 问题', line: 2 }], suggestions: [] },
+    {
+      file: 'src/b.js',
+      findings: [
+        { severity: 'suggest', point: 'b 问题', suggestion: 'b 这样改', line: 3 },
+        { severity: 'suggest', point: 'b 提示', suggestion: '', line: 0 },
+      ],
+    },
+    {
+      file: 'src/a.js',
+      findings: [
+        { severity: 'block', point: 'a 阻塞', suggestion: 'a 先修这个', line: 8 },
+        { severity: 'suggest', point: 'a 问题', suggestion: '', line: 2 },
+      ],
+    },
   ];
   const rows = parts.findingsOf(groups);
   assert.deepEqual(plain(rows.map((row) => [row.severity, row.file])), [
     ['block', 'src/a.js'],
     ['suggest', 'src/a.js'],
     ['suggest', 'src/b.js'],
-    ['suggestion', 'src/b.js'],
+    ['suggest', 'src/b.js'],
   ]);
   assert.equal(rows[0].line, 8);
+  assert.equal(rows[0].suggestion, 'a 先修这个');
+  assert.equal(rows[1].suggestion, '');
   assert.equal(parts.findingsOf([]).length, 0);
 });
 
-test('FindingList renders rows and the empty state', () => {
+test('fileFindings derives one merged group per analyzed file from the review', () => {
+  const { parts, fake } = loadClient();
+  // 真实 review 形状：explanations[].explanation.issues 四键，没有 suggestions 键。
+  const review = makeReview({
+    round: 1,
+    report: {
+      verdict: 'suggest',
+      summary: '总',
+      risks: [],
+      order: [{ file: 'src/a.js', reason: '入口' }, { file: 'src/b.js', reason: '工具类' }],
+    },
+    explanations: [
+      {
+        file: 'src/b.js',
+        status: 'done',
+        explanation: {
+          verdict: 'suggest', summary: '', logic: '', changes: '',
+          issues: [{ severity: 'block', point: 'b 会崩', suggestion: 'b 加判空', line: 3 }],
+        },
+      },
+      {
+        file: 'src/a.js',
+        status: 'done',
+        explanation: {
+          verdict: 'pass', summary: '', logic: '', changes: '',
+          issues: [{ severity: 'suggest', point: 'a 提示', suggestion: '', line: 2 }],
+        },
+      },
+      { file: 'src/c.js', status: 'error', explanation: null },
+    ],
+  });
+  function Probe() {
+    const { fileFindings } = parts.useWorkspaceDerived(review, '');
+    return fake.React.createElement('div', null, JSON.stringify(fileFindings));
+  }
+  const { textOnly } = fake.render(fake.React.createElement(Probe));
+  // 每个分析过的文件一组，组内只有一份 findings，按阅读顺序排列；未完成/空分析不产生组。
+  assert.deepEqual(JSON.parse(textOnly), [
+    { file: 'src/a.js', findings: [{ severity: 'suggest', point: 'a 提示', suggestion: '', line: 2 }] },
+    { file: 'src/b.js', findings: [{ severity: 'block', point: 'b 会崩', suggestion: 'b 加判空', line: 3 }] },
+  ]);
+});
+
+test('FindingList renders rows, block first, with the suggestion block in the detail', () => {
   const { parts, fake } = loadClient();
   const t = translator(parts);
+  // 真实四键形状：带建议与空建议混装。
+  const groups = [{
+    file: 'src/a.js',
+    findings: [
+      { severity: 'suggest', point: 'a 提示', suggestion: '', line: 2 },
+      { severity: 'block', point: 'a 阻塞', suggestion: 'a 加判空', line: 8 },
+    ],
+  }];
   const empty = fake.render(fake.React.createElement(parts.FindingList, { groups: [], t, onOpenFile: () => {} }));
   assert.ok(empty.textOnly.includes('未发现问题'));
 
-  const view = fake.render(fake.React.createElement(parts.FindingList, {
-    groups: [{ file: 'src/a.js', issues: [{ severity: 'block', point: 'a 阻塞', line: 8 }], suggestions: [] }],
-    t,
-    onOpenFile: () => {},
-  }));
-  assert.ok(view.textOnly.includes('src/a.js:8'));
-  assert.ok(view.textOnly.includes('a 阻塞'));
+  const view = fake.render(fake.React.createElement(parts.FindingList, { groups, t, onOpenFile: () => {} }));
+  // block 行排在前；头部 pill 一律走 VerdictPill，收起态不再有建议 tag 分支。
+  const heads = view.elements.filter((node) => node.props.className === 'prr-finding-head');
+  assert.equal(heads.length, 2);
+  assert.match(heads[0].props.title, /a 阻塞/);
+  assert.equal(
+    view.elements.some((node) => node.props.className === 'prr-tag'),
+    false,
+    'collapsed heads carry verdict pills only',
+  );
+
+  // fake React 的 setState 是 noop，展开态靠临时接管 useState 渲染（渲染完立即还原）。
+  const originalUseState = fake.React.useState;
+  const openWith = (key) => {
+    fake.React.useState = () => [key, () => {}];
+    try {
+      return fake.render(fake.React.createElement(parts.FindingList, { groups, t, onOpenFile: () => {} }));
+    } finally {
+      fake.React.useState = originalUseState;
+    }
+  };
+  // 展开 block 行（key = file-line-index）：detail 里有建议块。
+  const opened = openWith('src/a.js-8-0');
+  const detail = opened.elements.find((node) => node.props.className === 'prr-finding-detail');
+  assert.ok(detail, 'the opened row renders its detail');
+  assert.match(fake.textOf(detail), /a 阻塞/);
+  assert.match(fake.textOf(detail), /a 加判空/);
+  const openTags = opened.elements.filter((node) => node.props.className === 'prr-tag');
+  assert.equal(openTags.length, 1, 'only the suggestion-carrying row renders the suggestion block');
+  // 展开无建议行：detail 里没有建议块。
+  const openedPlain = openWith('src/a.js-2-1');
+  assert.ok(
+    openedPlain.elements.every((node) => node.props.className !== 'prr-tag'),
+    'a row without a suggestion renders no suggestion block',
+  );
 });
 
 test('cleanCountOf counts finished analyses without issues', () => {
@@ -3137,7 +3233,13 @@ test('OverviewPage shows digest, findings and completeness — no initial risks,
     onOpenFile: () => {},
     explainedCount: 1,
     totalFiles: 1,
-    fileFindings: [{ file: 'src/a.js', issues: [{ severity: 'block', point: 'a 阻塞', line: 8 }], suggestions: [] }],
+    fileFindings: [{
+      file: 'src/a.js',
+      findings: [
+        { severity: 'block', point: 'a 阻塞', suggestion: 'a 加判空', line: 8 },
+        { severity: 'suggest', point: 'a 提示', suggestion: '', line: 2 },
+      ],
+    }],
     feedbackBusy: false,
     onCheckFeedback: () => {},
   }));
@@ -3146,6 +3248,8 @@ test('OverviewPage shows digest, findings and completeness — no initial risks,
   assert.ok(!text.includes('总体初筛风险'));
   assert.ok(!text.includes('初筛风险点'));
   assert.ok(text.includes('审查发现'));
+  // 合并后每组只有一份 findings，总览计数即意见条数（不再叠加建议）。
+  assert.ok(text.includes('审查发现 · 2'));
   assert.ok(text.includes('src/a.js:8'));
   assert.ok(text.includes('审查完备性'));
   assert.ok(text.includes('1/1'));
@@ -3320,7 +3424,7 @@ test('ConclusionPage mirrors the published comment structure', () => {
     onCheckFeedback: () => {},
     appendixSources: {
       risks: [{ severity: 'block', file: 'src/a.js', point: '初筛风险' }],
-      findings: [{ file: 'src/a.js', issues: [{ severity: 'block', point: '文件发现', line: 8 }], suggestions: [] }],
+      findings: [{ file: 'src/a.js', findings: [{ severity: 'block', point: '文件发现', suggestion: '', line: 8 }] }],
       order: [{ file: 'src/a.js', reason: '入口改动' }],
     },
   }));
@@ -3402,11 +3506,11 @@ test('ConclusionAppendix collapses by default, opens with defaultOpen and skips 
     risks: [{ severity: 'block', file: 'src/a.js', point: '初筛风险' }],
     findings: [{
       file: 'src/a.js',
-      issues: [
-        { severity: 'block', point: '文件发现', line: 8 },
-        { severity: 'suggest', point: '提示发现', line: 9 },
+      // 合并行：每条意见四键自带 suggestion，没有 kind 字段。
+      findings: [
+        { severity: 'block', point: '文件发现', suggestion: '文件这样改', line: 8 },
+        { severity: 'suggest', point: '提示发现', suggestion: '', line: 9 },
       ],
-      suggestions: ['文件建议'],
     }],
     order: [{ file: 'src/a.js', reason: '入口改动' }],
   };
@@ -3439,11 +3543,13 @@ test('ConclusionAppendix collapses by default, opens with defaultOpen and skips 
   const text = open.textOnly;
   // The forced-open state really opens the details element.
   assert.ok(open.html.includes(' open="true"'));
-  // Severity markers mirror the comment's appendix bullets ([阻塞]/[提示] issues, [建议] rows).
+  // Severity markers mirror the comment's appendix bullets ([阻塞]/[提示] findings, [建议] lines).
   assert.ok(text.includes('[阻塞] src/a.js — 初筛风险'));
   assert.ok(text.includes('[阻塞] src/a.js:8 — 文件发现'));
   assert.ok(text.includes('[提示] src/a.js:9 — 提示发现'));
-  assert.ok(text.includes('[建议] src/a.js — 文件建议'));
+  // 建议渲染为意见下的独立行，只带 [建议] 标签，不再带文件前缀。
+  assert.ok(text.includes('[建议] 文件这样改'));
+  assert.ok(!text.includes('[建议] src/a.js'));
   assert.ok(text.includes('总体初筛风险'));
   assert.ok(text.includes('初筛风险'));
   assert.ok(text.includes('逐文件审查发现'));
