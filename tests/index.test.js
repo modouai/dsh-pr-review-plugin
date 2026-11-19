@@ -1857,8 +1857,9 @@ test('review_update_overview clearFindings keeps block items for narrower scopes
   try {
     await suggestionsOnly.runTool('review_update_overview', { revision: 0, clearFindings: 'suggestions' });
     const stored = await suggestionsOnly.review();
-    assert.equal(stored.explanations[0].explanation.suggestions.length, 0);
-    assert.equal(stored.explanations[0].explanation.issues.length, 2, 'narrow scope keeps every issue');
+    // The legacy separate suggestions list folded into issues on restore; this scope
+    // only ever cleared that list, so every merged issue survives untouched.
+    assert.equal(stored.explanations[0].explanation.issues.length, 3);
     assert.deepEqual(stored.report.risks.map((item) => item.severity), ['block'], 'block risk survives');
   } finally {
     await suggestionsOnly.dispose();
@@ -2622,6 +2623,39 @@ test('a restored entry without an explanation is analyzed again', async () => {
   }
 });
 
+test('restored legacy cache folds suggestions into suggest findings', async () => {
+  const restored = legacyReview({
+    files: [{ path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 }],
+    explanations: [{
+      file: 'src/a.js',
+      status: 'done',
+      error: null,
+      // The legacy shape: a separate `suggestions` list next to `issues`.
+      explanation: {
+        verdict: 'block',
+        summary: '旧分析',
+        issues: [{ severity: 'block', point: '旧问题', line: 1 }],
+        suggestions: [{ text: '旧的独立建议', line: 4 }],
+        unverified: [],
+      },
+      chat: [],
+      updatedAt: 150,
+    }],
+  });
+  const plugin = await setup({ fetch: batchFetch, reviews: { 1: restored } });
+  try {
+    const review = await plugin.review();
+    const entry = review.explanations.find((item) => item.file === 'src/a.js');
+    assert.deepEqual(entry.explanation.issues, [
+      { severity: 'block', point: '旧问题', suggestion: '', line: 1 },
+      { severity: 'suggest', point: '旧的独立建议', suggestion: '', line: 4 },
+    ]);
+    assert.equal(entry.explanation.suggestions, undefined);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 test('failed batches release their analysis slots for later batches', async () => {
   const llm = (options) => {
     const prompt = JSON.stringify(options.messages);
@@ -2838,11 +2872,19 @@ test('a concern becomes a finding only after the verifier scores it against evid
     summary: '讲解',
     logic: '逻辑',
     changes: '改动',
-    concerns: [{ severity: 'block', point: '空指针风险', line: 2 }],
-    evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
-    suggestions: [],
+    concerns: [
+      { severity: 'block', point: '空指针风险', suggestion: '先判空再取值', line: 2 },
+      { severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 },
+    ],
+    evidenceNeeds: [
+      { concern: 1, kind: 'file', path: 'src/a.js' },
+      { concern: 2, kind: 'file', path: 'src/a.js' },
+    ],
   }, {
-    results: [{ index: 1, confidence: 90, severity: 'block', point: '空指针风险', line: 2 }],
+    results: [
+      { index: 1, confidence: 90, severity: 'block', point: '空指针风险', line: 2, suggestion: '取值前加空值检查' },
+      { index: 2, confidence: 85, point: '命名不清', line: 4 },
+    ],
     extraIssues: [],
   });
   const recording = (options) => {
@@ -2853,7 +2895,11 @@ test('a concern becomes a finding only after the verifier scores it against evid
   try {
     const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
     assert.equal(result.status, 200);
-    assert.deepEqual(result.json.explanation.issues, [{ severity: 'block', point: '空指针风险', line: 2 }]);
+    // The verifier's suggestion rewrite wins; a result without one falls back to the candidate's.
+    assert.deepEqual(result.json.explanation.issues, [
+      { severity: 'block', point: '空指针风险', suggestion: '取值前加空值检查', line: 2 },
+      { severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 },
+    ]);
     assert.deepEqual(result.json.explanation.unverified, []);
     assert.equal(prompts.length, 2, 'triage + verifier');
     assert.match(prompts[1], /## 候选问题/);
@@ -2902,9 +2948,11 @@ test('evidenceVerify off keeps the single-pass contract', async () => {
           summary: '讲解',
           logic: '逻辑',
           changes: '改动',
-          concerns: [{ severity: 'suggest', point: '命名不清', line: 4 }],
+          concerns: [{ severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 }],
           evidenceNeeds: [],
-          suggestions: [],
+          // A model that has not caught up with the merged prompt still answers with the
+          // legacy suggestions list; it folds into the tail of issues.
+          suggestions: ['补一条测试'],
         }),
       };
       yield { type: 'finish', reason: { kind: 'stop' } };
@@ -2913,7 +2961,10 @@ test('evidenceVerify off keeps the single-pass contract', async () => {
   try {
     const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
     assert.equal(calls, 1, 'no verifier call when evidenceVerify is off');
-    assert.deepEqual(result.json.explanation.issues, [{ severity: 'suggest', point: '命名不清', line: 4 }]);
+    assert.deepEqual(result.json.explanation.issues, [
+      { severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 },
+      { severity: 'suggest', point: '补一条测试', suggestion: '', line: 0 },
+    ]);
     assert.deepEqual(result.json.explanation.unverified, []);
   } finally {
     await plugin.dispose();
@@ -3098,20 +3149,20 @@ test('a suggestion the diff already implements is dropped by the verifier', asyn
       summary: '讲解',
       logic: '逻辑',
       changes: '改动',
-      concerns: [],
-      evidenceNeeds: [],
-      suggestions: ['补齐三行配置', '补一条测试'],
+      // Pure-improvement noise now travels as a suggest-level concern carrying its own
+      // suggestion; the verifier's confidence scoring is what filters it out.
+      concerns: [{ severity: 'suggest', point: '补齐三行配置', suggestion: '在配置里补齐三行', line: 3 }],
+      evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
     }, {
-      results: [],
+      results: [{ index: 1, confidence: 10, point: '补齐三行配置' }],
       extraIssues: [],
-      suggestionResults: [{ index: 1, keep: false, reason: 'diff 已包含' }, { index: 2, keep: true }],
     }),
   });
   try {
     const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
     assert.equal(result.status, 200);
-    assert.deepEqual(result.json.explanation.suggestions, ['补一条测试']);
     assert.deepEqual(result.json.explanation.issues, []);
+    assert.deepEqual(result.json.explanation.unverified, []);
   } finally {
     await plugin.dispose();
   }

@@ -895,7 +895,11 @@ export function apply(ctx, config) {
       explanations.set(entry.file, {
         status: entry.status ?? 'done',
         error: entry.error ?? null,
-        explanation: entry.explanation ?? null,
+        // Normalize on restore: legacy caches carry a separate `suggestions` list, which
+        // normalizeExplanation folds into `issues` (severity 'suggest') in place.
+        explanation: entry.explanation === null || entry.explanation === undefined
+          ? null
+          : normalizeExplanation(entry.explanation),
         chat: Array.isArray(entry.chat) ? entry.chat : [],
         updatedAt: entry.updatedAt ?? 0,
       });
@@ -1719,19 +1723,14 @@ export function apply(ctx, config) {
       throw new Error(`模型没有返回完整的分析 JSON。原始输出：${answer.raw.slice(0, 400)}`);
     }
     const concerns = normalizeConcerns(parsed.concerns);
-    // Legacy prompt shape: the model may still answer with a separate suggestions list;
-    // normalizeExplanation folds it into issues as suggest findings.
-    const rawSuggestions = Array.isArray(parsed.suggestions)
-      ? parsed.suggestions.filter((item) => typeof item === 'string' && item.trim() !== '')
-      : [];
+    // One concern carries one suggestion; the verifier's suggestion rewrites win, the
+    // candidate's are the fallback. Legacy model output that still carries a separate
+    // `suggestions` array is folded into issues by normalizeExplanation (findingsOf).
     let issues = [];
     let unverified = [];
-    let suggestions = rawSuggestions;
-    // Suggestions no longer get their own verifier pass; the diff-implemented noise drops
-    // through the verifier's confidence scoring once concerns carry the suggestion field.
-    if (concerns.length > 0 || rawSuggestions.length > 0) {
+    if (concerns.length > 0) {
       if (settings.evidenceVerify === false) {
-        issues = concerns.map(({ severity, point, line }) => ({ severity, point, line }));
+        issues = concerns.map(({ severity, point, suggestion, line }) => ({ severity, point, suggestion, line }));
       } else {
         const verdicts = await verifyConcerns(
           record,
@@ -1745,7 +1744,9 @@ export function apply(ctx, config) {
           signal,
         );
         if (verdicts.discarded) return { explanation: null, cached: false, discarded: true };
-        issues = verdicts.issues.map(({ severity, point, line }) => ({ severity, point, line }));
+        // partitionVerdicts products still carry a `file` key; normalizeExplanation
+        // (findingsOf) drops it, so the stored shape stays the uniform four keys.
+        issues = verdicts.issues;
         unverified = verdicts.unverified;
       }
     }
@@ -1758,7 +1759,6 @@ export function apply(ctx, config) {
       ...parsed,
       issues,
       unverified,
-      suggestions,
       verdict,
     });
     // Repeat the check at the write point: an await added between parse and store must
