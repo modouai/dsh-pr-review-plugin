@@ -2159,8 +2159,12 @@ test('review_update_overview clearFindings keeps block items for narrower scopes
 
   // The tool schema narrowed with the merge: the deprecated `suggestions` scope is no longer
   // promised at the tool layer (callers pass `suggest`, asserted against the enum above in
-  // the overview-rewrite test). The function-level alias shim inside clearOverviewFindings
-  // stays as defense for direct callers.
+  // the overview-rewrite test). The harness executes tools without schema validation though,
+  // so this call still reaches the function-level alias shim — pinned here: the alias must
+  // keep behaving exactly like `suggest` (clear suggest findings/risks, keep block).
+  const aliasCleared = await clearWith('suggestions');
+  assert.deepEqual(aliasCleared.issues, [{ severity: 'block', point: '阻塞', suggestion: '', line: 1 }]);
+  assert.deepEqual(aliasCleared.risks, ['block']);
 
   // `none` and unknown scopes clear nothing (defense against typo'd callers).
   for (const scope of ['none', 'whatever']) {
