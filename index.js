@@ -3633,7 +3633,7 @@ export function apply(ctx, config) {
             record,
             exec,
             'review_update_overview',
-            `风险 ${beforeCounts.risks}→${afterCounts.risks} · 意见 ${beforeCounts.issues}→${afterCounts.issues} · 结论 ${normalized.verdict}`,
+            `风险 ${beforeCounts.risks}→${afterCounts.risks} · 审查意见 ${beforeCounts.issues}→${afterCounts.issues} · 结论 ${normalized.verdict}`,
           );
           scheduleSave();
           return toolText([
