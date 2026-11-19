@@ -1963,6 +1963,37 @@ test('review_update_overview clearFindings keeps block items for narrower scopes
   }
 });
 
+test('clearOverviewFindings drops the legacy suggestions key review_update_analysis can write back', async () => {
+  const plugin = await setup();
+  try {
+    // review_update_analysis still accepts the legacy `suggestions` parameter and writes
+    // it straight into memory next to `issues` — exactly the pre-merge shape.
+    await plugin.runTool('review_update_analysis', {
+      path: 'src/a.js',
+      revision: 0,
+      verdict: 'block',
+      summary: '人工改写',
+      issues: [{ point: '阻塞意见', line: 1, severity: 'block' }],
+      suggestions: [{ point: '模型后来补的建议', line: 2 }],
+    });
+
+    // Clearing everything must drop the key, not just hide the findings: otherwise every
+    // reader folds the leftover suggestions straight back and the cleared count lies.
+    const written = await plugin.runTool('review_update_overview', { revision: 1, clearFindings: 'all' });
+    assert.match(written, /已清理：意见 2 条、风险 1 条/);
+
+    const stored = await plugin.review();
+    const explanation = stored.explanations[0].explanation;
+    assert.deepEqual(explanation.issues, []);
+    assert.equal(explanation.suggestions, undefined);
+    const analysis = await plugin.runTool('review_get_analysis', { path: 'src/a.js' });
+    assert.doesNotMatch(analysis, /模型后来补的建议/);
+    assert.doesNotMatch(analysis, /审查意见：/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 // ---------- cache durability, list truncation, pruning, explain dedupe ----------
 
 test('an unreadable cache is archived aside and surfaced rather than silently overwritten', async () => {
@@ -2766,9 +2797,23 @@ test('a restored legacy record persists the merged shape with no suggestions key
     // Any write schedules a save; review_update_report leaves the explanations untouched,
     // so the persisted bytes reflect exactly what restore normalized into memory.
     await plugin.runTool('review_update_report', { revision: 0, summary: '初筛报告' });
-    await delay(950); // scheduleSave debounce
     const cacheFile = path.join(plugin.home, '.dsh', 'pr-review', CACHE_SLUG);
-    payload = JSON.parse(await readFile(cacheFile, 'utf8'));
+    // Poll for the saved content instead of sleeping past the 800ms debounce: the cache
+    // file already exists (the legacy pre-save bytes), so only the merged shape proves
+    // the rewrite landed, however slow the flush is.
+    const deadline = Date.now() + 5000;
+    payload = null;
+    while (payload === null && Date.now() < deadline) {
+      await delay(50);
+      try {
+        const parsed = JSON.parse(await readFile(cacheFile, 'utf8'));
+        const explanation = parsed.reviews?.['1']?.explanations?.[0]?.explanation;
+        if (explanation !== undefined && !JSON.stringify(parsed).includes('"suggestions"')) payload = parsed;
+      } catch {
+        // Save not landed yet (or mid-rename); keep polling.
+      }
+    }
+    assert.notEqual(payload, null, 'the debounced save rewrote the cache with the merged shape');
     const saved = payload.reviews['1'].explanations[0].explanation;
     assert.deepEqual(saved.issues, [
       { severity: 'block', point: '旧问题', suggestion: '', line: 3 },

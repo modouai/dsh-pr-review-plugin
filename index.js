@@ -2380,7 +2380,7 @@ export function apply(ctx, config) {
     for (const file of Array.isArray(record.files) ? record.files : []) {
       const entry = record.explanations.get(file.path);
       if (entry === undefined || entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-      const findings = findingsOf(entry.explanation).filter((item) => item.point !== '');
+      const findings = findingsOf(entry.explanation);
       if (findings.length === 0) continue;
       files.push({ file: file.path, findings });
     }
@@ -2969,7 +2969,11 @@ export function apply(ctx, config) {
       const nextFindings = effective === 'all' ? [] : findings.filter((item) => item.severity === 'block');
       cleared.issues += findings.length - nextFindings.length;
       if (nextFindings.length === findings.length) continue;
-      entry.explanation = { ...entry.explanation, issues: nextFindings };
+      // review_update_analysis can still write the legacy `suggestions` key into memory;
+      // dropping it here keeps the stored shape merged, or the cleared findings would be
+      // folded straight back on every later read while the count claimed them cleared.
+      const { suggestions: _legacy, ...explanation } = entry.explanation;
+      entry.explanation = { ...explanation, issues: nextFindings };
       entry.updatedAt = at;
     }
     const risks = Array.isArray(record.report?.risks) ? record.report.risks : [];
