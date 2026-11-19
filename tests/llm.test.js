@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import {
   PLATFORM_LABELS,
   buildChatPrompt,
+  buildCommentAppendix,
   buildCommentMarkdown,
   buildConcludePrompt,
   buildExplainPrompt,
@@ -315,7 +316,7 @@ test('buildCommentMarkdown: commit/version header, selection note and appendix',
     selection: { total: 3, included: 1, omittedBlockers: 1, omittedSuggestions: 1 },
     appendix: {
       risks: [{ severity: 'suggest', file: 'src/a.js', point: '初筛风险' }],
-      files: [{ file: 'src/a.js', issues: [{ severity: 'block', point: '细节', line: 5 }], suggestions: ['补注释'] }],
+      files: [{ file: 'src/a.js', findings: [{ severity: 'block', point: '细节', suggestion: '补注释', line: 5 }] }],
       order: [{ file: 'src/a.js', reason: '入口' }],
       delta: { resolved: [{ file: 'src/a.js', point: '老问题' }], stillOpen: [] },
       unanalyzed: ['src/b.js', 'src/c.js'],
@@ -336,7 +337,8 @@ test('buildCommentMarkdown: commit/version header, selection note and appendix',
   assert.match(markdown, /\[提示\] `src\/a\.js` — 初筛风险/);
   assert.match(markdown, /#### 逐文件审查发现/);
   assert.match(markdown, /\[阻塞\] 细节（行 5）/);
-  assert.match(markdown, /- 建议：补注释/);
+  // The suggestion rides its issue as an indented sub-line, not a sibling bullet.
+  assert.match(markdown, /- \[阻塞\] 细节（行 5）\n {2}- 建议：补注释/);
   assert.match(markdown, /#### 审查顺序/);
   assert.match(markdown, /1\. `src\/a\.js` — 入口/);
   assert.match(markdown, /#### 复审对比/);
@@ -355,12 +357,12 @@ test('buildCommentMarkdown stays under the platform limit by shrinking the appen
   }));
   const files = Array.from({ length: 200 }, (_, index) => ({
     file: `src/file-${index}.ts`,
-    issues: Array.from({ length: 20 }, (_, issue) => ({
+    findings: Array.from({ length: 20 }, (_, issue) => ({
       severity: 'block',
       point: '详细问题描述'.repeat(10),
+      suggestion: '建议内容'.repeat(10),
       line: issue + 1,
     })),
-    suggestions: Array.from({ length: 20 }, () => '建议内容'.repeat(10)),
   }));
   const options = {
     language: 'zh',
@@ -396,10 +398,33 @@ test('buildCommentMarkdown stays under the platform limit by shrinking the appen
   assert.match(truncated, /巨额评论/);
 });
 
+test('buildCommentAppendix: findings render as one list with nested suggestion sub-lines', () => {
+  const appendix = {
+    risks: [],
+    files: [{
+      file: 'src/a.js',
+      findings: [
+        { severity: 'block', point: '会崩', suggestion: '加判空', line: 3 },
+        { severity: 'suggest', point: '无建议的意见', suggestion: '', line: 9 },
+      ],
+    }],
+    order: [],
+    delta: null,
+    unanalyzed: [],
+  };
+  // zh: the suggestion rides its finding as an indented sub-line; findings without one get none.
+  const zh = buildCommentAppendix(appendix, 'zh');
+  assert.match(zh, /\*\*src\/a\.js\*\*\n- \[阻塞\] 会崩（行 3）\n {2}- 建议：加判空\n- \[提示\] 无建议的意见（行 9）/);
+  // en: half-width colon after the suggestion label.
+  const en = buildCommentAppendix(appendix, 'en');
+  assert.match(en, /- \[Block\] 会崩（line 3）\n {2}- Suggestion: 加判空/);
+  assert.doesNotMatch(en, /Suggestion：/);
+});
+
 test('buildConcludePrompt: coverage, unanalyzed (<=20), previous ids, locked ids, feedback, chat, schema id', () => {
   const unanalyzed = Array.from({ length: 25 }, (_, index) => `file-${index + 1}.js`);
   const explanations = new Map([
-    ['a.js', { verdict: 'suggest', summary: 's', issues: [], suggestions: [] }],
+    ['a.js', { verdict: 'suggest', summary: 's', issues: [{ severity: 'block', point: 'p', suggestion: '加判空', line: 3 }] }],
   ]);
   const pullChat = Array.from({ length: 15 }, (_, index) => ({
     role: index % 2 === 0 ? 'user' : 'assistant',
@@ -437,11 +462,16 @@ test('buildConcludePrompt: coverage, unanalyzed (<=20), previous ids, locked ids
   assert.match(text, /"id": "可选：沿用上一轮条目的 id"/);
   assert.match(text, /"line": 0/);
   assert.match(text, /line 为 PR head 新文件行号/);
+  // The entries JSON carries each issue's inline suggestion and never the legacy list key.
+  // Scoped to the entries line because the output schema legitimately still says "suggestions".
+  const entriesJson = text.match(/已逐文件分析（\d+ 个）：([^\n]*)/)?.[1] ?? '';
+  assert.doesNotMatch(entriesJson, /"suggestions"/);
+  assert.match(entriesJson, /"suggestion":"加判空"/);
 });
 
 test('buildConcludePrompt: marks truncated report/explanations explicitly', () => {
   const explanations = new Map([
-    ['a.js', { verdict: 'suggest', summary: 'y'.repeat(20000), issues: [], suggestions: [] }],
+    ['a.js', { verdict: 'suggest', summary: 'y'.repeat(20000), issues: [] }],
   ]);
   const prompt = buildConcludePrompt(
     { platform: 'forgejo', repo: 'acme/demo', number: 1, title: 't', headRef: 'h', baseRef: 'b', changedFiles: 1, additions: 0, deletions: 0 },

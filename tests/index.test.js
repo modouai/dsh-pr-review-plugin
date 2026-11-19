@@ -922,7 +922,22 @@ test('publish selection: /comment/preview includeIds filters markdown, returns f
     suggestions: [{ id: 's-keep03', file: 'src/a.js', line: 30, point: '建议一' }],
     nextSteps: ['先修问题一'],
   });
-  const plugin = await setup({ llm: llmFromText(conclusionReply), fetch: fetchHandler });
+  const plugin = await setup({
+    llm: llmFromText(conclusionReply),
+    fetch: fetchHandler,
+    reviews: {
+      1: legacyReview({
+        explanations: [{
+          file: 'src/a.js',
+          status: 'done',
+          error: null,
+          explanation: { verdict: 'suggest', summary: '文件分析', issues: [{ severity: 'block', point: '会崩', suggestion: '加判空', line: 3 }] },
+          chat: [],
+          updatedAt: 150,
+        }],
+      }),
+    },
+  });
   try {
     await plugin.call('/pr-review-api/conclude', 'POST', { number: 1 });
     const review = await plugin.waitForConcluding();
@@ -946,6 +961,8 @@ test('publish selection: /comment/preview includeIds filters markdown, returns f
     assert.match(full.json.markdown, /<details>/);
     assert.match(full.json.markdown, /#### 逐文件审查发现/);
     assert.match(full.json.markdown, /#### 总体初筛风险/);
+    // 附录逐文件小节里，意见 bullet 与建议子行都出现（不只是节标题）：
+    assert.match(full.json.markdown, /\*\*src\/a\.js\*\*[\s\S]*- \[阻塞\] 会崩[\s\S]*- 建议：加判空/);
 
     // Selection keeps only the chosen ids (unknown ids ignored), items list stays full.
     const selected = await plugin.call('/pr-review-api/comment/preview', 'POST', {

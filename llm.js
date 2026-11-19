@@ -552,7 +552,6 @@ export function buildConcludePrompt(pull, report, explanations, currentConclusio
     verdict: explanation.verdict ?? '',
     summary: explanation.summary ?? '',
     issues: explanation.issues ?? [],
-    suggestions: explanation.suggestions ?? [],
   }));
   const coverage = options.coverage === null || options.coverage === undefined ? null : options.coverage;
   const previousItems = Array.isArray(options.previousItems) ? options.previousItems : [];
@@ -1362,7 +1361,7 @@ const COMMENT_VERDICT_LABELS = {
 
 /**
  * Severity tags used inside the comment appendix. `suggest` reads as "提示" so it never shares
- * the word "建议" with the real suggestion bullets (`- 建议：…`): an issue/risk at suggestion
+ * the word "建议" with the real suggestion sub-lines (`  - 建议：…`): an issue/risk at suggestion
  * severity is a note, not a change request.
  */
 const COMMENT_SEVERITY_LABELS = {
@@ -1458,11 +1457,15 @@ export function buildCommentAppendix(appendix, language = 'zh', compact = false)
     const blocks = [];
     for (const entry of files.slice(0, caps.files)) {
       const lines = [`**${entry.file}**`];
-      for (const issue of (Array.isArray(entry.issues) ? entry.issues : []).slice(0, caps.perFile)) {
-        lines.push(appendixBullet(issue, zh));
-      }
-      for (const suggestion of (Array.isArray(entry.suggestions) ? entry.suggestions : []).slice(0, caps.perFile)) {
-        lines.push(`- ${labels.suggestion}：${suggestion}`);
+      // One merged findings list per file: each finding is a bullet, its inline suggestion
+      // (if any) an indented sub-line so advice stays attached to the finding it fixes.
+      for (const finding of (Array.isArray(entry.findings) ? entry.findings : []).slice(0, caps.perFile)) {
+        lines.push(appendixBullet(finding, zh));
+        const advice = typeof finding?.suggestion === 'string' ? finding.suggestion.trim() : '';
+        if (advice !== '') {
+          const suggestionLabel = zh ? `${labels.suggestion}：` : `${labels.suggestion}: `;
+          lines.push(`  - ${suggestionLabel}${advice}`);
+        }
       }
       blocks.push(lines.join('\n'));
     }
