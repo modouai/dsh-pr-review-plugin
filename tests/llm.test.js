@@ -22,6 +22,7 @@ import {
   compareComments,
   conclusionCoverage,
   extractJson,
+  findingsOf,
   itemId,
   mergeConclusion,
   normalizeConcerns,
@@ -889,4 +890,45 @@ test('English self-doubt is treated like Chinese', () => {
   }, [{ severity: 'suggest', file: 'a.js', point: 'A', line: 0 }]);
   assert.deepEqual(issues, []);
   assert.equal(unverified.length, 1);
+});
+
+test('normalizeExplanation merges legacy suggestions into suggest findings and drops the field', () => {
+  const explanation = normalizeExplanation({
+    verdict: 'suggest',
+    summary: 's',
+    issues: [{ severity: 'block', point: ' 空指针风险 ', suggestion: ' 补空判断 ', line: 12 }, { severity: 'nope', point: '', line: -3 }],
+    // legacy shape 1: plain strings
+    suggestions: ['补齐单测', '   '],
+    // legacy shape 2: { point|text, line } objects
+  });
+  assert.deepEqual(explanation.issues, [
+    { severity: 'block', point: '空指针风险', suggestion: '补空判断', line: 12 },
+    { severity: 'suggest', point: '补齐单测', suggestion: '', line: 0 },
+  ]);
+  assert.equal(explanation.suggestions, undefined);
+});
+
+test('normalizeExplanation folds legacy suggestion objects with point/text and line', () => {
+  const explanation = normalizeExplanation({
+    issues: [],
+    suggestions: [{ point: '抽公共 helper', line: 8 }, { text: '补集成测试', line: 0 }, { line: 3 }, null, '字符串建议'],
+  });
+  assert.deepEqual(explanation.issues, [
+    { severity: 'suggest', point: '抽公共 helper', suggestion: '', line: 8 },
+    { severity: 'suggest', point: '补集成测试', suggestion: '', line: 0 },
+    { severity: 'suggest', point: '字符串建议', suggestion: '', line: 0 },
+  ]);
+});
+
+test('findingsOf normalizes issues and folds legacy suggestions for unmigrated records', () => {
+  assert.deepEqual(findingsOf({
+    issues: [{ severity: 'block', point: 'p', line: 3 }],
+    suggestions: [{ text: '旧建议', line: 5 }],
+  }), [
+    { severity: 'block', point: 'p', suggestion: '', line: 3 },
+    { severity: 'suggest', point: '旧建议', suggestion: '', line: 5 },
+  ]);
+  assert.deepEqual(findingsOf(null), []);
+  assert.deepEqual(findingsOf(undefined), []);
+  assert.deepEqual(findingsOf({ issues: 'nope' }), []);
 });

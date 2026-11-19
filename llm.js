@@ -893,15 +893,44 @@ export function normalizeReport(raw, fallbackOrder) {
   };
 }
 
+/**
+ * The merged findings of one file explanation: every finding carries its own suggestion.
+ * Legacy caches kept suggestions as a second list (plain strings or `{ point|text, line }`
+ * objects); they fold in here as `suggest` findings so no reader ever branches on the old
+ * shape. This is the single normalization point — normalizeExplanation and every backend
+ * reader go through it.
+ */
+export function findingsOf(explanation) {
+  const issues = (Array.isArray(explanation?.issues) ? explanation.issues : [])
+    .filter((item) => item !== null && typeof item === 'object')
+    .map((item) => ({
+      severity: item.severity === 'block' ? 'block' : 'suggest',
+      point: typeof item.point === 'string' ? item.point.trim() : '',
+      suggestion: typeof item.suggestion === 'string' ? item.suggestion.trim() : '',
+      line: typeof item.line === 'number' && Number.isFinite(item.line) && item.line > 0 ? Math.floor(item.line) : 0,
+    }))
+    .filter((item) => item.point !== '');
+  const legacy = (Array.isArray(explanation?.suggestions) ? explanation.suggestions : [])
+    .map((item) => {
+      if (typeof item === 'string') return { severity: 'suggest', point: item.trim(), suggestion: '', line: 0 };
+      if (item === null || typeof item !== 'object') return null;
+      const point = typeof item.point === 'string' && item.point.trim() !== ''
+        ? item.point.trim()
+        : (typeof item.text === 'string' ? item.text.trim() : '');
+      if (point === '') return null;
+      return {
+        severity: 'suggest',
+        point,
+        suggestion: '',
+        line: typeof item.line === 'number' && Number.isFinite(item.line) && item.line > 0 ? Math.floor(item.line) : 0,
+      };
+    })
+    .filter((item) => item !== null && item.point !== '');
+  return [...issues, ...legacy];
+}
+
 /** Normalize one file explanation (walkthrough included). */
 export function normalizeExplanation(raw) {
-  const issues = Array.isArray(raw?.issues)
-    ? raw.issues.filter((issue) => issue !== null && typeof issue === 'object').map((issue) => ({
-        severity: issue.severity === 'block' ? 'block' : 'suggest',
-        point: typeof issue.point === 'string' ? issue.point : '',
-        line: typeof issue.line === 'number' ? issue.line : 0,
-      }))
-    : [];
   const walkthrough = Array.isArray(raw?.walkthrough)
     ? raw.walkthrough.filter((step) => step !== null && typeof step === 'object').map((step) => ({
         title: typeof step.title === 'string' ? step.title : '',
@@ -923,9 +952,8 @@ export function normalizeExplanation(raw) {
     logic: typeof raw?.logic === 'string' ? raw.logic : '',
     walkthrough,
     changes: typeof raw?.changes === 'string' ? raw.changes : '',
-    issues,
+    issues: findingsOf(raw),
     unverified: normalizeUnverified(raw?.unverified),
-    suggestions: Array.isArray(raw?.suggestions) ? raw.suggestions.filter((item) => typeof item === 'string') : [],
   };
 }
 
