@@ -1940,9 +1940,9 @@ export function apply(ctx, config) {
       if (entry.explanation !== null && entry.explanation !== undefined && ops.length > 0) {
         const result = applyFindingOps(entry.explanation, ops);
         if (result.applied.length > 0) {
-          // review_update_analysis can still write the legacy `suggestions` key into memory;
-          // dropping it keeps the stored shape merged, or the folded suggestions would come
-          // straight back on the next read and double every number the chat prompt shows.
+          // No in-tree write path produces the legacy `suggestions` key any more, but the
+          // write-back still drops it: a stale out-of-tree cache must not fold straight back
+          // on the next read and double every number the chat prompt shows.
           const { suggestions: _legacy, ...explanation } = entry.explanation;
           entry.explanation = { ...explanation, issues: result.list };
           applied = result.applied;
@@ -2885,7 +2885,7 @@ export function apply(ctx, config) {
       const analysis = entry === undefined
         ? '未分析'
         : entry.status === 'done'
-          ? `已分析（${(entry.explanation?.issues ?? []).length} 条意见 / ${(entry.explanation?.suggestions ?? []).length} 条建议）`
+          ? `已分析（${(entry.explanation?.issues ?? []).length} 条意见）`
           : entry.status === 'error' ? '分析失败' : '分析中';
       lines.push(`当前查看：文件 ${focus.path}（${analysis}${focus.pane === 'analysis' ? '，分析面板' : '，代码变更面板'}）`);
     } else {
@@ -2986,9 +2986,9 @@ export function apply(ctx, config) {
       const nextFindings = effective === 'all' ? [] : findings.filter((item) => item.severity === 'block');
       cleared.issues += findings.length - nextFindings.length;
       if (nextFindings.length === findings.length) continue;
-      // review_update_analysis can still write the legacy `suggestions` key into memory;
-      // dropping it here keeps the stored shape merged, or the cleared findings would be
-      // folded straight back on every later read while the count claimed them cleared.
+      // No in-tree write path produces the legacy `suggestions` key any more, but clearing
+      // still drops it when rewriting: a stale out-of-tree cache must not fold straight back
+      // on every later read while the count claimed the findings cleared.
       const { suggestions: _legacy, ...explanation } = entry.explanation;
       entry.explanation = { ...explanation, issues: nextFindings };
       entry.updatedAt = at;
@@ -3046,7 +3046,7 @@ export function apply(ctx, config) {
             `覆盖率：已分析 ${coverage.analyzed ?? 0}/${coverage.total ?? (record.files ?? []).length} 个文件`,
             `过期：${isStale(record) ? '结论之后有新的报告/分析改动，可重新生成结论' : '无'}`,
             `变更文件：${(record.files ?? []).length} 个 · 已发布评论：${(record.published ?? []).length} 条`,
-            `总览：初筛风险 ${overviewCounts(record).risks} · 逐文件意见 ${overviewCounts(record).issues}（review_update_overview 可一次改总览）`,
+            `总览：初筛风险 ${overviewCounts(record).risks} · 逐文件审查意见 ${overviewCounts(record).issues} 条（review_update_overview 可一次改总览）`,
             `revision：${record.revision ?? 0}（写入工具必须带回这个值）`,
           ]);
         },
@@ -3062,7 +3062,7 @@ export function apply(ctx, config) {
       },
       {
         name: 'review_list_files',
-        description: '列出变更文件及逐文件分析状态（未分析/分析中/已分析、意见与建议数量），按审查顺序排列。',
+        description: '列出变更文件及逐文件分析状态（未分析/分析中/已分析、审查意见数量），按审查顺序排列。',
         parameters: { type: 'object', additionalProperties: false, properties: { number: numberProperty } },
         output: textOutput,
         async execute(args, exec) {
@@ -3080,7 +3080,7 @@ export function apply(ctx, config) {
             const progress = entry === undefined
               ? '未分析'
               : entry.status === 'done'
-                ? `已分析（${(entry.explanation?.issues ?? []).length} 条意见 / ${(entry.explanation?.suggestions ?? []).length} 条建议）`
+                ? `已分析（${(entry.explanation?.issues ?? []).length} 条意见）`
                 : entry.status === 'error'
                   ? '分析失败'
                   : '分析中';
@@ -3091,7 +3091,7 @@ export function apply(ctx, config) {
       },
       {
         name: 'review_get_analysis',
-        description: '读取单个变更文件的逐文件分析：结论、代码逻辑、审查意见（含行号）与改进建议。',
+        description: '读取单个变更文件的逐文件分析：结论、代码逻辑与审查意见（含建议与行号）。',
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -3222,7 +3222,7 @@ export function apply(ctx, config) {
     return [
       {
         name: 'review_update_analysis',
-        description: '更新单个变更文件的逐文件分析（结论/摘要/代码逻辑/审查意见/改进建议），改写审查数据，右栏面板随后可见。必须带 review_get 返回的 revision 做乐观锁。',
+        description: '更新单个变更文件的逐文件分析（结论/摘要/代码逻辑/审查意见），改写审查数据，右栏面板随后可见。必须带 review_get 返回的 revision 做乐观锁。',
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -3235,12 +3235,7 @@ export function apply(ctx, config) {
             issues: {
               type: 'array',
               items: { type: 'object', additionalProperties: true },
-              description: '审查意见列表（传入即整体替换）；每条 { point, line?, severity? }，point ≤ 500 字。',
-            },
-            suggestions: {
-              type: 'array',
-              items: { type: 'object', additionalProperties: true },
-              description: '改进建议列表（传入即整体替换）；每条 { point, line? }，point ≤ 500 字。',
+              description: '审查意见列表（传入即整体替换）；每条 { point, suggestion?, line?, severity? }，point 写问题与影响（≤ 500 字），suggestion 写具体修法，一条最多一条。',
             },
             number: numberProperty,
           },
@@ -3256,9 +3251,6 @@ export function apply(ctx, config) {
           const issues = args.issues === undefined
             ? undefined
             : args.issues.map((item) => sanitizeToolItem(item, 'issue'));
-          const suggestions = args.suggestions === undefined
-            ? undefined
-            : args.suggestions.map((item) => sanitizeToolItem(item, 'suggestion'));
           const entry = record.explanations.get(args.path) ?? {
             file: args.path,
             status: 'done',
@@ -3268,16 +3260,20 @@ export function apply(ctx, config) {
             updatedAt: 0,
           };
           const before = entry.explanation ?? null;
-          const next = {
-            verdict: normalizeVerdict(args.verdict, before?.verdict ?? 'suggest'),
-            summary: args.summary ?? before?.summary ?? '',
-            logic: args.logic ?? before?.logic ?? '',
-            walkthrough: Array.isArray(before?.walkthrough) ? before.walkthrough : [],
-            issues: issues ?? (Array.isArray(before?.issues) ? before.issues : []),
-            suggestions: suggestions ?? (Array.isArray(before?.suggestions) ? before.suggestions : []),
-          };
+          // Normalize the merged explanation through the single shape point: issues become
+          // four-key findings (suggestion inlined), any legacy `suggestions` key is dropped,
+          // and fields the call omits (walkthrough/changes/unverified) survive the edit.
+          const next = normalizeExplanation({
+            verdict: args.verdict ?? before?.verdict,
+            summary: args.summary ?? before?.summary,
+            logic: args.logic ?? before?.logic,
+            walkthrough: before?.walkthrough,
+            changes: before?.changes,
+            issues: issues ?? before?.issues,
+            unverified: before?.unverified,
+          });
           if (JSON.stringify(next).length > 12_000) {
-            throw toolError(TOOL_ERROR.limitExceeded, '该文件分析超过 12000 字符，请精简 issues/suggestions 后重试。');
+            throw toolError(TOOL_ERROR.limitExceeded, '该文件分析超过 12000 字符，请精简 issues 后重试。');
           }
           entry.explanation = next;
           entry.status = 'done';
@@ -3289,7 +3285,7 @@ export function apply(ctx, config) {
           return toolText([
             `已更新分析：${args.path}（revision ${record.revision}）`,
             `结论：${next.verdict} · ${next.summary}`,
-            `意见 ${next.issues.length} 条 / 建议 ${next.suggestions.length} 条`,
+            `意见 ${next.issues.length} 条`,
             '需要继续修改请重新 review_get 取 revision。',
           ]);
         },
@@ -3517,7 +3513,7 @@ export function apply(ctx, config) {
       },
       {
         name: 'review_update_overview',
-        description: '一次更新「总览」：总体评价/摘要、总体初筛风险、审查顺序、审查重点，以及当前轮结论（阻塞项/修改建议/下一步），可选清理逐文件意见与建议（clearFindings）。会刷新结论时间戳（清除 stale），并让面板、发布评论与后续重新生成看到同一份总览；用户说“结论通过 / 去掉所有建议 / 清理意见”时优先用它，不要逐个文件改。必须带 revision。',
+        description: '一次更新「总览」：总体评价/摘要、总体初筛风险、审查顺序、审查重点，以及当前轮结论（阻塞项/修改建议/下一步），可选清理逐文件审查意见（clearFindings）。会刷新结论时间戳（清除 stale），并让面板、发布评论与后续重新生成看到同一份总览；用户说“结论通过 / 清理意见”时优先用它，不要逐个文件改。必须带 revision。',
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -3553,8 +3549,8 @@ export function apply(ctx, config) {
             },
             clearFindings: {
               type: 'string',
-              enum: ['none', 'suggestions', 'suggest', 'all'],
-              description: '清理逐文件/风险层面的 findings：suggestions=清所有建议与 suggest 级风险（保留阻塞项）；suggest=再清 suggest 级审查意见（保留阻塞）；all=清空全部意见/建议/风险。默认 none。',
+              enum: ['none', 'suggest', 'all'],
+              description: '清理逐文件/风险层面的 findings：suggest=清 suggest 级审查意见与 suggest 级初筛风险（保留阻塞项）；all=清空全部意见与风险；suggestions 为弃用别名，等同 suggest。默认 none。',
             },
             number: numberProperty,
           },
@@ -3710,7 +3706,7 @@ export function apply(ctx, config) {
       systemPrompt.section({
         name: 'pr-review: review-data',
         order: 60,
-        text: 'PR 审查插件：审查数据（总体报告、逐文件分析、当前轮结论）保存在本地，代码平台上的审查评论只是这份数据的渲染结果。要调整下一次发布的审查意见，用 review_update_overview 一次改总览（结论 + 总体评价/风险/顺序，可选 clearFindings 清理逐文件意见与建议）；只有单文件/单轮细节才用 review_update_conclusion / review_update_analysis / review_update_report（先 review_get 取 revision）；不要直接编辑平台上已发布的评论。用户要求「重新生成结论 / 发布 / 查看评论 / 在代码平台打开」时，分别用 review_conclude / review_publish / review_get_links 触发；发布是真实写操作，只在用户明确要求时调用。对话里出现 <review-context> 时，用户说「这个文件/这条/这里」默认指快照的「当前查看」范围：直接按它操作（例如标记该文件通过就 review_update_analysis + verdict），不要反问是哪个文件；只有没有快照时才问。需要确认时主动用 ask_user_question 问、不要猜：发布范围不唯一（哪些条目）、同一轮同一版本已发布过是否追加、要改哪一轮/哪个文件但快照缺失、或用户一句话里出现多个候选对象。',
+        text: 'PR 审查插件：审查数据（总体报告、逐文件分析、当前轮结论）保存在本地，代码平台上的审查评论只是这份数据的渲染结果。要调整下一次发布的审查意见，用 review_update_overview 一次改总览（结论 + 总体评价/风险/顺序，可选 clearFindings 清理逐文件审查意见）；只有单文件/单轮细节才用 review_update_conclusion / review_update_analysis / review_update_report（先 review_get 取 revision）；不要直接编辑平台上已发布的评论。用户要求「重新生成结论 / 发布 / 查看评论 / 在代码平台打开」时，分别用 review_conclude / review_publish / review_get_links 触发；发布是真实写操作，只在用户明确要求时调用。对话里出现 <review-context> 时，用户说「这个文件/这条/这里」默认指快照的「当前查看」范围：直接按它操作（例如标记该文件通过就 review_update_analysis + verdict），不要反问是哪个文件；只有没有快照时才问。需要确认时主动用 ask_user_question 问、不要猜：发布范围不唯一（哪些条目）、同一轮同一版本已发布过是否追加、要改哪一轮/哪个文件但快照缺失、或用户一句话里出现多个候选对象。',
       });
     } catch (error) {
       console.warn('[pr-review] 注册提示词段落失败', error);

@@ -1212,23 +1212,21 @@ test('a file chat with legacy suggestionOps still rewrites findings', async () =
   }
 });
 
-test('a file chat drops the legacy suggestions key left by review_update_analysis', async () => {
+test('a file chat edits the merged list review_update_analysis wrote and leaves no legacy key', async () => {
   const plugin = await setup({
     llm: llmFromText(JSON.stringify({
       answer: '好',
-      findingOps: [{ op: 'update', index: 2, suggestion: '新修法' }],
+      findingOps: [{ op: 'update', index: 1, suggestion: '新修法' }],
     })),
   });
   try {
-    // review_update_analysis（Task 6 移除 suggestions 参数前）会把遗留 suggestions 键写进
-    // 内存；随后的文件对话必须把它折叠进 issues 恰好一次，且写回时不把旧键留下——否则
-    // 下一次对话的编号列表里每条旧建议出现两遍（编号错位）。
+    // review_update_analysis 只写合并形状（issues[].suggestion）；随后的文件对话在同一个
+    // 列表上按 1 起始的编号改写，写回仍不得出现 legacy suggestions 键。
     await plugin.runTool('review_update_analysis', {
       path: 'src/a.js',
       revision: 0,
       summary: '工具改写',
-      issues: [{ point: '人写的问题', line: 3, severity: 'block' }],
-      suggestions: [{ point: '改成分片读取', line: 5 }],
+      issues: [{ point: '人写的问题', suggestion: '', line: 3, severity: 'block' }],
     });
     const chat = await plugin.call('/pr-review-api/chat', 'POST', { number: 1, message: '第二条补个修法', path: 'src/a.js' });
     assert.equal(chat.status, 200);
@@ -1237,8 +1235,7 @@ test('a file chat drops the legacy suggestions key left by review_update_analysi
     const entry = review.explanations.find((item) => item.file === 'src/a.js');
     assert.ok(!('suggestions' in entry.explanation));
     assert.deepEqual(entry.explanation.issues, [
-      { severity: 'block', point: '人写的问题', suggestion: '', line: 3 },
-      { severity: 'suggest', point: '改成分片读取', suggestion: '新修法', line: 5 },
+      { severity: 'block', point: '人写的问题', suggestion: '新修法', line: 3 },
     ]);
   } finally {
     await plugin.dispose();
@@ -1408,10 +1405,12 @@ test('review_get and review_list_files read the loaded review', async () => {
     assert.match(summary, /PR #1/);
     assert.match(summary, /第 1 轮/);
     assert.match(summary, /已分析 1\/1/);
+    assert.match(summary, /逐文件审查意见 1 条/);
 
     const files = await plugin.runTool('review_list_files');
     assert.match(files, /src\/a\.js/);
-    assert.match(files, /已分析/);
+    assert.match(files, /已分析（1 条意见）/);
+    assert.doesNotMatch(files, / \/ 建议/);
 
     const report = await plugin.runTool('review_get_report');
     assert.match(report, /初步报告/);
@@ -1515,7 +1514,26 @@ test('review_get_comments returns the platform comments oldest first', async () 
 });
 
 test('review_update_analysis writes with an optimistic lock and records audit', async () => {
-  const plugin = await setup();
+  const plugin = await setup({
+    reviews: {
+      1: legacyReview({
+        explanations: [{
+          file: 'src/a.js',
+          status: 'done',
+          error: null,
+          explanation: {
+            verdict: 'suggest',
+            summary: '文件分析',
+            logic: '读取后逐段处理',
+            issues: [{ severity: 'suggest', point: '注意', line: 1 }],
+            unverified: [{ point: '未能核实的说法', missing: '缺少证据' }],
+          },
+          chat: [],
+          updatedAt: 150,
+        }],
+      }),
+    },
+  });
   try {
     const summary = await plugin.runTool('review_get');
     assert.match(summary, /revision：0/);
@@ -1535,17 +1553,25 @@ test('review_update_analysis writes with an optimistic lock and records audit', 
       revision: 0,
       verdict: 'block',
       summary: '改写后的结论',
-      issues: [{ point: '人写的问题', line: 3, severity: 'block' }],
-      suggestions: [{ point: '改成分片读取', line: 5 }],
+      issues: [{ point: '人写的问题', suggestion: '人写的修法', line: 3, severity: 'block' }],
     });
     assert.match(written, /已更新分析/);
     assert.match(written, /revision 1/);
-    assert.match(written, /意见 1 条 \/ 建议 1 条/);
+    assert.match(written, /意见 1 条/);
+    assert.doesNotMatch(written, / \/ 建议/);
 
     const stored = await plugin.review();
     assert.equal(stored.revision, 1);
-    assert.equal(stored.explanations[0].explanation.summary, '改写后的结论');
-    assert.equal(stored.explanations[0].explanation.issues[0].point, '人写的问题');
+    const explanation = stored.explanations[0].explanation;
+    assert.equal(explanation.summary, '改写后的结论');
+    assert.equal(explanation.logic, '读取后逐段处理', 'fields the call omits survive the rewrite');
+    assert.deepEqual(explanation.issues, [
+      { severity: 'block', point: '人写的问题', suggestion: '人写的修法', line: 3 },
+    ]);
+    assert.ok(!('suggestions' in explanation), 'no legacy suggestions key is written');
+    // A human edit used to drop the unverified list; the write goes through
+    // normalizeExplanation now and keeps it.
+    assert.deepEqual(explanation.unverified, [{ point: '未能核实的说法', missing: '缺少证据' }]);
     assert.equal(stored.audit.length, 1);
     assert.equal(stored.audit[0].tool, 'review_update_analysis');
     assert.match(stored.audit[0].summary, /src\/a\.js/);
@@ -1656,6 +1682,8 @@ test('/focus makes the snapshot follow the panel', async () => {
       pane: 'diff',
     });
     assert.match(plugin.promptContext('session-a'), /当前查看：文件 src\/a\.js/);
+    assert.match(plugin.promptContext('session-a'), /已分析（1 条意见）/);
+    assert.doesNotMatch(plugin.promptContext('session-a'), / \/ 建议/);
   } finally {
     await plugin.dispose();
   }
@@ -1682,7 +1710,26 @@ test('a rejected runtime-context registration leaves the plugin usable', async (
 });
 
 test('review_update_analysis writes with an optimistic lock and records audit', async () => {
-  const plugin = await setup();
+  const plugin = await setup({
+    reviews: {
+      1: legacyReview({
+        explanations: [{
+          file: 'src/a.js',
+          status: 'done',
+          error: null,
+          explanation: {
+            verdict: 'suggest',
+            summary: '文件分析',
+            logic: '读取后逐段处理',
+            issues: [{ severity: 'suggest', point: '注意', line: 1 }],
+            unverified: [{ point: '未能核实的说法', missing: '缺少证据' }],
+          },
+          chat: [],
+          updatedAt: 150,
+        }],
+      }),
+    },
+  });
   try {
     const summary = await plugin.runTool('review_get');
     assert.match(summary, /revision：0/);
@@ -1702,17 +1749,25 @@ test('review_update_analysis writes with an optimistic lock and records audit', 
       revision: 0,
       verdict: 'block',
       summary: '改写后的结论',
-      issues: [{ point: '人写的问题', line: 3, severity: 'block' }],
-      suggestions: [{ point: '改成分片读取', line: 5 }],
+      issues: [{ point: '人写的问题', suggestion: '人写的修法', line: 3, severity: 'block' }],
     });
     assert.match(written, /已更新分析/);
     assert.match(written, /revision 1/);
-    assert.match(written, /意见 1 条 \/ 建议 1 条/);
+    assert.match(written, /意见 1 条/);
+    assert.doesNotMatch(written, / \/ 建议/);
 
     const stored = await plugin.review();
     assert.equal(stored.revision, 1);
-    assert.equal(stored.explanations[0].explanation.summary, '改写后的结论');
-    assert.equal(stored.explanations[0].explanation.issues[0].point, '人写的问题');
+    const explanation = stored.explanations[0].explanation;
+    assert.equal(explanation.summary, '改写后的结论');
+    assert.equal(explanation.logic, '读取后逐段处理', 'fields the call omits survive the rewrite');
+    assert.deepEqual(explanation.issues, [
+      { severity: 'block', point: '人写的问题', suggestion: '人写的修法', line: 3 },
+    ]);
+    assert.ok(!('suggestions' in explanation), 'no legacy suggestions key is written');
+    // A human edit used to drop the unverified list; the write goes through
+    // normalizeExplanation now and keeps it.
+    assert.deepEqual(explanation.unverified, [{ point: '未能核实的说法', missing: '缺少证据' }]);
     assert.equal(stored.audit.length, 1);
     assert.equal(stored.audit[0].tool, 'review_update_analysis');
     assert.match(stored.audit[0].summary, /src\/a\.js/);
@@ -1749,6 +1804,35 @@ test('review_update_report rewrites the report and marks the conclusion stale', 
     const summary = await plugin.runTool('review_get');
     assert.match(summary, /revision：1/);
     assert.match(summary, /结论之后有新的报告/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('review_update_analysis normalizes the written explanation and drops the legacy suggestions argument', async () => {
+  const plugin = await setup();
+  try {
+    // `suggestions` 参数已从 schema 移除：宿主不读它，旧调用方式的内容不会被当成独立
+    // 建议保留——修法必须通过 issues[].suggestion 表达。写入统一经 normalizeExplanation
+    // 归一为四键 issues，且不再产出 legacy suggestions 键。
+    const written = await plugin.runTool('review_update_analysis', {
+      path: 'src/a.js',
+      revision: 0,
+      verdict: 'block',
+      summary: '旧参数改写',
+      issues: [{ point: '阻塞意见', suggestion: '修法', line: 1, severity: 'block' }],
+      suggestions: [{ point: '旧参数建议', line: 7 }],
+    });
+    assert.match(written, /意见 1 条/);
+    assert.doesNotMatch(written, / \/ 建议/);
+
+    const stored = await plugin.review();
+    const explanation = stored.explanations[0].explanation;
+    assert.deepEqual(explanation.issues, [
+      { severity: 'block', point: '阻塞意见', suggestion: '修法', line: 1 },
+    ]);
+    assert.ok(!('suggestions' in explanation));
+    assert.ok(!JSON.stringify(explanation).includes('旧参数建议'), 'the dropped argument must not survive anywhere');
   } finally {
     await plugin.dispose();
   }
@@ -1971,6 +2055,15 @@ test('review_update_overview rewrites the whole overview in one call and clears 
     assert.match(written, /初筛风险 0 条/);
     assert.match(written, /逐文件意见 0 条/);
     assert.match(written, /已清理/);
+    // 结论层的「修改建议 N 条」保留；逐文件层不再出现「/ 建议 N 条」计数。
+    assert.match(written, /修改建议 0 条/);
+    assert.doesNotMatch(written, / \/ 建议 \d+ 条/);
+
+    // Schema 收敛后弃用的 `suggestions` scope 不再由工具层承诺。
+    assert.deepEqual(
+      plugin.tools.get('review_update_overview').parameters.properties.clearFindings.enum,
+      ['none', 'suggest', 'all'],
+    );
 
     const stored = await plugin.review();
     assert.equal(stored.revision, 1);
@@ -2064,10 +2157,10 @@ test('review_update_overview clearFindings keeps block items for narrower scopes
   assert.deepEqual(allCleared.issues, []);
   assert.deepEqual(allCleared.risks, []);
 
-  // `suggestions` is the deprecated pre-merge alias: it now behaves like `suggest`.
-  const aliasCleared = await clearWith('suggestions');
-  assert.deepEqual(aliasCleared.issues, [{ severity: 'block', point: '阻塞', suggestion: '', line: 1 }]);
-  assert.deepEqual(aliasCleared.risks, ['block']);
+  // The tool schema narrowed with the merge: the deprecated `suggestions` scope is no longer
+  // promised at the tool layer (callers pass `suggest`, asserted against the enum above in
+  // the overview-rewrite test). The function-level alias shim inside clearOverviewFindings
+  // stays as defense for direct callers.
 
   // `none` and unknown scopes clear nothing (defense against typo'd callers).
   for (const scope of ['none', 'whatever']) {
@@ -2080,24 +2173,23 @@ test('review_update_overview clearFindings keeps block items for narrower scopes
   }
 });
 
-test('clearOverviewFindings drops the legacy suggestions key review_update_analysis can write back', async () => {
+test('clearFindings clears tool-written findings and the legacy suggestions argument stays dropped', async () => {
   const plugin = await setup();
   try {
-    // review_update_analysis still accepts the legacy `suggestions` parameter and writes
-    // it straight into memory next to `issues` — exactly the pre-merge shape.
+    // Task 6 起 review_update_analysis 只写合并形状：旧 `suggestions` 参数被整体忽略，
+    // 「模型后来补的建议」不会进列表，也不会有 legacy 键落库。
     await plugin.runTool('review_update_analysis', {
       path: 'src/a.js',
       revision: 0,
       verdict: 'block',
       summary: '人工改写',
-      issues: [{ point: '阻塞意见', line: 1, severity: 'block' }],
+      issues: [{ point: '阻塞意见', suggestion: '修法', line: 1, severity: 'block' }],
       suggestions: [{ point: '模型后来补的建议', line: 2 }],
     });
 
-    // Clearing everything must drop the key, not just hide the findings: otherwise every
-    // reader folds the leftover suggestions straight back and the cleared count lies.
+    // 清空必须清得干净且计数如实：只有 1 条意见可清（旧参数建议从未进列表）。
     const written = await plugin.runTool('review_update_overview', { revision: 1, clearFindings: 'all' });
-    assert.match(written, /已清理：意见 2 条、风险 1 条/);
+    assert.match(written, /已清理：意见 1 条、风险 1 条/);
 
     const stored = await plugin.review();
     const explanation = stored.explanations[0].explanation;
