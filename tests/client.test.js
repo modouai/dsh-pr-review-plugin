@@ -121,12 +121,18 @@ function createFakeReact() {
     return frame;
   }
 
-  function slotOf(initial) {
+  function slotOf(initial, kind) {
     const frame = currentFrame();
     const index = frame.index;
     frame.index += 1;
+    // Each slot records the hook kind that produced it, and the frame accumulates the
+    // per-render kind sequence — a hook swapped for another kind is drift even when the
+    // total count stays the same.
+    frame.kinds.push(kind);
     if (index >= frame.slots.length) {
-      frame.slots.push({ value: typeof initial === 'function' ? initial() : initial });
+      frame.slots.push({ kind, value: typeof initial === 'function' ? initial() : initial });
+    } else {
+      frame.slots[index].kind = kind;
     }
     return frame.slots[index];
   }
@@ -135,29 +141,32 @@ function createFakeReact() {
     Fragment,
     createElement,
     memo: (component) => component,
-    useState: (initial) => [slotOf(initial).value, noop],
-    useReducer: (reducer, initial) => [
-      typeof initial === 'function' ? initial() : initial,
-      noop,
-    ],
+    useState: (initial) => [slotOf(initial, 'state').value, noop],
+    // useReducer keeps its slot-free shape (it stores no value); it still joins the
+    // kind sequence so a reducer/state swap is visible in rerender's kinds.
+    useReducer: (reducer, initial) => {
+      currentFrame().kinds.push('reducer');
+      return [typeof initial === 'function' ? initial() : initial, noop];
+    },
     // Every hook consumes one slot even when it ignores the stored value: real React advances
     // its hook cursor per call, so a component whose hook COUNT varies between renders is a
     // hooks-order violation. useMemo still recomputes and useCallback still passes through.
+    // NOTE: unlike real React, this fake recomputes the factory on every render and does not honor dependency arrays — tests must not rely on memoized identity.
     useMemo: (factory) => {
-      const slot = slotOf(undefined);
+      const slot = slotOf(undefined, 'memo');
       slot.value = factory();
       return slot.value;
     },
     useCallback: (callback) => {
-      slotOf(undefined);
+      slotOf(undefined, 'callback');
       return callback;
     },
-    useRef: (initial) => slotOf(() => ({ current: initial })).value,
+    useRef: (initial) => slotOf(() => ({ current: initial }), 'ref').value,
     useEffect: () => {
-      slotOf(undefined);
+      slotOf(undefined, 'effect');
     },
     useLayoutEffect: () => {
-      slotOf(undefined);
+      slotOf(undefined, 'layout');
     },
   };
 
@@ -174,7 +183,7 @@ function createFakeReact() {
       return list;
     }
     if (typeof node.type === 'function') {
-      const frame = { slots: [], index: 0 };
+      const frame = { slots: [], index: 0, kinds: [] };
       hookStack.push(frame);
       let rendered;
       try {
@@ -243,13 +252,17 @@ function createFakeReact() {
    * re-rendering a mounted component: the hook slots persist while the cursor resets per
    * invocation. The slot index after each invocation is the number of hooks that invocation
    * consumed, so unequal counts mean a hooks-order violation that a one-shot render cannot see.
+   * `kinds` mirrors that per invocation as the sequence of hook kinds invoked, so a kind
+   * swap that keeps the count stable is caught too.
    */
   function rerender(type, propsList) {
     const trees = [];
     const counts = [];
-    const frame = { slots: [], index: 0 };
+    const kinds = [];
+    const frame = { slots: [], index: 0, kinds: [] };
     for (const props of propsList) {
       frame.index = 0;
+      frame.kinds.length = 0;
       hookStack.push(frame);
       let rendered;
       try {
@@ -258,9 +271,10 @@ function createFakeReact() {
         hookStack.pop();
       }
       counts.push(frame.index);
+      kinds.push([...frame.kinds]);
       trees.push(expand(rendered));
     }
-    return { trees, counts };
+    return { trees, counts, kinds };
   }
 
   return { React, Fragment, render, rerender, textOf };
@@ -2843,6 +2857,35 @@ test('derivePhase distinguishes concluded / stale / published states', () => {
   assert.equal(parts.derivePhase(published, staleInfo).nextAction, 'regenerate');
 });
 
+test('derivePhase combination order: error first, version kept, stale before concluded', () => {
+  const { parts } = loadClient();
+  const concluded = makeReview({
+    round: 2,
+    conclusion: { verdict: 'suggest', summary: 's', blockers: [], suggestions: [], nextSteps: [] },
+    conclusionAt: 5000,
+  });
+  const staleInfo = { createdAt: 1, files: ['src/a.js'], reportNewer: false, count: 1 };
+
+  // Error wins over everything — including a running analyze batch — but the version
+  // still reports the newest conclusion version instead of resetting to v0.
+  const errored = { ...concluded, status: 'error' };
+  assert.equal(parts.derivePhase(errored, null).phase, 'error');
+  assert.equal(parts.derivePhase(errored, null).version, 1);
+  const erroredAnalyzing = { ...errored, analyzing: { done: 0, total: 2, failed: 0, current: 'src/a.js' } };
+  assert.equal(parts.derivePhase(erroredAnalyzing, null).phase, 'error');
+
+  // A concluded round that starts re-analyzing folds back to the analyzing phase, version kept.
+  const analyzing = { ...concluded, analyzing: { done: 1, total: 2, failed: 0, current: 'src/b.js' } };
+  assert.equal(parts.derivePhase(analyzing, null).phase, 'analyzing');
+  assert.equal(parts.derivePhase(analyzing, null).version, 1);
+
+  // Stale is judged before the concluded fallback: the same record flips to regenerate.
+  const stale = parts.derivePhase(concluded, staleInfo);
+  assert.equal(stale.phase, 'concluded-stale');
+  assert.equal(stale.nextAction, 'regenerate');
+  assert.equal(stale.version, 1);
+});
+
 test('phase and conclusion badge text follow the phase', () => {
   const { parts } = loadClient();
   const t = (key) => key;
@@ -3146,6 +3189,11 @@ test('OverviewPage keeps its hook order across pending/historical/current transi
     props(makeReview({ round: 2, roundHistory: [makeRound(1), makeRound(2)] }), null),
   ]);
   assert.equal(new Set(result.counts).size, 1);
+  // The hook KIND sequence must match across the three transitions too: a swap that keeps
+  // the count stable is still hooks-order drift. (The fake lives in this test realm, so no
+  // plain() crossing is needed.)
+  assert.deepEqual(result.kinds[0], result.kinds[1]);
+  assert.deepEqual(result.kinds[1], result.kinds[2]);
 });
 
 test('ConclusionPage renders the pending card and the published conclusion', () => {
@@ -3666,6 +3714,9 @@ test('ConclusionPage keeps its hook order across pending/historical/current tran
     props(concluded, null),
   ]);
   assert.equal(new Set(result.counts).size, 1, 'every transition consumes the same hook count');
+  // The kind sequence must match across the three transitions too.
+  assert.deepEqual(result.kinds[0], result.kinds[1]);
+  assert.deepEqual(result.kinds[1], result.kinds[2]);
   // The three props really did exercise the three render branches.
   const [pendingText, historicalText, currentText] = result.trees.map((tree) => fake.textOf(tree));
   assert.ok(pendingText.includes('结论待生成'));
@@ -3674,6 +3725,27 @@ test('ConclusionPage keeps its hook order across pending/historical/current tran
   // A round with delta data must not leak the cross-round record onto the conclusion page.
   assert.ok(!historicalText.includes('复审对比'));
   assert.ok(!currentText.includes('复审对比'));
+});
+
+test('rerender catches a hook-kind drift that keeps the hook count stable', () => {
+  const { fake } = loadClient();
+  const { React } = fake;
+  // Both orders consume exactly two hooks, so `counts` alone sees no drift; the kind
+  // sequence is what exposes the conditional hook order change between renders.
+  function Drifter(props) {
+    if (props.memoFirst) React.useMemo(() => props.label, []);
+    else React.useState(props.label);
+    React.useState(0);
+    return React.createElement('div', null, props.label);
+  }
+  const result = fake.rerender(Drifter, [
+    { memoFirst: true, label: 'a' },
+    { memoFirst: false, label: 'b' },
+  ]);
+  assert.deepEqual(result.counts, [2, 2]);
+  assert.deepEqual(result.kinds[0], ['memo', 'state']);
+  assert.deepEqual(result.kinds[1], ['state', 'state']);
+  assert.notDeepEqual(result.kinds[0], result.kinds[1]);
 });
 
 test('the publish modal opens only when the preview flag is set alongside a preview', () => {

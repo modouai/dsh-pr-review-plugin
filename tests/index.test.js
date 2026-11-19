@@ -660,6 +660,63 @@ test('zero findings with an analysis still pending stays hidden', async () => {
   }
 });
 
+test('a done entry without an explanation body never completes the preview coverage', async () => {
+  // startAnalysisBatch treats `done` with a null explanation as an empty analysis and
+  // requeues it; the preview must count the same way, or a restored record whose bodies
+  // are still missing would be misjudged as fully analysed and claim「全部已修复」.
+  const onlyFileDoneWithoutBody = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    delta: null,
+    published: [],
+    publishedItems: [],
+    previousRound: {
+      round: 1,
+      headSha: 'abc123',
+      conclusion: null,
+      items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }],
+    },
+    explanations: [
+      { file: 'src/a.js', status: 'done', error: null, explanation: null, chat: [], updatedAt: 150 },
+    ],
+  });
+  const doneWithoutBodyPlusPending = legacyReview({
+    number: 2,
+    files: [
+      { path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+      { path: 'src/b.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+    ],
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    delta: null,
+    published: [],
+    publishedItems: [],
+    previousRound: {
+      round: 1,
+      headSha: 'abc123',
+      conclusion: null,
+      items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }],
+    },
+    explanations: [
+      { file: 'src/a.js', status: 'done', error: null, explanation: null, chat: [], updatedAt: 150 },
+    ],
+  });
+  const plugin = await setup({ reviews: { 1: onlyFileDoneWithoutBody, 2: doneWithoutBodyPlusPending } });
+  try {
+    // The only file reports done with a null body: under done-only counting this single
+    // record already reaches full coverage and would resolve the previous item.
+    assert.equal((await plugin.review(1)).delta, null);
+    // The done-without-body file plus a not-yet-analysed file stays hidden too.
+    assert.equal((await plugin.review(2)).delta, null);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 test('async /conclude: returns started, rejects duplicates with 409, appends a model version', async () => {
   const conclusionJson = JSON.stringify({
     verdict: 'block',

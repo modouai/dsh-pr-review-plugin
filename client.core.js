@@ -252,7 +252,13 @@ window.__ModuleLoader__.load({
      */
     function derivePhase(review, staleInfo, options = {}) {
       const data = review ?? {};
-      if (data.status === 'error') return { phase: 'error', progress: null, nextAction: null, version: 0 };
+      // The version is resolved before the status branches: even an errored review keeps
+      // reporting the newest conclusion version it reached instead of resetting to v0.
+      const rounds = roundsOf(data);
+      const current = rounds.length > 0 ? rounds[rounds.length - 1] : null;
+      const versions = versionsOf(data, current, true);
+      const version = versions.length > 0 ? versions[versions.length - 1].version : 0;
+      if (data.status === 'error') return { phase: 'error', progress: null, nextAction: null, version };
       const analyzing = isAnalyzing(data.analyzing) ? data.analyzing : null;
       const progress = analyzing === null
         ? null
@@ -261,10 +267,6 @@ window.__ModuleLoader__.load({
             total: analyzing.total,
             failed: Math.min(Math.max(analyzing.failed ?? 0, 0), analyzing.total),
           };
-      const rounds = roundsOf(data);
-      const current = rounds.length > 0 ? rounds[rounds.length - 1] : null;
-      const versions = versionsOf(data, current, true);
-      const version = versions.length > 0 ? versions[versions.length - 1].version : 0;
       const hasConclusion = versions.length > 0;
       const stale = staleInfo !== null && staleInfo !== undefined;
       if (data.status === 'reviewing') return { phase: 'reviewing', progress: null, nextAction: null, version };
@@ -305,22 +307,25 @@ window.__ModuleLoader__.load({
         && (phase.phase === 'ready' || phase.phase === 'concluding');
     }
 
+    /** Shared「分析 d/t (+ failed)」text for both status lines. */
+    function analyzingText(phase, t) {
+      const base = fill(t('badgeAnalyzing'), {
+        done: phase.progress?.done ?? 0,
+        total: phase.progress?.total ?? 0,
+      });
+      const failed = (phase.progress?.failed ?? 0) > 0
+        ? fill(t('badgeAnalyzingFailed'), { failed: phase.progress.failed })
+        : '';
+      return failed === '' ? base : `${base} ${failed}`;
+    }
+
     /** The process-side state line: one text for the status bar and the overview badge. */
     function phaseStateText(phase, t) {
       if (phase === null || phase === undefined) return '';
       if (phase.phase === 'reviewing') return t('badgeReviewing');
       if (phase.phase === 'concluding') return t('badgeConcluding');
       if (phase.phase === 'error') return t('badgeError');
-      if (phase.phase === 'analyzing') {
-        const base = fill(t('badgeAnalyzing'), {
-          done: phase.progress?.done ?? 0,
-          total: phase.progress?.total ?? 0,
-        });
-        const failed = (phase.progress?.failed ?? 0) > 0
-          ? fill(t('badgeAnalyzingFailed'), { failed: phase.progress.failed })
-          : '';
-        return failed === '' ? base : `${base} ${failed}`;
-      }
+      if (phase.phase === 'analyzing') return analyzingText(phase, t);
       return t('badgeDone');
     }
 
@@ -329,16 +334,7 @@ window.__ModuleLoader__.load({
       if (phase === null || phase === undefined) return '';
       if (phase.phase === 'error') return t('badgeError');
       if (phase.phase === 'reviewing') return t('badgeReviewing');
-      if (phase.phase === 'analyzing') {
-        const base = fill(t('badgeAnalyzing'), {
-          done: phase.progress?.done ?? 0,
-          total: phase.progress?.total ?? 0,
-        });
-        const failed = (phase.progress?.failed ?? 0) > 0
-          ? fill(t('badgeAnalyzingFailed'), { failed: phase.progress.failed })
-          : '';
-        return failed === '' ? base : `${base} ${failed}`;
-      }
+      if (phase.phase === 'analyzing') return analyzingText(phase, t);
       return t('badgeDone');
     }
 

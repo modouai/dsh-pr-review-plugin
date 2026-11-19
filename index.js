@@ -262,8 +262,11 @@ function previewDeltaOf(record) {
   let analyzedFiles = 0;
   for (const entry of entries) {
     if (entry === null || typeof entry !== 'object' || entry.status !== 'done') continue;
-    analyzedFiles += 1;
+    // Counting parity with startAnalysisBatch: a `done` entry without an explanation body
+    // is an empty analysis that the batch requeues — counting it as analysed would let
+    // analysesComplete go true while the file is still waiting for a real result.
     if (entry.explanation === null || entry.explanation === undefined) continue;
+    analyzedFiles += 1;
     const file = typeof entry.file === 'string' ? entry.file : '';
     for (const issue of Array.isArray(entry.explanation.issues) ? entry.explanation.issues : []) {
       if (issue === null || typeof issue !== 'object' || typeof issue.point !== 'string' || issue.point.trim() === '') continue;
