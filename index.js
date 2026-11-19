@@ -313,6 +313,7 @@ function reviewSummary(record) {
  * Apply the conversation's mutations directly to the overview's existing content:
  * the report's initial risks and the final conclusion's blockers/suggestions/nextSteps.
  * Same 1-based validation as the file list; unknown or missing targets are ignored.
+ * Ops arrive pre-normalized (normalizeFindingOps already mapped legacy `text` to `point`).
  * A conclusion edit appends a `human` version, locks the touched item ids, and marks
  * the conclusion as edited; touching the report calls `onReportTouched`.
  */
@@ -353,23 +354,23 @@ function applyOverviewOps(record, ops, onReportTouched) {
     } else if (op.op === 'update') {
       if (index < 0 || index >= list.length) continue;
       if (isStep) {
-        list[index] = op.text;
+        list[index] = op.point;
       } else if (target === 'risk') {
         const before = list[index];
         list[index] = {
           severity: op.severity ?? before.severity ?? 'suggest',
           file: op.file ?? before.file ?? '',
-          point: op.text,
+          point: op.point,
         };
       } else {
         const before = list[index];
         const file = op.file ?? before?.file ?? '';
         const id = typeof before?.id === 'string' && before.id !== ''
           ? before.id
-          : itemId(kind, file, op.text);
+          : itemId(kind, file, op.point);
         // Keep the line only when the edit stays on the same file; new items carry line 0.
         const line = file === (before?.file ?? '') && Number.isInteger(before?.line) && before.line > 0 ? before.line : 0;
-        list[index] = { id, file, point: op.text, line };
+        list[index] = { id, file, point: op.point, line };
         touchedIds.add(id);
       }
       applied.push({ op: 'update', target, index: index + 1 });
@@ -377,17 +378,17 @@ function applyOverviewOps(record, ops, onReportTouched) {
       else touchedConclusion = true;
     } else if (op.op === 'add') {
       if (isStep) {
-        list.push(op.text);
+        list.push(op.point);
       } else if (target === 'risk') {
         list.push({
           severity: op.severity === 'block' ? 'block' : 'suggest',
           file: typeof op.file === 'string' ? op.file : '',
-          point: op.text,
+          point: op.point,
         });
       } else {
         const file = typeof op.file === 'string' ? op.file : '';
-        const id = itemId(kind, file, op.text);
-        list.push({ id, file, point: op.text, line: 0 });
+        const id = itemId(kind, file, op.point);
+        list.push({ id, file, point: op.point, line: 0 });
         touchedIds.add(id);
       }
       applied.push({ op: 'add', target });
@@ -411,27 +412,39 @@ function applyOverviewOps(record, ops, onReportTouched) {
 }
 
 /**
- * Apply the discussion's suggestion mutations to one file's suggestion list.
+ * Apply the discussion's finding mutations to one file's merged findings list.
  * Indices are 1-based and validated against the current list, so an out-of-range
- * op from the model is ignored instead of corrupting the data.
+ * op from the model is ignored instead of corrupting the data. Update keeps the
+ * fields the op does not mention, so a model can rewrite only the suggestion.
  */
-function applySuggestionOps(existing, ops) {
-  const list = Array.isArray(existing) ? [...existing] : [];
+function applyFindingOps(existing, ops) {
+  const list = findingsOf(existing).map((item) => ({ ...item }));
   const applied = [];
   for (const op of Array.isArray(ops) ? ops : []) {
     const index = typeof op.index === 'number' ? op.index - 1 : -1;
     if (op.op === 'remove') {
       if (index < 0 || index >= list.length) continue;
-      const [removed] = list.splice(index, 1);
-      applied.push({ op: 'remove', index: index + 1, text: removed });
+      list.splice(index, 1);
+      applied.push({ op: 'remove', index: index + 1 });
     } else if (op.op === 'update') {
       if (index < 0 || index >= list.length) continue;
       const before = list[index];
-      list[index] = op.text;
-      applied.push({ op: 'update', index: index + 1, before, text: op.text });
+      list[index] = {
+        severity: op.severity === 'block' || op.severity === 'suggest' ? op.severity : before.severity,
+        point: typeof op.point === 'string' && op.point !== '' ? op.point : before.point,
+        suggestion: typeof op.suggestion === 'string' ? op.suggestion : before.suggestion,
+        line: Number.isInteger(op.line) && op.line > 0 ? op.line : before.line,
+      };
+      applied.push({ op: 'update', index: index + 1 });
     } else if (op.op === 'add') {
-      list.push(op.text);
-      applied.push({ op: 'add', text: op.text });
+      if (typeof op.point !== 'string' || op.point === '') continue;
+      list.push({
+        severity: op.severity === 'block' ? 'block' : 'suggest',
+        point: op.point,
+        suggestion: typeof op.suggestion === 'string' ? op.suggestion : '',
+        line: Number.isInteger(op.line) && op.line > 0 ? op.line : 0,
+      });
+      applied.push({ op: 'add' });
     }
   }
   return { list, applied };
@@ -1925,9 +1938,9 @@ export function apply(ctx, config) {
       entry.chat.push({ role: 'user', text: question }, { role: 'assistant', text: answer });
       entry.updatedAt = Date.now();
       if (entry.explanation !== null && entry.explanation !== undefined && ops.length > 0) {
-        const result = applySuggestionOps(entry.explanation.suggestions ?? [], ops);
+        const result = applyFindingOps(entry.explanation, ops);
         if (result.applied.length > 0) {
-          entry.explanation = { ...entry.explanation, suggestions: result.list };
+          entry.explanation = { ...entry.explanation, issues: result.list };
           applied = result.applied;
         }
       }

@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 
 import {
   PLATFORM_LABELS,
+  buildChatPrompt,
   buildCommentMarkdown,
   buildConcludePrompt,
   buildExplainPrompt,
@@ -29,10 +30,12 @@ import {
   normalizeConclusion,
   normalizeEvidenceNeeds,
   normalizeExplanation,
+  normalizeFindingOps,
   normalizeReport,
   normalizeUnverified,
   normalizeVerdict,
   partitionVerdicts,
+  parseChatReply,
   parseFeedbackReply,
   platformLabel,
   textSimilarity,
@@ -781,6 +784,16 @@ test('partitionVerdicts keeps the suggestion the model rewrote, else carries the
   assert.equal(carried.issues[0].suggestion, '候选修法');
 });
 
+test('normalizeFindingOps falls back to the candidate suggestion on whitespace-only input', () => {
+  // whitespace-only fallback 属于 partitionVerdicts（llm.js addIssue）：
+  // 模型给 suggestion: '   '（纯空白）时应沿用候选的 suggestion。
+  const verdicts = partitionVerdicts(
+    { results: [{ index: 1, confidence: 85, point: 'x', suggestion: '   ' }] },
+    [{ severity: 'suggest', file: '', point: '候选', suggestion: '候选修法', line: 0 }],
+  );
+  assert.equal(verdicts.issues[0].suggestion, '候选修法');
+});
+
 test('partitionVerdicts dedupes confirmed points and tolerates junk', () => {
   const concerns = [{ severity: 'suggest', file: '', point: 'same', line: 0 }];
   const { issues, unverified } = partitionVerdicts({
@@ -896,6 +909,21 @@ test('verifier prompt tells the model to score already-implemented candidates lo
   assert.ok(!text.includes('suggestionResult'));
 });
 
+test('the report verifier prompt keeps the implemented-candidate rule as documentation', () => {
+  // verifyPromptBody 是 explain/report 两个 verifier 共用的；规则行（已实现候选打低分）对
+  // report 侧同样适用（diff 子句 inert）。用一条断言把这一共享语义钉住。
+  const prompt = buildReportVerifyPrompt(
+    { platform: 'github', repo: 'o/r', number: 1, title: 't' },
+    [{ severity: 'suggest', file: '', point: '候选', line: 0 }],
+    '证据',
+    [],
+    {},
+  );
+  const text = prompt.messages[0].content[0].text;
+  assert.ok(text.includes('已实现'));
+  assert.ok(!text.includes('suggestionResult'));
+});
+
 test('a candidate the verifier did not answer becomes an unverified note', () => {
   const { issues, unverified } = partitionVerdicts({
     results: [{ index: 1, confidence: 90, point: 'A2' }],
@@ -973,4 +1001,50 @@ test('findingsOf normalizes issues and folds legacy suggestions for unmigrated r
   assert.deepEqual(findingsOf(null), []);
   assert.deepEqual(findingsOf(undefined), []);
   assert.deepEqual(findingsOf({ issues: 'nope' }), []);
+});
+
+test('buildChatPrompt file scope lists findings and asks for findingOps', () => {
+  const prompt = buildChatPrompt(
+    { platform: 'github', repo: 'o/r', number: 1, title: 't' },
+    { path: 'a.js', status: 'modified', additions: 1, deletions: 0 },
+    { verdict: 'suggest', summary: 's', issues: [{ severity: 'block', point: '会崩', suggestion: '加判空', line: 3 }] },
+    null,
+    [],
+    '第二条不对',
+    null,
+    {},
+  );
+  const text = prompt.messages[0].content[0].text;
+  assert.match(text, /该文件当前的审查意见/);
+  assert.ok(!text.includes('改进建议'));
+  assert.match(text, /\[block\] 会崩/);
+  assert.match(text, /—— 建议：加判空/);
+  assert.ok(text.includes('"findingOps"'));
+  assert.ok(!text.includes('"suggestionOps"'));
+});
+
+test('normalizeFindingOps maps legacy text to point and accepts field-scoped updates', () => {
+  const ops = normalizeFindingOps([
+    { op: 'remove', index: 2 },
+    { op: 'update', index: 1, text: '旧字段写法' },
+    { op: 'update', index: 3, suggestion: '只改修法', severity: 'suggest', line: 9 },
+    { op: 'update', index: 4 },
+    { op: 'add', point: '新意见', suggestion: '修法', severity: 'block', line: 5 },
+    { op: 'add', text: '旧字段新增' },
+    { op: 'add' },
+  ]);
+  assert.deepEqual(ops, [
+    { op: 'remove', index: 2 },
+    { op: 'update', index: 1, point: '旧字段写法' },
+    { op: 'update', index: 3, suggestion: '只改修法', line: 9, severity: 'suggest' },
+    { op: 'add', point: '新意见', suggestion: '修法', line: 5, severity: 'block' },
+    { op: 'add', point: '旧字段新增' },
+  ]);
+});
+
+test('parseChatReply reads findingOps with a suggestionOps fallback', () => {
+  assert.deepEqual(parseChatReply(JSON.stringify({ answer: 'a', findingOps: [{ op: 'remove', index: 1 }] })).ops,
+    [{ op: 'remove', index: 1 }]);
+  assert.deepEqual(parseChatReply(JSON.stringify({ answer: 'a', suggestionOps: [{ op: 'add', text: 'x' }] })).ops,
+    [{ op: 'add', point: 'x' }]);
 });

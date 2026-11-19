@@ -344,7 +344,7 @@ function verifyPromptBody(header, concerns, evidence, missing, language, extra =
     : list.map((item, index) => {
         const where = item.file === '' ? '' : ` [${item.file}${item.line > 0 ? `:${item.line}` : ''}]`;
         const advice = typeof item.suggestion === 'string' && item.suggestion !== ''
-          ? `\n   —— ${language === 'en' ? 'Suggestion' : '建议'}：${item.suggestion}`
+          ? `\n   —— ${language === 'en' ? 'Suggestion: ' : '建议：'}${item.suggestion}`
           : '';
         return `${index + 1}. [${item.severity}]${where} ${item.point}${advice}`;
       });
@@ -451,7 +451,7 @@ export function buildChatPrompt(pull, file, explanation, report, history, questi
     .map((turn) => `${turn.role === 'assistant' ? '助手' : '用户'}：${String(turn.text).slice(0, 3000)}`)
     .join('\n');
   const isFileScope = file !== null && file !== undefined;
-  const currentSuggestions = Array.isArray(explanation?.suggestions) ? explanation.suggestions : [];
+  const currentFindings = findingsOf(explanation);
 
   const numbered = (items, mapper) => (items.length === 0 ? '（无）' : items.map(mapper).join('\n'));
   const overviewLines = () => {
@@ -478,17 +478,17 @@ export function buildChatPrompt(pull, file, explanation, report, history, questi
   };
 
   const scopeSection = isFileScope
-    ? `## 该文件当前的改进建议（编号从 1 开始，用于这次讨论的增删改）\n${numbered(currentSuggestions, (item, i) => `${i + 1}. ${item}`)}`
+    ? `## 该文件当前的审查意见（编号从 1 开始，用于这次讨论的增删改）\n${numbered(currentFindings, (item, i) => `${i + 1}. [${item.severity}] ${item.point}${item.line > 0 ? `（行 ${item.line}）` : ''}${item.suggestion === '' ? '' : `\n   —— 建议：${item.suggestion}`}`)}`
     : overviewLines();
 
   const outputLines = isFileScope
     ? [
-        '"suggestionOps": [',
+        '"findingOps": [',
         '  { "op": "remove", "index": 1 },',
-        '  { "op": "update", "index": 2, "text": "改写后的建议内容" },',
-        '  { "op": "add", "text": "新增的建议内容" }',
+        '  { "op": "update", "index": 2, "point": "改写后的问题与影响", "suggestion": "改写后的具体修法（可选）", "severity": "block | suggest", "line": 12 },',
+        '  { "op": "add", "point": "新意见的问题与影响", "suggestion": "可选：具体修法", "severity": "suggest", "line": 0 }',
         ']',
-        'suggestionOps 只用于按这次讨论修改「该文件当前的改进建议」：某条不成立就 remove 对应编号；要改进/调整就 update；讨论出新点就 add。没有要改的就输出空数组。不要通过 answer 代替操作。',
+        'findingOps 只用于按这次讨论修改「该文件当前的审查意见」：某条不成立就 remove 对应编号；要改写就 update（只给要改的字段：point 写问题与影响，suggestion 写具体做法，severity/line 可一并改）；讨论出新意见就 add。没有要改的就输出空数组。不要通过 answer 代替操作。',
       ]
     : [
         '"suggestionOps": [',
@@ -1044,37 +1044,50 @@ export function parseFeedbackReply(raw) {
   };
 }
 
-/** Normalize the suggestion mutations a discussion turn asks for. */
-export function normalizeSuggestionOps(raw) {
+/**
+ * Normalize the mutations a discussion turn asks for. Overview ops carry a `target`
+ * (risk/blocker/suggestion/nextStep) and must bring a non-empty point; file-scope ops
+ * act on the merged findings list and may change only severity/suggestion/line. `text`
+ * is the legacy field name (overview prompts and older models) and means `point`.
+ */
+export function normalizeFindingOps(raw) {
   if (!Array.isArray(raw)) return [];
   const ops = [];
   for (const item of raw) {
     if (item === null || typeof item !== 'object') continue;
     const index = typeof item.index === 'number' ? Math.floor(item.index) : 0;
-    const text = typeof item.text === 'string' ? item.text.trim() : '';
     const file = typeof item.file === 'string' ? item.file.trim() : '';
     const severity = item.severity === 'block' ? 'block' : item.severity === 'suggest' ? 'suggest' : '';
+    const line = Number.isInteger(item.line) && item.line > 0 ? Math.floor(item.line) : 0;
+    const suggestion = typeof item.suggestion === 'string' && item.suggestion.trim() !== '' ? item.suggestion.trim() : '';
+    const point = (typeof item.point === 'string' ? item.point : (typeof item.text === 'string' ? item.text : '')).trim();
     const target = ['risk', 'blocker', 'suggestion', 'nextStep'].includes(item.target) ? item.target : '';
     const targetField = target === '' ? {} : { target };
+    const scoped = { ...(suggestion === '' ? {} : { suggestion }), ...(line > 0 ? { line } : {}) };
+    const severityField = severity === '' ? {} : { severity };
+    const fileField = file === '' ? {} : { file };
     if (item.op === 'remove' && index > 0) {
       ops.push({ op: 'remove', index, ...targetField });
-    } else if (item.op === 'update' && index > 0 && text !== '') {
-      ops.push({ op: 'update', index, text, ...targetField, ...(file === '' ? {} : { file }), ...(severity === '' ? {} : { severity }) });
-    } else if (item.op === 'add' && text !== '') {
-      ops.push({ op: 'add', text, ...targetField, ...(file === '' ? {} : { file }), ...(severity === '' ? {} : { severity }) });
+    } else if (item.op === 'update' && index > 0) {
+      // Overview edits rewrite the text; file-scope edits may touch any subset of fields.
+      if (target !== '' && point === '') continue;
+      if (point === '' && suggestion === '' && severity === '' && line === 0) continue;
+      ops.push({ op: 'update', index, ...(point === '' ? {} : { point }), ...scoped, ...targetField, ...fileField, ...severityField });
+    } else if (item.op === 'add' && point !== '') {
+      ops.push({ op: 'add', point, ...scoped, ...targetField, ...fileField, ...severityField });
     }
   }
   return ops;
 }
 
-/** Split one chat reply into its answer text and the suggestion mutations it asks for. */
+/** Split one chat reply into its answer text and the mutations it asks for. */
 export function parseChatReply(raw) {
   const fallback = String(raw ?? '').trim();
   const parsed = extractJson(raw);
   if (parsed === null || typeof parsed.answer !== 'string') {
     return { answer: fallback, ops: [] };
   }
-  return { answer: parsed.answer.trim(), ops: normalizeSuggestionOps(parsed.suggestionOps) };
+  return { answer: parsed.answer.trim(), ops: normalizeFindingOps(parsed.findingOps ?? parsed.suggestionOps) };
 }
 
 // ---------- stable item ids, similarity, structured merge, comment rendering ----------

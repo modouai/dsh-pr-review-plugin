@@ -1128,6 +1128,90 @@ test('autoReconclude regenerates in the background after the report is edited', 
   }
 });
 
+test('a file chat applies findingOps to the merged findings list', async () => {
+  const plugin = await setup({
+    llm: llmFromText(JSON.stringify({
+      answer: '好',
+      findingOps: [
+        { op: 'update', index: 2, point: '改写后的第二条', suggestion: '新修法' },
+        { op: 'remove', index: 1 },
+        { op: 'add', point: '新增意见', severity: 'block', line: 9 },
+      ],
+    })),
+    reviews: {
+      1: legacyReview({
+        explanations: [{
+          file: 'src/a.js',
+          status: 'done',
+          error: null,
+          explanation: {
+            verdict: 'suggest',
+            summary: '文件分析',
+            issues: [
+              { severity: 'block', point: '第一条', suggestion: '修法一', line: 1 },
+              { severity: 'suggest', point: '第二条', suggestion: '', line: 2 },
+            ],
+          },
+          chat: [],
+          updatedAt: 150,
+        }],
+      }),
+    },
+  });
+  try {
+    const chat = await plugin.call('/pr-review-api/chat', 'POST', { number: 1, message: '第二条不对', path: 'src/a.js' });
+    assert.equal(chat.status, 200);
+    assert.equal(chat.json.applied.length, 3);
+    const review = await plugin.review();
+    const entry = review.explanations.find((item) => item.file === 'src/a.js');
+    assert.deepEqual(entry.explanation.issues, [
+      { severity: 'suggest', point: '改写后的第二条', suggestion: '新修法', line: 2 },
+      { severity: 'block', point: '新增意见', suggestion: '', line: 9 },
+    ]);
+    assert.ok(!('suggestions' in entry.explanation));
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a file chat with legacy suggestionOps still rewrites findings', async () => {
+  const plugin = await setup({
+    llm: llmFromText(JSON.stringify({
+      answer: '好',
+      suggestionOps: [{ op: 'update', index: 1, text: '旧写法改写' }],
+    })),
+    reviews: {
+      1: legacyReview({
+        explanations: [{
+          file: 'src/a.js',
+          status: 'done',
+          error: null,
+          explanation: {
+            verdict: 'suggest',
+            summary: '文件分析',
+            issues: [
+              { severity: 'block', point: '第一条', suggestion: '修法一', line: 1 },
+              { severity: 'suggest', point: '第二条', suggestion: '', line: 2 },
+            ],
+          },
+          chat: [],
+          updatedAt: 150,
+        }],
+      }),
+    },
+  });
+  try {
+    const chat = await plugin.call('/pr-review-api/chat', 'POST', { number: 1, message: '第一条不对', path: 'src/a.js' });
+    assert.equal(chat.status, 200);
+    assert.equal(chat.json.applied.length, 1);
+    const review = await plugin.review();
+    const entry = review.explanations.find((item) => item.file === 'src/a.js');
+    assert.deepEqual(entry.explanation.issues[0], { severity: 'block', point: '旧写法改写', suggestion: '修法一', line: 1 });
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 test('a failed review is retried in the same round, never as a new round', async () => {
   // The poll sees the same head sha: retrying must not bump `round` or grow the history.
   const fetchWithSameHead = async (url) => {
