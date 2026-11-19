@@ -415,6 +415,8 @@ test('buildCommentAppendix: findings render as one list with nested suggestion s
   // zh: the suggestion rides its finding as an indented sub-line; findings without one get none.
   const zh = buildCommentAppendix(appendix, 'zh');
   assert.match(zh, /\*\*src\/a\.js\*\*\n- \[阻塞\] 会崩（行 3）\n {2}- 建议：加判空\n- \[提示\] 无建议的意见（行 9）/);
+  // A finding with no suggestion must not grow an empty sub-line (advice !== '' guard).
+  assert.doesNotMatch(zh, /\[提示\] 无建议的意见（行 9）\n {2}- /);
   // en: half-width colon after the suggestion label.
   const en = buildCommentAppendix(appendix, 'en');
   assert.match(en, /- \[Block\] 会崩（line 3）\n {2}- Suggestion: 加判空/);
