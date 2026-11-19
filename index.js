@@ -44,6 +44,7 @@ import {
   buildReportVerifyPrompt,
   callModel,
   extractJson,
+  findingsOf,
   itemId,
   mergeConclusion,
   normalizeConcerns,
@@ -2379,18 +2380,9 @@ export function apply(ctx, config) {
     for (const file of Array.isArray(record.files) ? record.files : []) {
       const entry = record.explanations.get(file.path);
       if (entry === undefined || entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-      const explanation = entry.explanation;
-      const issues = (Array.isArray(explanation.issues) ? explanation.issues : [])
-        .map((item) => ({
-          severity: severityOf(item?.severity),
-          point: pointOf(item),
-          line: Number.isFinite(item?.line) && item.line > 0 ? Math.floor(item.line) : 0,
-        }))
-        .filter((item) => item.point !== '');
-      const suggestions = (Array.isArray(explanation.suggestions) ? explanation.suggestions : [])
-        .filter((item) => typeof item === 'string' && item !== '');
-      if (issues.length === 0 && suggestions.length === 0) continue;
-      files.push({ file: file.path, issues, suggestions });
+      const findings = findingsOf(entry.explanation).filter((item) => item.point !== '');
+      if (findings.length === 0) continue;
+      files.push({ file: file.path, findings });
     }
     const order = (Array.isArray(report.order) ? report.order : [])
       .map((item) => ({
@@ -2766,20 +2758,13 @@ export function apply(ctx, config) {
     if (typeof explanation.logic === 'string' && explanation.logic !== '') {
       lines.push(`代码逻辑：${explanation.logic}`);
     }
-    const issues = Array.isArray(explanation.issues) ? explanation.issues : [];
-    if (issues.length > 0) {
+    const findings = findingsOf(explanation);
+    if (findings.length > 0) {
       lines.push('审查意见：');
-      for (const issue of issues) {
-        const where = issue.line === undefined || issue.line === null ? '' : `（行 ${issue.line}）`;
-        lines.push(`- [${issue.severity ?? '?'}] ${issue.point ?? ''}${where}`);
-      }
-    }
-    const suggestions = Array.isArray(explanation.suggestions) ? explanation.suggestions : [];
-    if (suggestions.length > 0) {
-      lines.push('改进建议：');
-      for (const suggestion of suggestions) {
-        const where = suggestion.line === undefined || suggestion.line === null ? '' : `（行 ${suggestion.line}）`;
-        lines.push(`- ${suggestion.point ?? suggestion.text ?? ''}${where}`);
+      for (const item of findings) {
+        const where = item.line > 0 ? `（行 ${item.line}）` : '';
+        const advice = item.suggestion !== '' ? `—— 建议：${item.suggestion}` : '';
+        lines.push(`- [${item.severity}] ${item.point}${where}${advice === '' ? '' : ` ${advice}`}`);
       }
     }
     return toolText(lines);
@@ -2954,49 +2939,41 @@ export function apply(ctx, config) {
     return output;
   }
 
-  /** Totals the overview shows: initial risks, per-file issues, per-file suggestions. */
+  /** Totals the overview shows: initial risks and per-file findings (suggestions included). */
   function overviewCounts(record) {
     const risks = Array.isArray(record.report?.risks) ? record.report.risks.length : 0;
     let issues = 0;
-    let suggestions = 0;
     for (const entry of record.explanations.values()) {
       if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-      issues += Array.isArray(entry.explanation.issues) ? entry.explanation.issues.length : 0;
-      suggestions += Array.isArray(entry.explanation.suggestions) ? entry.explanation.suggestions.length : 0;
+      issues += findingsOf(entry.explanation).length;
     }
-    return { risks, issues, suggestions };
+    return { risks, issues };
   }
 
   /**
    * Clear the findings the overview renders, at the scope the caller names:
-   * - `suggestions`: every per-file suggestion plus suggest-severity initial risks;
-   * - `suggest`: the above plus suggest-severity per-file issues;
-   * - `all`: every per-file issue/suggestion and every initial risk.
-   * Block-severity items survive the two narrower scopes so a real blocker is not silenced.
+   * - `suggest`: every suggest-severity finding plus suggest-severity initial risks;
+   * - `all`: every finding and every initial risk.
+   * `suggestions` is the deprecated pre-merge alias and behaves like `suggest`.
+   * Block-severity items always survive unless the scope is `all`.
    * `at` stamps the edits: callers writing a conclusion pass the same instant they used
    * for it, so a cleared finding can never look newer than the conclusion it belongs to.
    */
   function clearOverviewFindings(record, scope, at = Date.now()) {
-    const cleared = { suggestions: 0, issues: 0, risks: 0 };
-    if (scope !== 'suggestions' && scope !== 'suggest' && scope !== 'all') return cleared;
-    const keepBlockRisks = scope === 'suggestions' || scope === 'suggest';
+    const cleared = { issues: 0, risks: 0 };
+    const effective = scope === 'suggestions' ? 'suggest' : scope;
+    if (effective !== 'suggest' && effective !== 'all') return cleared;
     for (const entry of record.explanations.values()) {
       if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-      const explanation = entry.explanation;
-      const suggestions = Array.isArray(explanation.suggestions) ? explanation.suggestions : [];
-      const issues = Array.isArray(explanation.issues) ? explanation.issues : [];
-      const nextSuggestions = [];
-      const nextIssues = scope === 'suggestions'
-        ? issues
-        : (scope === 'suggest' ? issues.filter((item) => item?.severity === 'block') : []);
-      cleared.suggestions += suggestions.length;
-      cleared.issues += issues.length - nextIssues.length;
-      if (nextSuggestions.length === suggestions.length && nextIssues.length === issues.length) continue;
-      entry.explanation = { ...explanation, issues: nextIssues, suggestions: nextSuggestions };
+      const findings = findingsOf(entry.explanation);
+      const nextFindings = effective === 'all' ? [] : findings.filter((item) => item.severity === 'block');
+      cleared.issues += findings.length - nextFindings.length;
+      if (nextFindings.length === findings.length) continue;
+      entry.explanation = { ...entry.explanation, issues: nextFindings };
       entry.updatedAt = at;
     }
     const risks = Array.isArray(record.report?.risks) ? record.report.risks : [];
-    const nextRisks = keepBlockRisks ? risks.filter((item) => item?.severity === 'block') : [];
+    const nextRisks = effective === 'all' ? [] : risks.filter((item) => item?.severity === 'block');
     cleared.risks = risks.length - nextRisks.length;
     if (cleared.risks > 0) record.report = { ...record.report, risks: nextRisks };
     return cleared;
@@ -3048,7 +3025,7 @@ export function apply(ctx, config) {
             `覆盖率：已分析 ${coverage.analyzed ?? 0}/${coverage.total ?? (record.files ?? []).length} 个文件`,
             `过期：${isStale(record) ? '结论之后有新的报告/分析改动，可重新生成结论' : '无'}`,
             `变更文件：${(record.files ?? []).length} 个 · 已发布评论：${(record.published ?? []).length} 条`,
-            `总览：初筛风险 ${overviewCounts(record).risks} · 逐文件意见 ${overviewCounts(record).issues} / 建议 ${overviewCounts(record).suggestions}（review_update_overview 可一次改总览）`,
+            `总览：初筛风险 ${overviewCounts(record).risks} · 逐文件意见 ${overviewCounts(record).issues}（review_update_overview 可一次改总览）`,
             `revision：${record.revision ?? 0}（写入工具必须带回这个值）`,
           ]);
         },
@@ -3639,14 +3616,14 @@ export function apply(ctx, config) {
             record,
             exec,
             'review_update_overview',
-            `风险 ${beforeCounts.risks}→${afterCounts.risks} · 意见 ${beforeCounts.issues}→${afterCounts.issues} · 建议 ${beforeCounts.suggestions}→${afterCounts.suggestions} · 结论 ${normalized.verdict}`,
+            `风险 ${beforeCounts.risks}→${afterCounts.risks} · 意见 ${beforeCounts.issues}→${afterCounts.issues} · 结论 ${normalized.verdict}`,
           );
           scheduleSave();
           return toolText([
             `已更新总览（revision ${record.revision}）：结论 ${normalized.verdict} · ${normalized.summary.slice(0, 160)}`,
             `阻塞项 ${normalized.blockers.length} 条 / 修改建议 ${normalized.suggestions.length} 条 / 下一步 ${normalized.nextSteps.length} 条`,
-            `初筛风险 ${afterCounts.risks} 条 · 逐文件意见 ${afterCounts.issues} 条 / 建议 ${afterCounts.suggestions} 条`,
-            cleared.suggestions + cleared.issues + cleared.risks === 0 ? '' : `已清理：建议 ${cleared.suggestions} 条、意见 ${cleared.issues} 条、风险 ${cleared.risks} 条`,
+            `初筛风险 ${afterCounts.risks} 条 · 逐文件意见 ${afterCounts.issues} 条`,
+            cleared.issues + cleared.risks === 0 ? '' : `已清理：意见 ${cleared.issues} 条、风险 ${cleared.risks} 条`,
             '结论时间戳已刷新（stale 清除）；下一份发布评论、面板总览与重新生成看到的是同一份数据。',
           ]);
         },

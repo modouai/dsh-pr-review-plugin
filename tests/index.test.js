@@ -1308,6 +1308,39 @@ test('review_get and review_list_files read the loaded review', async () => {
   }
 });
 
+test('review_get_analysis renders one findings section with inline suggestions', async () => {
+  const plugin = await setup({
+    reviews: {
+      1: legacyReview({
+        explanations: [{
+          file: 'src/a.js',
+          status: 'done',
+          error: null,
+          explanation: {
+            verdict: 'suggest',
+            summary: 's',
+            issues: [
+              { severity: 'block', point: '会崩', suggestion: '加判空', line: 3 },
+              { severity: 'suggest', point: '补测试', suggestion: '', line: 0 },
+            ],
+          },
+          chat: [],
+          updatedAt: 150,
+        }],
+      }),
+    },
+  });
+  try {
+    const analysis = await plugin.runTool('review_get_analysis', { path: 'src/a.js' });
+    assert.match(analysis, /审查意见：/);
+    assert.match(analysis, /- \[block\] 会崩（行 3） —— 建议：加判空/);
+    assert.match(analysis, /^- \[suggest\] 补测试$/m);
+    assert.doesNotMatch(analysis, /改进建议：/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 test('/active binds a session to the PR the panel shows; tools default to it', async () => {
   const second = legacyReview({
     number: 2,
@@ -1819,7 +1852,7 @@ test('review_update_overview rewrites the whole overview in one call and clears 
     });
     assert.match(written, /已更新总览/);
     assert.match(written, /初筛风险 0 条/);
-    assert.match(written, /逐文件意见 0 条 \/ 建议 0 条/);
+    assert.match(written, /逐文件意见 0 条/);
     assert.match(written, /已清理/);
 
     const stored = await plugin.review();
@@ -1831,7 +1864,7 @@ test('review_update_overview rewrites the whole overview in one call and clears 
     assert.equal(stored.conclusion.suggestions.length, 0);
     assert.equal(stored.conclusion.nextSteps.length, 0);
     assert.equal(stored.explanations[0].explanation.issues.length, 0);
-    assert.equal(stored.explanations[0].explanation.suggestions.length, 0);
+    assert.equal(stored.explanations[0].explanation.suggestions, undefined);
     const round = stored.roundHistory[stored.roundHistory.length - 1];
     assert.equal(round.conclusions[round.conclusions.length - 1].source, 'human');
     assert.equal(stored.audit[0].tool, 'review_update_overview');
@@ -1853,27 +1886,80 @@ test('review_update_overview rewrites the whole overview in one call and clears 
 });
 
 test('review_update_overview clearFindings keeps block items for narrower scopes', async () => {
-  const suggestionsOnly = await setup({ reviews: { 1: overviewFixture() } });
-  try {
-    await suggestionsOnly.runTool('review_update_overview', { revision: 0, clearFindings: 'suggestions' });
-    const stored = await suggestionsOnly.review();
-    // The legacy separate suggestions list folded into issues on restore; this scope
-    // only ever cleared that list, so every merged issue survives untouched.
-    assert.equal(stored.explanations[0].explanation.issues.length, 3);
-    assert.deepEqual(stored.report.risks.map((item) => item.severity), ['block'], 'block risk survives');
-  } finally {
-    await suggestionsOnly.dispose();
-  }
+  // Merged-shape fixture: one block finding and one suggest finding, each carrying its own
+  // suggestion, plus one block and one suggest initial risk.
+  const mergedFixture = () => legacyReview({
+    report: {
+      verdict: 'suggest',
+      summary: '初筛报告',
+      risks: [
+        { severity: 'block', file: 'src/a.js', point: '阻塞级风险' },
+        { severity: 'suggest', file: 'src/a.js', point: '建议级风险' },
+      ],
+      order: [{ file: 'src/a.js', reason: '' }],
+      focus: {},
+    },
+    explanations: [{
+      file: 'src/a.js',
+      status: 'done',
+      error: null,
+      explanation: {
+        verdict: 'suggest',
+        summary: '文件分析',
+        issues: [
+          { severity: 'block', point: '阻塞', suggestion: '', line: 1 },
+          { severity: 'suggest', point: '改进', suggestion: '修法', line: 2 },
+        ],
+      },
+      chat: [],
+      updatedAt: 150,
+    }],
+    conclusion: {
+      verdict: 'suggest',
+      summary: '旧结论',
+      blockers: [],
+      suggestions: [],
+      nextSteps: ['旧下一步'],
+    },
+  });
 
-  const suggestOnly = await setup({ reviews: { 1: overviewFixture() } });
-  try {
-    await suggestOnly.runTool('review_update_overview', { revision: 0, clearFindings: 'suggest' });
-    const stored = await suggestOnly.review();
-    assert.equal(stored.explanations[0].explanation.issues.length, 1);
-    assert.equal(stored.explanations[0].explanation.issues[0].severity, 'block');
-    assert.deepEqual(stored.report.risks.map((item) => item.severity), ['block']);
-  } finally {
-    await suggestOnly.dispose();
+  const clearWith = async (scope) => {
+    const plugin = await setup({ reviews: { 1: mergedFixture() } });
+    try {
+      await plugin.runTool('review_update_overview', { revision: 0, clearFindings: scope });
+      const stored = await plugin.review();
+      return {
+        issues: stored.explanations[0].explanation.issues,
+        risks: stored.report.risks.map((item) => item.severity),
+      };
+    } finally {
+      await plugin.dispose();
+    }
+  };
+
+  // `suggest` clears suggest-severity findings and risks; block items on both layers survive.
+  const suggestCleared = await clearWith('suggest');
+  assert.deepEqual(suggestCleared.issues, [{ severity: 'block', point: '阻塞', suggestion: '', line: 1 }]);
+  assert.deepEqual(suggestCleared.risks, ['block']);
+
+  // `all` clears every finding and every initial risk.
+  const allCleared = await clearWith('all');
+  assert.deepEqual(allCleared.issues, []);
+  assert.deepEqual(allCleared.risks, []);
+
+  // `suggestions` is the deprecated pre-merge alias: it now behaves like `suggest`.
+  const aliasCleared = await clearWith('suggestions');
+  assert.deepEqual(aliasCleared.issues, [{ severity: 'block', point: '阻塞', suggestion: '', line: 1 }]);
+  assert.deepEqual(aliasCleared.risks, ['block']);
+
+  // `none` and unknown scopes clear nothing (defense against typo'd callers).
+  for (const scope of ['none', 'whatever']) {
+    const untouched = await clearWith(scope);
+    assert.deepEqual(untouched.issues, [
+      { severity: 'block', point: '阻塞', suggestion: '', line: 1 },
+      { severity: 'suggest', point: '改进', suggestion: '修法', line: 2 },
+    ]);
+    assert.deepEqual(untouched.risks, ['block', 'suggest']);
   }
 });
 
@@ -2653,6 +2739,55 @@ test('restored legacy cache folds suggestions into suggest findings', async () =
     assert.equal(entry.explanation.suggestions, undefined);
   } finally {
     await plugin.dispose();
+  }
+});
+
+test('a restored legacy record persists the merged shape with no suggestions key', async () => {
+  const legacy = legacyReview({
+    conclusion: null,
+    explanations: [{
+      file: 'src/a.js',
+      status: 'done',
+      error: null,
+      // The legacy shape: `issues` next to a separate string `suggestions` list.
+      explanation: {
+        verdict: 'block',
+        summary: '旧分析',
+        issues: [{ severity: 'block', point: '旧问题', line: 3 }],
+        suggestions: ['补个测试'],
+      },
+      chat: [],
+      updatedAt: 150,
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: legacy } });
+  let payload;
+  try {
+    // Any write schedules a save; review_update_report leaves the explanations untouched,
+    // so the persisted bytes reflect exactly what restore normalized into memory.
+    await plugin.runTool('review_update_report', { revision: 0, summary: '初筛报告' });
+    await delay(950); // scheduleSave debounce
+    const cacheFile = path.join(plugin.home, '.dsh', 'pr-review', CACHE_SLUG);
+    payload = JSON.parse(await readFile(cacheFile, 'utf8'));
+    const saved = payload.reviews['1'].explanations[0].explanation;
+    assert.deepEqual(saved.issues, [
+      { severity: 'block', point: '旧问题', suggestion: '', line: 3 },
+      { severity: 'suggest', point: '补个测试', suggestion: '', line: 0 },
+    ]);
+    assert.equal(JSON.stringify(payload).includes('"suggestions"'), false, 'no suggestions key survives on disk');
+  } finally {
+    await plugin.dispose();
+  }
+
+  // Re-restoring the round-tripped cache yields the identical merged shape (no oscillation).
+  const second = await setup({ cacheText: JSON.stringify(payload) });
+  try {
+    const review = await second.review();
+    const entry = review.explanations.find((item) => item.file === 'src/a.js');
+    assert.deepEqual(entry.explanation.issues, payload.reviews['1'].explanations[0].explanation.issues);
+    assert.equal(entry.explanation.suggestions, undefined);
+  } finally {
+    await second.dispose();
   }
 });
 
