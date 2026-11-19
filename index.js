@@ -53,7 +53,6 @@ import {
   normalizeReport,
   normalizeReportDraft,
   normalizeVerdict,
-  partitionSuggestions,
   partitionVerdicts,
 } from './llm.js';
 
@@ -1720,15 +1719,16 @@ export function apply(ctx, config) {
       throw new Error(`模型没有返回完整的分析 JSON。原始输出：${answer.raw.slice(0, 400)}`);
     }
     const concerns = normalizeConcerns(parsed.concerns);
-    // Same filter the verify prompt applies, so suggestion indices line up.
+    // Legacy prompt shape: the model may still answer with a separate suggestions list;
+    // normalizeExplanation folds it into issues as suggest findings.
     const rawSuggestions = Array.isArray(parsed.suggestions)
       ? parsed.suggestions.filter((item) => typeof item === 'string' && item.trim() !== '')
       : [];
     let issues = [];
     let unverified = [];
     let suggestions = rawSuggestions;
-    // Suggestions go through the verifier too: a suggestion the diff already implements is
-    // noise, and the triage pass cannot tell on its own.
+    // Suggestions no longer get their own verifier pass; the diff-implemented noise drops
+    // through the verifier's confidence scoring once concerns carry the suggestion field.
     if (concerns.length > 0 || rawSuggestions.length > 0) {
       if (settings.evidenceVerify === false) {
         issues = concerns.map(({ severity, point, line }) => ({ severity, point, line }));
@@ -1739,7 +1739,6 @@ export function apply(ctx, config) {
           parsed.evidenceNeeds,
           (evidence, missing) => buildExplainVerifyPrompt(pull, file, concerns, evidence, missing, {
             language: commentLanguage(),
-            suggestions: rawSuggestions,
             diffText,
           }),
           epoch,
@@ -1748,9 +1747,6 @@ export function apply(ctx, config) {
         if (verdicts.discarded) return { explanation: null, cached: false, discarded: true };
         issues = verdicts.issues.map(({ severity, point, line }) => ({ severity, point, line }));
         unverified = verdicts.unverified;
-        if (verdicts.raw !== null) {
-          suggestions = partitionSuggestions(verdicts.raw, rawSuggestions).kept;
-        }
       }
     }
     // A confirmed blocker must not sit under a "pass" pill; mirror the report's reconciliation.
