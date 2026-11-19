@@ -1092,10 +1092,10 @@ test('ConclusionBlock renders publish checkboxes when includeControl is set', ()
         const include = props.includeControl ?? null;
 ```
 
-`section` 内每条 item 的返回元素，在 `withVerdict` pill 之前加：
+`section` 内每条 item 的返回元素，在 `withVerdict` pill 之前加；`idKey` 已在该 map 内定义（空 id 不渲染勾选）：
 
 ```js
-                  include !== null
+                  include !== null && idKey !== ''
                     ? h(
                         'label',
                         { className: 'prr-include', title: props.t('publishInclude') },
@@ -1107,8 +1107,6 @@ test('ConclusionBlock renders publish checkboxes when includeControl is set', ()
                       )
                     : null,
 ```
-
-（`idKey` 已在该 map 内定义：`typeof item.id === 'string' && item.id !== '' ? item.id : ''`——勾选框仅在 `idKey !== ''` 时有意义，`isSelected` 对空 id 返回 false 即可不渲染勾选。实现时把 label 的渲染条件写成 `include !== null && idKey !== ''`。）
 
 - [ ] **Step 4: 实现 `PublishPreviewSection` 与 `ConclusionPage`（client.views.js）**
 

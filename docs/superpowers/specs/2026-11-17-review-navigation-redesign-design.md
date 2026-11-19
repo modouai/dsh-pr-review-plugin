@@ -48,7 +48,7 @@ derivePhase(review, staleInfo)
 // → { phase, progress, nextAction, version }
 ```
 
-phase 枚举与判定优先级（先命中先得）：
+phase 枚举与判定优先级（先命中先得）。注意：表中 `*-stale` 行**先于**对应的非 stale 行判定（代码先查 stale，再落 concluded / published 兜底），不要按行序自上而下匹配 stale 对：
 
 | phase | 条件 | 总览徽标 | 结论徽标 |
 |---|---|---|---|
@@ -57,10 +57,10 @@ phase 枚举与判定优先级（先命中先得）：
 | `concluding` | `review.concluding` 非空（优先于 analyzing） | 汇总中… | 汇总中… |
 | `analyzing` | `isAnalyzing(review.analyzing)` | 分析 {done}/{total}（+{failed}） | 未生成 |
 | `ready` | 报告完成且无结论版本 | 审查完成 | 未生成 |
-| `concluded` | 有最新结论、未发布、未过期 | 审查完成 | v{n} 草稿 |
-| `concluded-stale` | 未发布且 `staleInfo` 非空 | 审查完成 | v{n} 已过期 |
-| `published` | 当前版本已发布 | 审查完成 | v{n} 已发布 |
-| `published-stale` | 已发布且 `staleInfo` 非空 | 审查完成 | v{n} 已发布 · 有更新 |
+| `concluded` | 有最新结论、未发布、未过期（非 stale） | 审查完成 | v{n} 草稿 |
+| `concluded-stale` | 未发布且 `staleInfo` 非空（先于 `concluded` 判定） | 审查完成 | v{n} 已过期 |
+| `published` | 当前版本已发布且非 stale | 审查完成 | v{n} 已发布 |
+| `published-stale` | 已发布且 `staleInfo` 非空（先于 `published` 判定） | 审查完成 | v{n} 已发布 · 有更新 |
 
 - `progress`：analyzing → `{done, total, failed}`；其余 null。
 - `nextAction`：ready→`conclude`；concluded→`publish`；concluded-stale / published-stale→`regenerate`；published（选中版本已发布且无新变化）→`append`；analyzing 且手动模式→`analyzeAll`；reviewing / concluding / error→null。
