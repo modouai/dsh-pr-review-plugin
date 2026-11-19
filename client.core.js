@@ -66,20 +66,6 @@ window.__ModuleLoader__.load({
       return output;
     }
 
-    /**
-     * Text of one per-file suggestion. Model output stores plain strings, while a
-     * `review_update_analysis` write stores `{ point, line }`; rendering the object itself is
-     * a React child error, so every suggestion goes through here. A blank `point` falls back to
-     * `text`, and an item with neither returns '' so the caller can drop the empty row.
-     */
-    function suggestionText(item) {
-      if (typeof item === 'string') return item;
-      if (item === null || typeof item !== 'object') return '';
-      if (typeof item.point === 'string' && item.point.trim() !== '') return item.point;
-      if (typeof item.text === 'string' && item.text.trim() !== '') return item.text;
-      return '';
-    }
-
     /** Starter text the review panel inserts into the main composer ("ask in conversation"). */
     function reviewAskContext(t, number, round, filePath) {
       const values = {
@@ -1239,7 +1225,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-        api, postJson, formatClock, formatStamp, fill, suggestionText, reviewAskContext,
+        api, postJson, formatClock, formatStamp, fill, reviewAskContext,
         shortSha, roundsOf, applyRoundSelection, versionsOf, publishedOfRound, staleInfoOf,
         roundStripStateOf, scrollRoundStrip, revealActiveRound, shouldShowReviewButton,
         isRoundVersionPublished, previewConflictOf, roundPillOf, panelSizing, clampColumnWidth,

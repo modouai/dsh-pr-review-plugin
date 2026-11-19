@@ -2070,7 +2070,7 @@ test('review_update_overview rewrites the whole overview in one call and clears 
     });
     assert.match(written, /已更新总览/);
     assert.match(written, /初筛风险 0 条/);
-    assert.match(written, /逐文件意见 0 条/);
+    assert.match(written, /逐文件审查意见 0 条/);
     assert.match(written, /已清理/);
     // 结论层的「修改建议 N 条」保留；逐文件层不再出现「/ 建议 N 条」计数。
     assert.match(written, /修改建议 0 条/);

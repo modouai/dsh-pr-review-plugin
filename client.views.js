@@ -183,6 +183,22 @@ window.__ModuleLoader__.load({
         return rows;
       }
 
+      /**
+       * One inline suggestion line (`tag + text`), shared by the FindingList detail and the
+       * FileDetailPanel rows so both keep the exact same block shape. A blank or missing
+       * suggestion renders nothing instead of an empty tag row.
+       */
+      function suggestionBlock(t, suggestion) {
+        return typeof suggestion === 'string' && suggestion !== ''
+          ? h(
+              'div',
+              { className: 'prr-text' },
+              h('span', { className: 'prr-tag' }, t('suggestionTag')),
+              ` ${suggestion}`,
+            )
+          : null;
+      }
+
       /** The expandable findings list: one row per finding, detail unfolds in place. */
       function FindingList(props) {
         const { groups, t, onOpenFile } = props;
@@ -217,14 +233,7 @@ window.__ModuleLoader__.load({
                     'div',
                     { className: 'prr-finding-detail' },
                     h('div', { className: 'prr-text' }, row.point),
-                    row.suggestion === ''
-                      ? null
-                      : h(
-                          'div',
-                          { className: 'prr-text' },
-                          h('span', { className: 'prr-tag' }, t('suggestionTag')),
-                          ` ${row.suggestion}`,
-                        ),
+                    suggestionBlock(t, row.suggestion),
                     row.file === ''
                       ? null
                       : h(
@@ -505,14 +514,7 @@ window.__ModuleLoader__.load({
                       'div',
                       { className: 'prr-rowmain' },
                       h('div', { className: 'prr-text' }, issue.point),
-                      (typeof issue.suggestion === 'string' && issue.suggestion !== '')
-                        ? h(
-                            'div',
-                            { className: 'prr-text' },
-                            h('span', { className: 'prr-tag' }, t('suggestionTag')),
-                            ` ${issue.suggestion}`,
-                          )
-                        : null,
+                      suggestionBlock(t, issue.suggestion),
                       issue.line > 0
                         ? h('div', { className: 'prr-subtle' }, `${t('severityLine')} ${issue.line}`)
                         : null,

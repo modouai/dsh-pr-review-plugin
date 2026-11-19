@@ -3639,7 +3639,7 @@ export function apply(ctx, config) {
           return toolText([
             `已更新总览（revision ${record.revision}）：结论 ${normalized.verdict} · ${normalized.summary.slice(0, 160)}`,
             `阻塞项 ${normalized.blockers.length} 条 / 修改建议 ${normalized.suggestions.length} 条 / 下一步 ${normalized.nextSteps.length} 条`,
-            `初筛风险 ${afterCounts.risks} 条 · 逐文件意见 ${afterCounts.issues} 条`,
+            `初筛风险 ${afterCounts.risks} 条 · 逐文件审查意见 ${afterCounts.issues} 条`,
             cleared.issues + cleared.risks === 0 ? '' : `已清理：意见 ${cleared.issues} 条、风险 ${cleared.risks} 条`,
             '结论时间戳已刷新（stale 清除）；下一份发布评论、面板总览与重新生成看到的是同一份数据。',
           ]);

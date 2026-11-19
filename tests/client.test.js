@@ -1448,7 +1448,7 @@ test('the file detail renders one findings list where each row may carry a sugge
     onExplain: () => {},
   }));
 
-  // 只有一个意见区块：fileSuggestions 键已删除，旧「改进建议」区块不得再出现。
+  // 只有一个意见区块：旧的独立建议键已随合并删除，旧「改进建议」区块不得再出现。
   const titles = elements.filter((node) => node.props.className === 'prr-h2' && node.children === t('issues'));
   assert.equal(titles.length, 1, 'the findings section renders exactly once');
   assert.doesNotMatch(textOnly, /改进建议/);
@@ -2717,7 +2717,6 @@ test('the file detail breaks unverified points out of the findings', () => {
         changes: '',
         issues: [{ severity: 'suggest', point: '已确认问题', line: 1 }],
         unverified: [{ point: '可疑调用方', missing: '缺少 callers 证据' }],
-        suggestions: [],
       },
     },
     onExplain: () => {},
@@ -2739,7 +2738,7 @@ test('no unverified notes means no unverified section', () => {
     filePath: 'src/a.js',
     explanation: {
       status: 'done',
-      explanation: { verdict: 'pass', summary: '文件摘要', logic: '', changes: '', issues: [], suggestions: [] },
+      explanation: { verdict: 'pass', summary: '文件摘要', logic: '', changes: '', issues: [] },
     },
     onExplain: () => {},
   }));
@@ -2784,7 +2783,6 @@ test('malformed unverified entries are dropped instead of leaking into the panel
         changes: '',
         issues: [],
         unverified: [null, {}, { point: '   ' }, { point: '有效疑点', missing: null }],
-        suggestions: [],
       },
     },
     onExplain: () => {},
@@ -3143,10 +3141,12 @@ test('FindingList renders rows, block first, with the suggestion block in the de
     'collapsed heads carry verdict pills only',
   );
 
-  // fake React 的 setState 是 noop，展开态靠临时接管 useState 渲染（渲染完立即还原）。
+  // fake React 的 setState 是 noop，展开态靠临时接管 useState 渲染（渲染完立即还原）：
+  // 只替换第一次调用（openKey），后续调用回落到原始 useState——未来加第二个 hook 不会静默错乱。
   const originalUseState = fake.React.useState;
   const openWith = (key) => {
-    fake.React.useState = () => [key, () => {}];
+    let n = 0;
+    fake.React.useState = (...args) => (n++ === 0 ? [key, () => {}] : originalUseState(...args));
     try {
       return fake.render(fake.React.createElement(parts.FindingList, { groups, t, onOpenFile: () => {} }));
     } finally {
