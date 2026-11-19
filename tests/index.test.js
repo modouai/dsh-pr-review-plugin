@@ -1212,6 +1212,39 @@ test('a file chat with legacy suggestionOps still rewrites findings', async () =
   }
 });
 
+test('a file chat drops the legacy suggestions key left by review_update_analysis', async () => {
+  const plugin = await setup({
+    llm: llmFromText(JSON.stringify({
+      answer: '好',
+      findingOps: [{ op: 'update', index: 2, suggestion: '新修法' }],
+    })),
+  });
+  try {
+    // review_update_analysis（Task 6 移除 suggestions 参数前）会把遗留 suggestions 键写进
+    // 内存；随后的文件对话必须把它折叠进 issues 恰好一次，且写回时不把旧键留下——否则
+    // 下一次对话的编号列表里每条旧建议出现两遍（编号错位）。
+    await plugin.runTool('review_update_analysis', {
+      path: 'src/a.js',
+      revision: 0,
+      summary: '工具改写',
+      issues: [{ point: '人写的问题', line: 3, severity: 'block' }],
+      suggestions: [{ point: '改成分片读取', line: 5 }],
+    });
+    const chat = await plugin.call('/pr-review-api/chat', 'POST', { number: 1, message: '第二条补个修法', path: 'src/a.js' });
+    assert.equal(chat.status, 200);
+    assert.equal(chat.json.applied.length, 1);
+    const review = await plugin.review();
+    const entry = review.explanations.find((item) => item.file === 'src/a.js');
+    assert.ok(!('suggestions' in entry.explanation));
+    assert.deepEqual(entry.explanation.issues, [
+      { severity: 'block', point: '人写的问题', suggestion: '', line: 3 },
+      { severity: 'suggest', point: '改成分片读取', suggestion: '新修法', line: 5 },
+    ]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 test('a failed review is retried in the same round, never as a new round', async () => {
   // The poll sees the same head sha: retrying must not bump `round` or grow the history.
   const fetchWithSameHead = async (url) => {

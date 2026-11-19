@@ -784,7 +784,7 @@ test('partitionVerdicts keeps the suggestion the model rewrote, else carries the
   assert.equal(carried.issues[0].suggestion, '候选修法');
 });
 
-test('normalizeFindingOps falls back to the candidate suggestion on whitespace-only input', () => {
+test('partitionVerdicts falls back to the candidate suggestion when the model\'s suggestion is whitespace-only', () => {
   // whitespace-only fallback 属于 partitionVerdicts（llm.js addIssue）：
   // 模型给 suggestion: '   '（纯空白）时应沿用候选的 suggestion。
   const verdicts = partitionVerdicts(
@@ -1047,4 +1047,15 @@ test('parseChatReply reads findingOps with a suggestionOps fallback', () => {
     [{ op: 'remove', index: 1 }]);
   assert.deepEqual(parseChatReply(JSON.stringify({ answer: 'a', suggestionOps: [{ op: 'add', text: 'x' }] })).ops,
     [{ op: 'add', point: 'x' }]);
+});
+
+test('normalizeFindingOps trims padded fields and folds invalid severity and line', () => {
+  // The trim here is load-bearing: applyFindingOps writes fields through without trimming.
+  assert.deepEqual(normalizeFindingOps([
+    { op: 'update', index: 1, point: '  改写后的意见  ', suggestion: '  修法  ', severity: 'warn', line: -3 },
+    { op: 'add', point: '  新意见  ', severity: 'warn', line: -3 },
+  ]), [
+    { op: 'update', index: 1, point: '改写后的意见', suggestion: '修法' },
+    { op: 'add', point: '新意见' },
+  ]);
 });

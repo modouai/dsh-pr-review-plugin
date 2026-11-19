@@ -1940,7 +1940,11 @@ export function apply(ctx, config) {
       if (entry.explanation !== null && entry.explanation !== undefined && ops.length > 0) {
         const result = applyFindingOps(entry.explanation, ops);
         if (result.applied.length > 0) {
-          entry.explanation = { ...entry.explanation, issues: result.list };
+          // review_update_analysis can still write the legacy `suggestions` key into memory;
+          // dropping it keeps the stored shape merged, or the folded suggestions would come
+          // straight back on the next read and double every number the chat prompt shows.
+          const { suggestions: _legacy, ...explanation } = entry.explanation;
+          entry.explanation = { ...explanation, issues: result.list };
           applied = result.applied;
         }
       }
