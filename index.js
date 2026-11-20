@@ -479,6 +479,7 @@ function makeRoundEntry(round, headSha, startedAt) {
     startedAt: startedAt ?? Date.now(),
     finishedAt: 0,
     conclusions: [],
+    findings: null,
     delta: null,
     feedback: null,
     publishedIds: [],
@@ -577,6 +578,7 @@ function sanitizeRoundEntry(entry, index) {
     conclusions,
     delta: entry?.delta ?? null,
     feedback: entry?.feedback ?? null,
+    findings: Array.isArray(entry?.findings) && entry.findings.length > 0 ? entry.findings : null,
     publishedIds: Array.isArray(entry?.publishedIds) ? entry.publishedIds.filter((id) => typeof id === 'number') : [],
   };
 }
@@ -2004,6 +2006,48 @@ export function apply(ctx, config) {
     };
   }
 
+  /**
+   * Freeze the round's finished per-file findings as the next round's comparison baseline
+   * (review-delta spec v6): flattened through findingsOf, globally numbered, capped at
+   * 10 findings per file (block first, then line ascending, original order otherwise).
+   */
+  function findingsSnapshotOf(record) {
+    const byFile = [];
+    for (const [filePath, entry] of record.explanations) {
+      if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
+      const group = findingsOf(entry.explanation).map((finding) => ({ ...finding, file: filePath }));
+      group.sort((left, right) => (left.severity === right.severity ? 0 : left.severity === 'block' ? -1 : 1) || left.line - right.line);
+      byFile.push(...group.slice(0, 10).map((finding) => ({
+        index: 0,
+        file: finding.file,
+        severity: finding.severity,
+        point: finding.point,
+        line: finding.line,
+        suggestion: finding.suggestion,
+      })));
+    }
+    return byFile.map((finding, index) => ({ ...finding, index: index + 1 }));
+  }
+
+  /**
+   * The baseline round for the re-review comparison: the newest earlier round that
+   * produced a conclusion (published or not) and thus froze a findings snapshot.
+   * Rounds without a conclusion are skipped — their analysis never completed the
+   * step that makes its findings a trustworthy baseline.
+   */
+  function baselineRoundOf(record) {
+    const history = roundHistoryOf(record);
+    const current = currentRoundEntry(record);
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      const entry = history[i];
+      if (entry === current) continue;
+      if ((entry.conclusions?.length ?? 0) > 0 && Array.isArray(entry.findings) && entry.findings.length > 0) {
+        return entry;
+      }
+    }
+    return null;
+  }
+
   async function runConclude(record, abort) {
     const stillCurrent = () => record.concludingAbort === abort;
     try {
@@ -2042,6 +2086,10 @@ export function apply(ctx, config) {
       if (record.concluding !== null) record.concluding.stage = 'write';
       const version = pushConclusionVersion(record, 'model', calibrated, coverage);
       if (version === null) throw new Error('模型返回了空结论。');
+      // Freeze the round's findings as the next round's comparison baseline (review-delta
+      // spec v6): the conclusion is the marker of a completed round, so its snapshot is
+      // what a later round compares against — skipping any conclusion-less rounds between.
+      currentRoundEntry(record).findings = findingsSnapshotOf(record);
       record.conclusionEditedAt = 0;
       record.reportUpdatedAt = 0;
       record.error = null;

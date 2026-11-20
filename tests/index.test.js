@@ -3656,3 +3656,51 @@ test('a verifier reply with no results leaves every candidate visible', async ()
     await plugin.dispose();
   }
 });
+
+test('concluding a round freezes its findings snapshot as the next baseline', async () => {
+  // legacyReview 预置第 1 轮：一个文件的 done 分析（issues: 注意/1）+ 旧结论。
+  // 生成结论时，该轮明细冻结为下一轮的对比基准（全局编号，经 findingsOf 归一）。
+  const plugin = await setup({
+    fetch: batchFetch,
+    evidenceVerify: false,
+    llm: llmFromText(JSON.stringify({ verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] })),
+  });
+  try {
+    await plugin.call('/pr-review-api/conclude', 'POST', { number: 1 });
+    const reviewed = await plugin.waitForConcluding();
+    const entry = reviewed.roundHistory[reviewed.roundHistory.length - 1];
+    assert.deepEqual(entry.findings, [
+      { index: 1, file: 'src/a.js', severity: 'suggest', point: '注意', line: 1, suggestion: '' },
+    ]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the frozen baseline survives a cache round-trip', async () => {
+  // 预置带 findings 快照的轮次历史：restore 后 sanitizeRoundEntry 必须放行该字段。
+  const conclusion = { verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] };
+  const roundHistory = [{
+    round: 1,
+    headSha: 'abc123',
+    startedAt: 100,
+    finishedAt: 200,
+    conclusions: [{ version: 1, createdAt: 300, source: 'model', conclusion, coverage: null }],
+    delta: null,
+    feedback: null,
+    publishedIds: [],
+    findings: [{ index: 1, file: 'src/a.js', severity: 'suggest', point: '注意', line: 1, suggestion: '' }],
+  }];
+  const plugin = await setup({
+    reviews: { 1: legacyReview({ roundHistory, conclusion, conclusionAt: 300 }) },
+  });
+  try {
+    const reviewed = await plugin.review(1);
+    const entry = reviewed.roundHistory[reviewed.roundHistory.length - 1];
+    assert.deepEqual(entry.findings, [
+      { index: 1, file: 'src/a.js', severity: 'suggest', point: '注意', line: 1, suggestion: '' },
+    ]);
+  } finally {
+    await plugin.dispose();
+  }
+});
