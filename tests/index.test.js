@@ -3573,6 +3573,8 @@ test('a suggestion the diff already implements is dropped by the verifier', asyn
     assert.equal(result.status, 200);
     assert.deepEqual(result.json.explanation.issues, []);
     assert.deepEqual(result.json.explanation.unverified, []);
+    // 空意见即通过：复审把模型的候选全数否决后，一个 suggest 判定失去了依据。
+    assert.equal(result.json.explanation.verdict, 'pass');
   } finally {
     await plugin.dispose();
   }
@@ -3600,6 +3602,35 @@ test('a confirmed blocker raises the file verdict', async () => {
   } finally {
     await plugin.dispose();
   }
+});
+
+test('verdict reconciliation: suggest findings respect the model, a bare block degrades', async () => {
+  const build = (modelVerdict, resultSeverity) => llmTriageThenVerify({
+    verdict: modelVerdict,
+    summary: '讲解',
+    logic: '逻辑',
+    changes: '改动',
+    concerns: [{ severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 }],
+    evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
+  }, {
+    results: [{ index: 1, confidence: 90, severity: resultSeverity, point: '命名不清', line: 4 }],
+    extraIssues: [],
+  });
+  const run = async (llm) => {
+    const plugin = await setup({ fetch: batchFetch, llm });
+    try {
+      const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+      return result.json.explanation.verdict;
+    } finally {
+      await plugin.dispose();
+    }
+  };
+  // 纯优化/非阻塞意见不阻碍合并：模型的 pass 保留（Approve-with-comments 语义）。
+  assert.equal(await run(build('pass', 'suggest')), 'pass');
+  // 模型的 suggest 保留。
+  assert.equal(await run(build('suggest', 'suggest')), 'suggest');
+  // 裸 block（无确认的阻断项却喊阻塞）降为 suggest。
+  assert.equal(await run(build('block', 'suggest')), 'suggest');
 });
 
 test('a verifier reply with no results leaves every candidate visible', async () => {

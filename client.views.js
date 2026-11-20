@@ -531,6 +531,12 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'prr-verdictline' },
             h(VerdictPill, { verdict: detail.verdict, t }),
+            // A pass that still carries findings is the "approve with comments" shape; the
+            // badge explains the combination instead of leaving the reader to guess whether
+            // the pill or the list is stale.
+            (detail.verdict === 'pass' && (detail.issues ?? []).length > 0)
+              ? h('span', { className: 'prr-tag' }, fill(t('suggestionsForReference'), { count: String((detail.issues ?? []).length) }))
+              : null,
             h('span', { className: 'prr-meta2 prr-filetag' }, filePath),
           ),
           h(

@@ -1764,11 +1764,17 @@ export function apply(ctx, config) {
         unverified = verdicts.unverified;
       }
     }
-    // A confirmed blocker must not sit under a "pass" pill; mirror the report's reconciliation.
-    const baseVerdict = parsed.verdict ?? 'suggest';
+    // Verdict reconciliation (semantic contract):
+    // - any confirmed blocker -> block: never "pass" a file with confirmed blockers;
+    // - no confirmed findings -> pass: an all-dropped triage is a pass, since a "suggest"
+    //   verdict without a surviving finding is an unanchored judgment (the dropped
+    //   candidates and unverified notes stay visible in their own sections);
+    // - only suggest findings -> the model's verdict stands, except a bare "block"
+    //   (a blocked call with no confirmed blocker degrades to suggest).
+    const rawVerdict = ['block', 'suggest', 'pass'].includes(parsed.verdict) ? parsed.verdict : 'suggest';
     const verdict = issues.some((item) => item.severity === 'block')
       ? 'block'
-      : (issues.length > 0 && baseVerdict === 'pass' ? 'suggest' : baseVerdict);
+      : (issues.length === 0 ? 'pass' : (rawVerdict === 'block' ? 'suggest' : rawVerdict));
     const explanation = normalizeExplanation({
       ...parsed,
       issues,

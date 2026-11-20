@@ -314,6 +314,8 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
     'context 用于在 diff 里展开这段改动所属的完整函数/类：label 写函数/类名，startLine/endLine 是它在上面「完整内容」里的起止行号（用给出的行号，1-based，跨语言通用）；该段改动不在任何函数/类内（如 Markdown、配置文件）或你不确定时，context 写 null。',
     '同时看测试：这次改动需要补充或更新哪些测试；如果只给了实现、没有相关测试，在 summary 里点明这个测试空白。',
     '如果这次改动引入重复分支、兼容回退或单次使用的包装层，在 concerns 里用 suggest 指出可化简之处；纯改进点（补测试、抽公共 helper 等没有具体缺陷的）也必须作为 severity 为 suggest 的 concern 输出，修法写进 suggestion。',
+    '纯改进点（不阻碍合并）的 point 以「可选：」或「nit：」开头，与真正的非阻塞缺陷区分开。',
+    'verdict 语义：block=存在应先修复的缺陷，不可合并；suggest=可合并但有保留意见或非阻塞问题；pass=可按原样合并（concerns 均为可选改进时用 pass）。',
     'concerns 为空数组表示没有发现问题；point 只写问题与影响，不要把修法混进 point；line 用 diff 中的新文件行号，不确定写 0。',
     'evidenceNeeds 必须覆盖每个 concern（concern 是 1-based 序号）：kind=file 指向本文件也算取证；无法核实的由复审放进未验证项，不要写进 point。',
   ].join('\n');

@@ -1458,6 +1458,37 @@ test('the file detail renders one findings list where each row may carry a sugge
   const tags = elements.filter((node) => node.props.className === 'prr-tag');
   assert.equal(tags.length, 1, 'only the row carrying a suggestion renders the suggestion tag');
   assert.match(textOnly, /加判空/);
+  // 非 pass 判定不需要「供参考」徽标（意见与判定语义一致）。
+  assert.doesNotMatch(textOnly, /供参考/);
+});
+
+test('a pass verdict with findings explains itself as suggestions for reference', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const t = translator(parts);
+  // pass + 意见 = approve with comments：徽标解释这个组合，读者不必猜 pill 与列表哪个过期。
+  const { textOnly, elements } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t,
+    filePath: 'src/a.js',
+    explanation: {
+      status: 'done',
+      explanation: {
+        verdict: 'pass',
+        summary: '文件摘要',
+        logic: '',
+        changes: '',
+        issues: [
+          { severity: 'suggest', point: 'nit：命名可以更短', suggestion: '', line: 0 },
+          { severity: 'suggest', point: '可选：抽公共 helper', suggestion: '抽成函数', line: 0 },
+        ],
+      },
+    },
+    onExplain: () => {},
+  }));
+  assert.match(textOnly, /2 条建议供参考/);
+  // 徽标 prr-tag × 1 + 带建议的意见块 prr-tag × 1。
+  const tags = elements.filter((node) => node.props.className === 'prr-tag');
+  assert.equal(tags.length, 2);
 });
 
 test('the file detail renders the merged findings a review_update_analysis write produces', () => {

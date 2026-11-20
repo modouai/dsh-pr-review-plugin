@@ -577,6 +577,10 @@ test('explain prompt: test gaps, adaptive length and the issue shape', () => {
   assert.ok(text.includes('"suggestion"'));
   assert.ok(text.includes('不要把修法混进 point'));
   assert.ok(text.includes('纯改进点'));
+  // Verdict 三值语义显式定义（改善模型自洽），纯改进点带 nit 措辞引导。
+  assert.match(text, /verdict 语义：block=存在应先修复的缺陷/);
+  assert.match(text, /pass=可按原样合并/);
+  assert.match(text, /「可选：」或「nit：」/);
 });
 
 test('prompt language normalizes case and region tags and falls back to Chinese', () => {
