@@ -2067,21 +2067,17 @@ export function apply(ctx, config) {
     const files = Array.isArray(record.files) ? record.files : [];
     // Only finished explanations feed the conclusion and the coverage number.
     const done = new Map();
-    const fileSeverities = [];
     for (const [filePath, entry] of record.explanations) {
       if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
       done.set(filePath, entry.explanation);
-      for (const issue of Array.isArray(entry.explanation.issues) ? entry.explanation.issues : []) {
-        fileSeverities.push({ file: filePath, severity: issue?.severity === 'block' ? 'block' : 'suggest' });
-      }
     }
-    return { files, done, fileSeverities, coverage: conclusionCoverage(record.explanations, files) };
+    return { files, done, coverage: conclusionCoverage(record.explanations, files) };
   }
 
   async function runConclude(record, abort) {
     const stillCurrent = () => record.concludingAbort === abort;
     try {
-      const { files, done, fileSeverities, coverage } = concludeInputsOf(record);
+      const { files, done, coverage } = concludeInputsOf(record);
       const previousVersion = latestConclusionVersionOf(record);
       const previousConclusion = previousVersion === null ? null : previousVersion.conclusion;
       const humanEdited = (record.conclusionEditedAt ?? 0) > 0
@@ -2111,7 +2107,9 @@ export function apply(ctx, config) {
       const merged = mergeConclusion(previousConclusion, generated, {
         lockedItemIds: Array.isArray(record.humanItemIds) ? record.humanItemIds : [],
       });
-      const calibrated = calibrateVerdict(merged, { humanEdited, fileSeverities });
+      // The conclusion model reviewed every per-file analysis; its blocker judgment
+      // (including dismissing per-file blocks) is authoritative.
+      const calibrated = calibrateVerdict(merged, { humanEdited });
       if (abort.signal.aborted) throw new Error('已取消');
       if (record.concluding !== null) record.concluding.stage = 'write';
       const version = pushConclusionVersion(record, 'model', calibrated, coverage);

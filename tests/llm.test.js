@@ -179,8 +179,16 @@ test('calibrateVerdict: the four contract rules', () => {
   // Rule 2: blockers force block.
   assert.equal(calibrateVerdict({ ...base, blockers: [{ id: 'b-1', file: '', point: 'x' }] }).verdict, 'block');
   // Rule 3: any explicit block severity forces block.
-  assert.equal(calibrateVerdict(base, { fileSeverities: [{ file: 'a.js', severity: 'block' }] }).verdict, 'block');
   assert.equal(calibrateVerdict({ ...base, suggestions: [{ id: 's-1', file: '', point: 'x', severity: 'block' }] }).verdict, 'block');
+  // 逐文件 block 信号不再强制结论 verdict：结论模型复核后有权否定（PR #32 第 7 轮事故——
+  // 逐文件标阻塞、结论复核「均不成立」、校准却把 verdict 抬成「阻塞」配空 blockers）。
+  assert.equal(calibrateVerdict(base, { fileSeverities: [{ file: 'a.js', severity: 'block' }] }).verdict, 'pass');
+  assert.equal(
+    calibrateVerdict({ ...base, verdict: 'suggest', summary: '两条阻塞项经复核均不成立' }, {
+      fileSeverities: [{ file: 'a.js', severity: 'block' }],
+    }).verdict,
+    'suggest',
+  );
   // Rule 4: pass with suggestions becomes suggest.
   assert.equal(calibrateVerdict({ ...base, suggestions: [{ id: 's-1', file: '', point: 'x' }] }).verdict, 'suggest');
   // Otherwise unchanged.

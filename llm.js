@@ -1288,9 +1288,11 @@ export function normalizeConclusion(raw, options = {}) {
  * Deterministic verdict calibration (P0).
  * A human-edited conclusion is returned untouched; otherwise blockers or an explicit
  * block severity win, and a "pass" that still carries suggestions becomes "suggest".
- * Block severity on conclusion items is honored when present (the exported contract);
- * the internal pipeline strips it in normalizeConclusion and passes per-file
- * severities through `fileSeverities` instead.
+ * The conclusion model holds the final say on blockers: its prompt carries every
+ * per-file analysis, so a per-file block it explicitly dismissed ("复核均不成立") must
+ * not be re-imposed here. `fileSeverities` used to force a "block" verdict regardless
+ * of that review — it produced a「阻塞」结论 with an empty blocker list (PR #32 round 7),
+ * so it no longer participates.
  */
 export function calibrateVerdict(conclusion, options = {}) {
   if (conclusion === null || conclusion === undefined) return conclusion;
@@ -1298,11 +1300,9 @@ export function calibrateVerdict(conclusion, options = {}) {
   const verdict = normalizeVerdict(conclusion.verdict);
   const blockers = Array.isArray(conclusion.blockers) ? conclusion.blockers : [];
   const suggestions = Array.isArray(conclusion.suggestions) ? conclusion.suggestions : [];
-  const fileSeverities = Array.isArray(options.fileSeverities) ? options.fileSeverities : [];
   const blocked = blockers.length > 0
     || blockers.some((item) => item?.severity === 'block')
-    || suggestions.some((item) => item?.severity === 'block')
-    || fileSeverities.some((item) => item?.severity === 'block');
+    || suggestions.some((item) => item?.severity === 'block');
   if (blocked) return { ...conclusion, verdict: 'block' };
   if (verdict === 'pass' && suggestions.length > 0) return { ...conclusion, verdict: 'suggest' };
   return conclusion.verdict === verdict ? conclusion : { ...conclusion, verdict };
