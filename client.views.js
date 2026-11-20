@@ -543,9 +543,11 @@ window.__ModuleLoader__.load({
             'div',
             { style: { display: 'flex', gap: '6px', marginBottom: '10px' } },
             h(Btn, {
-              label: props.explainBusy ? t('explaining') : t('reExplain'),
+              // Busy belongs to the file it was requested for: switching to another file
+              // mid-analysis must keep that file's button clickable and honestly labeled.
+              label: props.explainBusyPath === filePath ? t('explaining') : t('reExplain'),
               small: true,
-              disabled: props.explainBusy === true,
+              disabled: props.explainBusyPath === filePath,
               onClick: () => props.onExplain(true),
             }),
           ),

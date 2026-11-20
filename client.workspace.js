@@ -86,7 +86,7 @@ window.__ModuleLoader__.load({
         const [filesWidth, setFilesWidth] = React.useState(panelSizing.files);
         const [detailWidth, setDetailWidth] = React.useState(panelSizing.detail);
         const rootRef = React.useRef(null);
-        const [explainBusy, setExplainBusy] = React.useState(false);
+        const [explainBusyPath, setExplainBusyPath] = React.useState('');
         const [analyzeAllBusy, setAnalyzeAllBusy] = React.useState(false);
         const [wrap, setWrap] = React.useState(false);
         const [mode, setMode] = React.useState('overview');
@@ -206,7 +206,9 @@ window.__ModuleLoader__.load({
           if (typeof number !== 'number' || path === '') return;
           if (explainInFlight.current.has(path)) return;
           explainInFlight.current.add(path);
-          setExplainBusy(true);
+          // The busy flag carries the path: single-file analysis must not render the
+          // "analyzing" button on every other file the user switches to mid-flight.
+          setExplainBusyPath(path);
           try {
             await postJson(withRepo('/pr-review-api/explain'), { number, path, force: force === true });
             await loadReview(number);
@@ -214,7 +216,7 @@ window.__ModuleLoader__.load({
             setReviewError(error instanceof Error ? error.message : String(error));
           } finally {
             explainInFlight.current.delete(path);
-            setExplainBusy(false);
+            setExplainBusyPath('');
           }
         }, [loadReview]);
 
@@ -448,7 +450,7 @@ window.__ModuleLoader__.load({
           fileDiff, fileDiffError, fileContent, fileContentError, fileContentBusy,
           showFullFile, toggleFullFile, expandedHunks, walkFloat, activeHunk, setActiveHunk,
           expandHunkContext, collapseHunkContext, closeWalkFloat, openWalkFloat, diffScrollRef,
-          requestExplain, explainBusy,
+          requestExplain, explainBusyPath,
           // Rounds and view mode.
           reviewRounds, latestRoundNumber, selectedRoundNumber, historicalView,
           selectRound, mode, setMode,
@@ -989,14 +991,14 @@ window.__ModuleLoader__.load({
 
       /** Analysis column: the open file's review, or the empty state before one is picked. */
       function WorkspaceAnalysisPane({ model }) {
-        const { t, review, prNumber, filePath, currentExplanation, explainBusy, suggestionNotice, requestExplain } = model;
+        const { t, review, prNumber, filePath, currentExplanation, explainBusyPath, suggestionNotice, requestExplain } = model;
         return h(
           'div',
           { className: 'prr-detail-body' },
           h(FileDetailPanel, {
             filePath,
             explanation: currentExplanation,
-            explainBusy,
+            explainBusyPath,
             t,
             notice: suggestionNotice,
             onExplain: (force) => void requestExplain(review?.number ?? prNumber, filePath, force),

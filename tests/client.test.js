@@ -1491,6 +1491,36 @@ test('a pass verdict with findings explains itself as suggestions for reference'
   assert.equal(tags.length, 2);
 });
 
+test('the re-analyze busy state belongs to its own file, not the whole panel', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const t = translator(parts);
+  const render = (filePath, explainBusyPath) => fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t,
+    filePath,
+    explainBusyPath,
+    explanation: {
+      status: 'done',
+      explanation: {
+        verdict: 'pass',
+        summary: '文件摘要',
+        logic: '',
+        changes: '',
+        issues: [],
+      },
+    },
+    onExplain: () => {},
+  }));
+
+  // 另一个文件在分析：本文件的按钮仍是可点的「重新分析」，不得显示「正在分析…」。
+  const other = render('src/a.js', 'src/b.js');
+  assert.match(other.textOnly, /重新分析/);
+  assert.doesNotMatch(other.textOnly, /正在分析/);
+  // 本文件自己才是分析中：按钮显示进行中并禁用。
+  const self = render('src/a.js', 'src/a.js');
+  assert.match(self.textOnly, /正在分析/);
+});
+
 test('the file detail renders the merged findings a review_update_analysis write produces', () => {
   const client = loadClient();
   const { parts, fake } = client;
