@@ -33,7 +33,6 @@ import {
   buildFeedbackPrompt,
   calibrateVerdict,
   commentItems,
-  compareComments,
   conclusionCoverage,
   ensureConclusionIds,
   parseChatReply,
@@ -215,6 +214,7 @@ function serializeReview(record) {
       explanation: entry.explanation,
       chat: entry.chat,
       updatedAt: entry.updatedAt ?? 0,
+      baselineVerdicts: Array.isArray(entry.baselineVerdicts) ? entry.baselineVerdicts : null,
     })),
     pullChat: record.pullChat,
     reportUpdatedAt: record.reportUpdatedAt ?? 0,
@@ -251,7 +251,9 @@ function findingsSnapshotOf(record) {
     if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
     const group = findingsOf(entry.explanation).map((finding) => ({ ...finding, file: filePath }));
     group.sort((left, right) => (left.severity === right.severity ? 0 : left.severity === 'block' ? -1 : 1) || left.line - right.line);
-    byFile.push(...group.slice(0, 10).map((finding) => ({
+    // 全量冻结，不丢条目：prompt 下发时再按文件截断（并声明截断），未下发的条目在
+    // 对比里落「未判定」，绝不静默消失。
+    byFile.push(...group.map((finding) => ({
       index: 0,
       file: finding.file,
       severity: finding.severity,
@@ -275,7 +277,9 @@ function baselineRoundOf(record) {
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const entry = history[i];
     if (entry === current) continue;
-    if ((entry.conclusions?.length ?? 0) > 0 && Array.isArray(entry.findings) && entry.findings.length > 0) {
+    // 基准 = 最近一个「生成过结论」的轮次（无论快照是否为空）：空快照意味着上一轮干净，
+    // findingsDeltaOf 会因无条目而返回 null——绝不再向前回溯到更早的轮次。
+    if ((entry.conclusions?.length ?? 0) > 0) {
       return entry;
     }
   }
@@ -284,10 +288,13 @@ function baselineRoundOf(record) {
 
 /**
  * The re-review comparison over the audit workspace (review-delta spec v6): the baseline
- * round's frozen findings versus this round's analysis. Every baseline finding gets a
- * status — resolved only when the model explicitly judged it fixed; still-open when the
- * model carried it over (or never judged it: that falls back conservatively and is
- * marked, never silently resolved); pending while its file has not been re-analyzed.
+ * round's frozen findings versus this round's re-judgement. Every baseline finding gets a
+ * status from the *persisted* baselineVerdicts the analysis wrote: resolved only when the
+ * model explicitly judged it fixed (the single source of「已修复」), still-open when it
+ * carried it over, undetermined when the model never judged it (missed or truncated),
+ * pending while its file has not been re-analyzed. Reading the persisted verdicts (not
+ * the current issues) makes later issue rewrites — chat findingOps, review_update_analysis,
+ * clearFindings — unable to manufacture a fake resolved state.
  * Derived on read, never persisted; it never touches the conclusion layer (H1).
  */
 function findingsDeltaOf(record) {
@@ -301,10 +308,9 @@ function findingsDeltaOf(record) {
     return entry !== undefined && entry.status === 'done'
       && entry.explanation !== null && entry.explanation !== undefined;
   };
-  // Claims: baseline index → the carry-over entry referencing it. The same index can be
-  // claimed by several analyses (a cross-file claim from an earlier analysis, then the
-  // owning file's own analysis); the newest updatedAt wins so a stale claim can never
-  // outrank a later explicit verdict.
+  // Claims: baseline index → this round's carry-over entry (for the「仍未解决」row body —
+  // the model's updated wording plus its suggestion). Display only: the status itself
+  // comes from the persisted verdicts below.
   const claimOf = new Map();
   for (const [filePath, entry] of entries) {
     if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
@@ -322,7 +328,23 @@ function findingsDeltaOf(record) {
   const undetermined = [];
   const pending = [];
   for (const finding of baseline.findings) {
+    const entry = entries.get(finding.file);
     const fileAnalyzed = analyzed(finding.file);
+    const verdicts = entry !== undefined && Array.isArray(entry.baselineVerdicts) ? entry.baselineVerdicts : null;
+    if (fileAnalyzed && verdicts !== null) {
+      const verdict = verdicts.find((item) => item.index === finding.index);
+      if (verdict === undefined) {
+        // 模型没有判定（漏判或 prompt 截断）——保守落「未判定」，绝不算已修复。
+        undetermined.push(finding);
+        continue;
+      }
+      if (verdict.status === 'fixed') {
+        resolved.push(finding);
+        continue;
+      }
+      stillOpen.push({ previous: finding, current: claimOf.get(finding.index)?.finding });
+      continue;
+    }
     const claim = claimOf.get(finding.index);
     if (!fileAnalyzed) {
       // 归属文件未分析：跨文件认领（重命名场景）仍算「仍未解决」；否则保持待分析。
@@ -333,7 +355,7 @@ function findingsDeltaOf(record) {
       }
       continue;
     }
-    // 归属文件自己的分析拥有最终权：带 roundItem 认领 → 仍未解决；不带 → 显式已修复。
+    // 旧缓存（entry 无 baselineVerdicts）：回退到认领推断——过渡数据的保守近似。
     const ownClaim = claim !== undefined && claim.fromFile === finding.file ? claim.finding : undefined;
     if (ownClaim === undefined) {
       resolved.push(finding);
@@ -866,6 +888,7 @@ export function apply(ctx, config) {
           explanation: entry.explanation,
           chat: entry.chat,
           updatedAt: entry.updatedAt,
+          baselineVerdicts: Array.isArray(entry.baselineVerdicts) ? entry.baselineVerdicts : null,
         })),
         pullChat: record.pullChat,
         reportUpdatedAt: record.reportUpdatedAt ?? 0,
@@ -969,6 +992,15 @@ export function apply(ctx, config) {
           : normalizeExplanation(entry.explanation),
         chat: Array.isArray(entry.chat) ? entry.chat : [],
         updatedAt: entry.updatedAt ?? 0,
+        // The persisted per-item verdicts drive the re-review comparison; a legacy
+        // cache without them falls back to the claim-based approximation.
+        baselineVerdicts: Array.isArray(entry.baselineVerdicts)
+          ? entry.baselineVerdicts
+            .filter((item) => item !== null && typeof item === 'object'
+              && Number.isInteger(item.index) && item.index >= 1
+              && (item.status === 'fixed' || item.status === 'still-open'))
+            .map((item) => ({ ...item, status: item.status }))
+          : null,
       });
     }
     const number = Number(saved.number ?? key);
@@ -1888,6 +1920,11 @@ export function apply(ctx, config) {
       explanation,
       chat: cached?.chat ?? [],
       updatedAt: Date.now(),
+      // The baseline re-judgement is persisted with the entry (review-delta spec v6):
+      // findingsDeltaOf reads explicit verdicts instead of inferring "no claim = fixed",
+      // so later issue rewrites (chat findOps, review_update_analysis, clearFindings)
+      // can never manufacture a fake resolved state.
+      baselineVerdicts: baselineVerdicts.length === 0 ? null : baselineVerdicts,
     });
     scheduleSave();
     maybeAutoConclude(record);

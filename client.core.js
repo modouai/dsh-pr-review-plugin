@@ -110,7 +110,7 @@ window.__ModuleLoader__.load({
     /**
      * State transition for picking a round: the latest one keeps following (null) and lands on
      * the overview; a pinned historical round lands on the conclusion page — history persists
-     * conclusions/delta/feedback/published, so the conclusion is its main artifact.
+     * conclusions/feedback/published, so the conclusion is its main artifact.
      */
     function applyRoundSelection(round, latestRoundNumber) {
       const historical = round !== latestRoundNumber;
@@ -259,9 +259,9 @@ window.__ModuleLoader__.load({
         ? null
         : {
             done: analyzedCount,
-            // Files is the honest total; fall back to the batch total, then to the
-            // analyzed count, so a malformed record can never render a full bar.
-            total: files.length > 0 ? files.length : (analyzing.total > 0 ? analyzing.total : analyzedCount),
+            // Files is the honest total; a record without them falls back to the batch
+            // total (isAnalyzing guarantees it is positive).
+            total: files.length > 0 ? files.length : analyzing.total,
             failed: Math.min(Math.max(analyzing.failed ?? 0, 0), analyzing.total ?? 0),
           };
       const hasConclusion = versions.length > 0;

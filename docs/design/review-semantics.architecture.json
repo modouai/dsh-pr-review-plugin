@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "逐文件审查语义地图：verdict × 意见列表",
+    "subtitle": "合并（issue #21）后的组合语义、认知解释与建议 · PR #32 审查暴露的接缝",
+    "output": "review-semantics.html"
+  },
+  "components": [
+    { "id": "f-empty", "type": "external", "label": "意见列表：空", "sublabel": "复审全丢或确无问题", "pos": [60, 140], "size": [170, 62] },
+    { "id": "f-block", "type": "security", "label": "含 block 意见", "sublabel": "应先修复的缺陷", "pos": [60, 240], "size": [170, 62] },
+    { "id": "f-risk", "type": "backend", "label": "含 suggest · 缺陷/风险", "sublabel": "有问题但不阻塞合并", "pos": [60, 340], "size": [170, 62] },
+    { "id": "f-opt", "type": "messagebus", "label": "含 suggest · 纯优化", "sublabel": "无缺陷：补测试 / nit / 命名", "pos": [60, 440], "size": [170, 62] },
+
+    { "id": "v-block", "type": "security", "label": "verdict: block", "sublabel": "应先修复 · 不可合并", "pos": [60, 620], "size": [170, 62] },
+    { "id": "v-suggest", "type": "cloud", "label": "verdict: suggest", "sublabel": "可合并 · 有保留意见", "pos": [60, 720], "size": [170, 62] },
+    { "id": "v-pass", "type": "database", "label": "verdict: pass", "sublabel": "可按原样合并 · 意见均为可选", "pos": [60, 820], "size": [170, 62] },
+
+    { "id": "c1", "type": "backend", "label": "block × 含block意见", "sublabel": "自然：判定与阻断一致", "pos": [340, 140], "size": [185, 66] },
+    { "id": "c2", "type": "security", "label": "block × 仅suggest意见", "sublabel": "矛盾：说阻塞却无阻断项", "tag": "校准应防", "pos": [340, 240], "size": [185, 66] },
+    { "id": "c3", "type": "backend", "label": "suggest × suggest意见", "sublabel": "自然：有保留意见的可合并", "pos": [340, 340], "size": [185, 66] },
+    { "id": "c4", "type": "cloud", "label": "pass × suggest意见", "sublabel": "合法：通过，意见供参考", "tag": "需渲染解释", "pos": [340, 440], "size": [185, 66] },
+    { "id": "c5", "type": "database", "label": "pass × 空列表", "sublabel": "最自然：无异议", "pos": [340, 540], "size": [185, 66] },
+    { "id": "c6", "type": "external", "label": "suggest × 空列表", "sublabel": "残留：判定失去依据", "tag": "提示刷新", "pos": [340, 640], "size": [185, 66] },
+
+    { "id": "p-gen", "type": "frontend", "label": "新分析（生成时）", "sublabel": "有校准 · 唯一维护点", "pos": [620, 140], "size": [175, 62] },
+    { "id": "p-restore", "type": "backend", "label": "restore 旧缓存", "sublabel": "不重算 · 新旧语义并存", "tag": "过渡态", "pos": [620, 240], "size": [175, 62] },
+    { "id": "p-chat", "type": "messagebus", "label": "对话 findingOps", "sublabel": "不重算 verdict", "pos": [620, 340], "size": [175, 62] },
+    { "id": "p-tool", "type": "cloud", "label": "review_update_analysis", "sublabel": "不重算 verdict", "pos": [620, 440], "size": [175, 62] },
+    { "id": "p-clear", "type": "external", "label": "clearFindings", "sublabel": "不重算 verdict", "pos": [620, 540], "size": [175, 62] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "信息层：意见列表构成（issue #21 合并后共用 suggest 级）", "wraps": ["f-empty", "f-block", "f-risk", "f-opt"] },
+    { "kind": "region", "label": "判断层：verdict 三值", "wraps": ["v-block", "v-suggest", "v-pass"] },
+    { "kind": "region", "label": "组合矩阵：合法性 × 认知解释", "wraps": ["c1", "c2", "c3", "c4", "c5", "c6"] },
+    { "kind": "region", "label": "生产路径：verdict 是否重算", "wraps": ["p-gen", "p-restore", "p-chat", "p-tool", "p-clear"] }
+  ],
+  "connections": [
+    { "from": "f-block", "to": "c1", "variant": "emphasis", "fromSide": "right", "toSide": "left" },
+    { "from": "f-block", "to": "c2", "variant": "security", "label": "硬校准应防", "fromSide": "bottom", "toSide": "top", "labelDy": -10 },
+    { "from": "f-opt", "to": "c4", "variant": "emphasis", "label": "典型争议组合", "fromSide": "right", "toSide": "left" },
+    { "from": "p-restore", "to": "c4", "variant": "dashed", "label": "旧缓存过渡态", "fromSide": "bottom", "toSide": "right", "route": "auto", "labelAt": [600, 416] }
+  ],
+  "cards": [
+    { "dot": "slate", "title": "人类 reviewer 的双通道", "items": [
+      "判断与信息正交：review decision（Approve / Request changes）× comments",
+      "Approve with comments 是一等公民组合：通过但附带 nit",
+      "级别靠措辞表达：nit: / suggestion: / blocker: 由审查者自定"
+    ] },
+    { "dot": "violet", "title": "大模型的写作特性", "items": [
+      "severity 是置信度的离散化：同类问题在不同文件会漂移",
+      "verdict 自洽性弱：可能输出 pass 却列出 block 意见",
+      "建议膨胀：独立 suggestions 常与 point 重复修法（issue #21 的动机）",
+      "prompt 里显式三值定义可显著改善自洽"
+    ] },
+    { "dot": "rose", "title": "唯一硬约束", "items": [
+      "有 block 意见 ⇒ verdict ≠ pass",
+      "绝不能「通过」一个自己认为阻塞的文件",
+      "其余组合均合法：交给渲染层解释，而非机械校准"
+    ] },
+    { "dot": "amber", "title": "认知负担的真正来源", "items": [
+      "不是「通过 + 建议」组合本身——人类审阅中每天见",
+      "是系统不给解释：读者无法区分「意见不重要」与「忘了降级」",
+      "渲染建议：pass pill 旁加「N 条建议供参考」徽标"
+    ] },
+    { "dot": "emerald", "title": "建议（方案 C：折中）", "items": [
+      "verdict 三句话定义写进 explain prompt（改善模型自洽）",
+      "校准放宽：仅 block 强制降级；pass × suggest 合法",
+      "restore 不改写历史 verdict；意见变更由 stale 机制提示",
+      "prompt 引导 point 措辞区分 nit（恢复软性级别，不加数据字段）"
+    ] }
+  ]
+}

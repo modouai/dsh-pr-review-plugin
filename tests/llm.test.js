@@ -1152,3 +1152,28 @@ test('normalizeFindingOps trims padded fields and folds invalid severity and lin
     { op: 'add', point: '新意见' },
   ]);
 });
+
+
+test('explain prompt truncates the baseline per file and declares the truncation', () => {
+  const baselineFindings = Array.from({ length: 13 }, (_, index) => ({
+    index: index + 1,
+    file: 'a.js',
+    severity: 'suggest',
+    point: `问题 ${index + 1}`,
+    line: index + 1,
+    suggestion: '',
+  }));
+  const prompt = buildExplainPrompt(
+    { platform: 'github', repo: 'o/r', number: 1, title: 't' },
+    { path: 'a.js', status: 'modified', additions: 1, deletions: 0 },
+    '', null, '', '',
+    { language: 'zh', baselineFindings },
+  );
+  const text = prompt.messages[0].content[0].text;
+  // 只列前 10 条（block 优先/行号升序）：第 11-13 条不下发。
+  assert.ok(text.includes('10. [suggest] a.js 问题 10（行 10）'));
+  assert.ok(!text.includes('11. [suggest] a.js 问题 11'));
+  // 显式声明截断，并要求判定数等于下发数。
+  assert.match(text, /上一轮意见已截断：另有 3 条未列出/);
+  assert.match(text, /previousVerdicts 必须恰好包含 10 条判定/);
+});

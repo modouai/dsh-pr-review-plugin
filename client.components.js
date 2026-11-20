@@ -192,7 +192,7 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'prr-subtle' },
-              `${t('deltaTitle')} · 基准轮 #${delta.baselineRound ?? '?'}：${t('deltaResolved')} ${resolved.length} · ${t('deltaStillOpen')} ${stillOpen.length + undetermined.length}${pending.length > 0 ? ` · ${t('deltaPending')} ${pending.length}` : ''}`,
+              `${fill(t('deltaBaseline'), { round: String(delta.baselineRound ?? '?') })}：${t('deltaResolved')} ${resolved.length} · ${t('deltaStillOpen')} ${stillOpen.length + undetermined.length}${pending.length > 0 ? ` · ${t('deltaPending')} ${pending.length}` : ''}`,
             ),
             resolved.length === 0
               ? null

@@ -291,17 +291,37 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
   // a roundItem reference. The full globally-numbered snapshot goes in so the model can
   // carry a finding across a renamed file.
   const baseline = Array.isArray(options.baselineFindings) ? options.baselineFindings : [];
-  const baselineSection = baseline.length === 0 ? [] : [
+  // 快照全量冻结，但下发按文件截断到 10 条（block 优先、行号升序）：截断部分不下发、
+  // 不要求判定，并显式声明——这些条目在对比里落「未判定」，绝不静默消失。
+  const baselineByFile = new Map();
+  for (const item of baseline) {
+    if (!baselineByFile.has(item.file)) baselineByFile.set(item.file, []);
+    baselineByFile.get(item.file).push(item);
+  }
+  const baselineShown = [];
+  let baselineTruncated = 0;
+  for (const group of baselineByFile.values()) {
+    const sorted = [...group].sort((left, right) => (
+      (left.severity === right.severity ? 0 : left.severity === 'block' ? -1 : 1) || left.line - right.line
+    ));
+    baselineShown.push(...sorted.slice(0, 10));
+    baselineTruncated += Math.max(0, sorted.length - 10);
+  }
+  baselineShown.sort((left, right) => left.index - right.index);
+  const baselineSection = baselineShown.length === 0 ? [] : [
     '## 基准轮审查意见（本轮必须逐条判定修复状态）',
-    ...baseline.map((item) => {
+    ...baselineShown.map((item) => {
       const where = item.line > 0 ? `（行 ${item.line}）` : '';
       const advice = typeof item.suggestion === 'string' && item.suggestion !== '' ? ` —— 建议：${item.suggestion}` : '';
       return `${item.index}. [${item.severity}] ${item.file === '' ? '' : `${item.file} `}${item.point}${where}${advice}`;
     }),
+    ...(baselineTruncated > 0
+      ? [`（上一轮意见已截断：另有 ${baselineTruncated} 条未列出，未列出的条目不需要判定。）`]
+      : []),
     '对上面每一条意见，结合当前代码逐条判定：该问题在本次改动后是否仍存在。',
     '- 仍存在 → 在 previousVerdicts 输出 "status": "still-open"，并把该问题作为一条审查意见写入 issues（severity/point/line 按当前代码重写），同时带 "roundItem": <上面的序号>；',
     '- 已修复 / 不再存在 → 在 previousVerdicts 输出 "status": "fixed"，不要把它写入 issues；',
-    `- 基准轮共 ${baseline.length} 条意见，previousVerdicts 必须恰好包含 ${baseline.length} 条判定，一条都不能少。`,
+    `- previousVerdicts 必须恰好包含 ${baselineShown.length} 条判定，一条都不能少。`,
     '- 本轮新发现的问题照常写入 issues（不带 roundItem）——不要重复报告：已在 previousVerdicts 中判定 still-open 的问题只写一次，不要同时作为新发现再写一条。',
   ];
   const user = [
@@ -1442,8 +1462,6 @@ const COMMENT_APPENDIX = {
     files: '逐文件审查发现',
     order: '审查顺序',
     unanalyzed: '未分析文件',
-    resolved: '已修复',
-    stillOpen: '仍未解决',
     suggestion: '建议',
     line: '行',
     more: '…另有 {count} 条',
@@ -1451,13 +1469,11 @@ const COMMENT_APPENDIX = {
     truncated: '> 评论过长已截断，完整内容见审查面板。',
   },
   en: {
-    summary: 'Review appendix: initial risks / per-file findings / reading order / re-review comparison',
+    summary: 'Review appendix: initial risks / per-file findings / reading order',
     risks: 'Initial risks',
     files: 'Per-file findings',
     order: 'Reading order',
     unanalyzed: 'Files not analyzed',
-    resolved: 'Resolved',
-    stillOpen: 'Still open',
     suggestion: 'Suggestion',
     line: 'line',
     more: '…and {count} more',
@@ -1492,7 +1508,7 @@ function appendixBullet(item, zh) {
 
 /**
  * Markdown appendix for the PR comment: the review content that is too long for the main
- * body (initial risks, per-file findings, reading order, re-review comparison, unanalyzed
+ * body (initial risks, per-file findings, reading order, unanalyzed
  * files). Compact mode keeps only the first few entries per section.
  */
 export function buildCommentAppendix(appendix, language = 'zh', compact = false) {

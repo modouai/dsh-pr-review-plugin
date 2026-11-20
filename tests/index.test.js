@@ -389,7 +389,7 @@ test('migrates a legacy cache into roundHistory and serializes the new fields', 
   }
 });
 
-test('force review opens round 2: previousRound, cleared state, and delta on the next conclusion', async () => {
+test('force review opens round 2: previousRound, cleared state, and a frozen baseline on conclude', async () => {
   const diffText = 'diff --git a/src/a.js b/src/a.js\n@@ -1 +1 @@\n-a\n+b\n';
   const fetchHandler = async (url) => {
     const target = String(url);
@@ -4053,6 +4053,207 @@ test('a cross-file claim is not stored when the owning file is analyzed this rou
     assert.equal(result.status, 200);
     // 归属文件（src/owned.js）在本轮 files 里：认领条目不落库。
     assert.deepEqual(result.json.explanation.issues, []);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+
+test('persisted verdicts keep the comparison stable when issues are rewritten or cleared', async () => {
+  // I1（审查发现）：聊天 findingOps / review_update_analysis / clearFindings 改写 issues
+  // 不得改变对比判定——状态只来自 entry 的 baselineVerdicts，而不是「有没有认领」。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '已修复的问题', line: 1, suggestion: '' },
+          { index: 2, file: 'src/a.js', severity: 'suggest', point: '仍在的问题', line: 2, suggestion: '' },
+        ],
+      },
+      { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+    explanations: [{
+      file: 'src/a.js',
+      status: 'done',
+      error: null,
+      // 分析完成后 issues 被清空（例如 clearFindings 或对话改写了条目）——
+      // 判定结果不受影响，仍按分析时持久化的 verdicts。
+      explanation: { verdict: 'pass', summary: '复现', issues: [], suggestions: [] },
+      chat: [],
+      updatedAt: 200,
+      baselineVerdicts: [
+        { index: 1, status: 'fixed' },
+        { index: 2, status: 'still-open' },
+      ],
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const review = await plugin.review();
+    assert.deepEqual(review.delta.resolved.map((item) => item.index), [1]);
+    assert.deepEqual(review.delta.stillOpen.map((item) => item.previous.index), [2]);
+    // issues 被清掉：仍是「仍未解决」，但没有本轮表述（current 缺省）。
+    assert.equal(review.delta.stillOpen[0].current, undefined);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a concluded round with an empty snapshot is the baseline — no comparison, no backtracking', async () => {
+  // I2（审查发现）：基准 = 最近一个生成过结论的轮次。它快照为空（上一轮干净）时，
+  // 不应回溯到更早的轮次拿旧意见做对比。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 3,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1, headSha: 'sha1', startedAt: 100, finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '更早轮的问题', line: 1, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'sha2', startedAt: 160, finishedAt: 180,
+        conclusions: [{ version: 1, createdAt: 190, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings: [],
+      },
+      { round: 3, headSha: 'sha3', startedAt: 210, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+    explanations: [{
+      file: 'src/a.js', status: 'done', error: null,
+      explanation: { verdict: 'pass', summary: '干净', issues: [], suggestions: [] },
+      chat: [], updatedAt: 220,
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const review = await plugin.review();
+    // 基准是第 2 轮（空快照）→ 无对比可渲染；若错误回溯到第 1 轮会出现 resolved/stillOpen。
+    assert.equal(review.delta, null);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('baseline findings the prompt could not carry land undetermined, never resolved', async () => {
+  // I3（审查发现）：快照全量冻结；下发按文件截断到 10 条。被截断的条目没有判定 →
+  // 「未判定」，绝不静默判「已修复」。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const findings = Array.from({ length: 12 }, (_, index) => ({
+    index: index + 1,
+    file: 'src/a.js',
+    severity: 'suggest',
+    point: `第 ${index + 1} 条`,
+    line: index + 1,
+    suggestion: '',
+  }));
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings,
+      },
+      { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+    explanations: [{
+      file: 'src/a.js', status: 'done', error: null,
+      explanation: { verdict: 'pass', summary: '复现', issues: [], suggestions: [] },
+      chat: [], updatedAt: 200,
+      // 模型只判了前 10 条（后 2 条因截断未下发）。
+      baselineVerdicts: findings.slice(0, 10).map((item) => ({ index: item.index, status: 'fixed' })),
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const review = await plugin.review();
+    assert.equal(review.delta.resolved.length, 10);
+    assert.deepEqual(review.delta.undetermined.map((item) => item.index), [11, 12]);
+    assert.equal(review.delta.pending.length, 0);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+
+test('the analysis pipeline drops a fresh concern that repeats a still-open verdict verbatim', async () => {
+  // I4（审查发现）：只测聚合是空转。端到端走 explain 管线：模型对同一问题既输出
+  // previousVerdicts still-open、又把同一段文字作为新 concern 写进 issues——
+  // 落库的 issues 必须只有一条（延续条目）。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const roundHistory = [
+    {
+      round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+      conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+      feedback: null, publishedIds: [],
+      findings: [
+        { index: 1, file: 'src/a.js', severity: 'suggest', point: '回退链仍可到满格', line: 264, suggestion: '' },
+      ],
+    },
+    { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+  ];
+  const plugin = await setup({
+    reviews: {
+      1: legacyReview({
+        round: 2,
+        conclusion: null,
+        conclusionAt: 0,
+        comment: null,
+        published: [],
+        publishedItems: [],
+        roundHistory,
+        explanations: [{ file: 'src/a.js', status: 'pending', error: null, explanation: null, chat: [], updatedAt: 0 }],
+      }),
+    },
+    fetch: roundReviewFetch,
+    evidenceVerify: false,
+    llm: (streamOptions) => {
+      const promptText = JSON.stringify(streamOptions.messages);
+      const reply = promptText.includes('基准轮审查意见')
+        ? JSON.stringify({
+            verdict: 'suggest',
+            summary: '复现',
+            logic: '', changes: '',
+            previousVerdicts: [{ index: 1, status: 'still-open' }],
+            // 同一问题又被当成新发现写一遍（文本相同、多了空白）。
+            concerns: [{ severity: 'suggest', point: '  回退链仍可到满格 ', suggestion: '', line: 264 }],
+          })
+        : JSON.stringify({ verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} });
+      return llmFromText(reply)(streamOptions);
+    },
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    // 落库只有延续条目一条（同文的新发现被丢弃）。
+    assert.deepEqual(result.json.explanation.issues, [
+      { severity: 'suggest', point: '回退链仍可到满格', suggestion: '', line: 264, roundItem: 1 },
+    ]);
   } finally {
     await plugin.dispose();
   }
