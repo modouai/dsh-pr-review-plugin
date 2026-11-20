@@ -1440,7 +1440,6 @@ const COMMENT_APPENDIX = {
     risks: '总体初筛风险',
     files: '逐文件审查发现',
     order: '审查顺序',
-    delta: '复审对比',
     unanalyzed: '未分析文件',
     resolved: '已修复',
     stillOpen: '仍未解决',
@@ -1455,7 +1454,6 @@ const COMMENT_APPENDIX = {
     risks: 'Initial risks',
     files: 'Per-file findings',
     order: 'Reading order',
-    delta: 'Re-review comparison',
     unanalyzed: 'Files not analyzed',
     resolved: 'Resolved',
     stillOpen: 'Still open',
@@ -1501,8 +1499,8 @@ export function buildCommentAppendix(appendix, language = 'zh', compact = false)
   const zh = language !== 'en';
   const labels = zh ? COMMENT_APPENDIX.zh : COMMENT_APPENDIX.en;
   const caps = compact
-    ? { risks: 8, files: 6, perFile: 2, order: 8, delta: 4, unanalyzed: 8 }
-    : { risks: 40, files: 40, perFile: 5, order: 40, delta: 40, unanalyzed: 100 };
+    ? { risks: 8, files: 6, perFile: 2, order: 8, unanalyzed: 8 }
+    : { risks: 40, files: 40, perFile: 5, order: 40, unanalyzed: 100 };
   const sections = [];
   const more = (count) => (count > 0 ? appendixCount(labels.more, count) : '');
   const risks = Array.isArray(appendix.risks) ? appendix.risks : [];
@@ -1540,18 +1538,6 @@ export function buildCommentAppendix(appendix, language = 'zh', compact = false)
     ));
     if (order.length > shown.length) lines.push(more(order.length - shown.length));
     sections.push([`#### ${labels.order}`, ...lines].join('\n'));
-  }
-  const delta = appendix.delta ?? null;
-  const resolved = Array.isArray(delta?.resolved) ? delta.resolved : [];
-  const stillOpen = Array.isArray(delta?.stillOpen) ? delta.stillOpen : [];
-  if (resolved.length > 0 || stillOpen.length > 0) {
-    const lines = [];
-    const label = (kind, item) => (
-      `- ${kind}：${item.file === '' || item.file === undefined ? item.point : `\`${item.file}\` — ${item.point}`}`
-    );
-    for (const item of resolved.slice(0, caps.delta)) lines.push(label(labels.resolved, item));
-    for (const item of stillOpen.slice(0, caps.delta)) lines.push(label(labels.stillOpen, item));
-    sections.push([`#### ${labels.delta}`, ...lines].join('\n'));
   }
   const unanalyzed = Array.isArray(appendix.unanalyzed) ? appendix.unanalyzed : [];
   if (unanalyzed.length > 0) {

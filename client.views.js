@@ -669,7 +669,9 @@ window.__ModuleLoader__.load({
         const roundNumber = selectedRound === null ? 1 : selectedRound.round;
         const isCurrent = latestRound === null || selectedRound === null || selectedRound.round === latestRound.round;
         const feedback = isCurrent ? (review.feedback ?? selectedRound?.feedback ?? null) : (selectedRound?.feedback ?? null);
-        const delta = isCurrent ? (review.delta ?? selectedRound?.delta ?? null) : (selectedRound?.delta ?? null);
+        // Workspace-only comparison: the live aggregation rides the current review; a
+        // pinned historical round has no comparison of its own.
+        const delta = isCurrent ? (review.delta ?? null) : null;
         const anyPublished = Array.isArray(review.published) && review.published.length > 0;
 
         // The whole-review footer (conclusion/publish actions plus notices) is rendered above
@@ -704,7 +706,7 @@ window.__ModuleLoader__.load({
         }, []);
 
         // The current round needs a report before anything renders; a historical round keeps
-        // its own feedback/delta even though `record.report` is reset on a new round.
+        // its own feedback even though `record.report` is reset on a new round.
         if ((report === null || report === undefined) && isCurrent) {
           return h('div', { className: 'prr-zero' }, review.status === 'reviewing' ? t('reportPending') : t('noReport'));
         }
@@ -792,13 +794,11 @@ window.__ModuleLoader__.load({
        * never leaks section text).
        */
       function ConclusionAppendix(props) {
-        const { sources, delta, coverage, t } = props;
+        const { sources, coverage, t } = props;
         const [open, setOpen] = React.useState(props.defaultOpen === true);
         const risks = Array.isArray(sources?.risks) ? sources.risks : [];
         const order = Array.isArray(sources?.order) ? sources.order : [];
         const rows = findingsOf(Array.isArray(sources?.findings) ? sources.findings : []);
-        const resolved = Array.isArray(delta?.resolved) ? delta.resolved : [];
-        const stillOpen = Array.isArray(delta?.stillOpen) ? delta.stillOpen : [];
         const unanalyzed = Array.isArray(coverage?.unanalyzed) ? coverage.unanalyzed : [];
         const describe = (item) => {
           if (item === null || typeof item !== 'object') return '';
@@ -847,15 +847,6 @@ window.__ModuleLoader__.load({
             null,
             order.map((item, index) => line(`${index + 1}. ${describe(item)}`, `o-${index}`)),
           ), 'order'));
-        }
-        if (resolved.length > 0 || stillOpen.length > 0) {
-          sections.push(section(t('appendixDelta'), h(
-            'div',
-            null,
-            line(`${t('deltaResolved')} ${resolved.length} · ${t('deltaStillOpen')} ${stillOpen.length}`, 'd-sum'),
-            resolved.map((item, index) => line(`${t('deltaResolved')}：${describe(item)}`, `d-r-${index}`)),
-            stillOpen.map((item, index) => line(`${t('deltaStillOpen')}：${describe(item)}`, `d-s-${index}`)),
-          ), 'delta'));
         }
         if (unanalyzed.length > 0) {
           sections.push(section(t('appendixUnanalyzed'), h(
@@ -936,12 +927,10 @@ window.__ModuleLoader__.load({
         }, []);
 
         // The published comment's appendix, mirrored: the current round may add the report's
-        // risks / per-file findings / reading order, while every round carries its own delta
-        // and unanalyzed files. A pinned historical round never inherits the CURRENT round's
-        // coverage — only its own version's persisted coverage counts there.
+        // risks / per-file findings / reading order and unanalyzed files. The re-review
+        // comparison is workspace-only (H1) — the conclusion page never renders it.
         const appendix = h(ConclusionAppendix, {
           sources: isCurrent ? (props.appendixSources ?? null) : null,
-          delta: isCurrent ? (review.delta ?? selectedRound?.delta ?? null) : (selectedRound?.delta ?? null),
           coverage: isCurrent
             ? (selectedVersion?.coverage ?? review.coverage ?? null)
             : (selectedVersion?.coverage ?? null),

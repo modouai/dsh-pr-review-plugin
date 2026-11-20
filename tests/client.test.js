@@ -1993,8 +1993,9 @@ test('feedback can be read before this round is published', () => {
   assert.doesNotMatch(textOnly, /上一轮还没有发布审查评论/);
 });
 
-test('historical round 2 pins feedback before the comparison', () => {
+test('a historical round keeps its feedback but never renders the workspace comparison', () => {
   const client = loadClient();
+  // H1：复审对比只属于审核工作面——即使轮次历史里残留旧的 delta 数据，历史轮也不渲染。
   const delta = {
     round: 2,
     previousRound: 1,
@@ -2017,7 +2018,7 @@ test('historical round 2 pins feedback before the comparison', () => {
   const feedbackIndex = textOnly.indexOf('实现者反馈');
   const deltaIndex = textOnly.indexOf('复审对比');
   assert.ok(feedbackIndex >= 0, 'historical feedback missing');
-  assert.ok(deltaIndex > feedbackIndex, 'historical feedback must render before the comparison');
+  assert.equal(deltaIndex, -1, 'a historical round never renders the workspace comparison');
   // No action buttons on a historical round.
   assert.doesNotMatch(textOnly, /检查实现者反馈/);
 });
@@ -3599,14 +3600,8 @@ test('ConclusionAppendix collapses by default, opens with defaultOpen and skips 
     }],
     order: [{ file: 'src/a.js', reason: '入口改动' }],
   };
-  const delta = {
-    previousRound: 1,
-    round: 2,
-    resolved: [{ file: 'a.js', point: '已修复点' }],
-    stillOpen: [{ file: 'b.js', point: '仍未解决点' }],
-  };
   const coverage = { analyzed: 1, total: 2, unanalyzed: ['src/b.js'] };
-  const collapsed = fake.render(fake.React.createElement(parts.ConclusionAppendix, { sources, delta, coverage, t }));
+  const collapsed = fake.render(fake.React.createElement(parts.ConclusionAppendix, { sources, coverage, t }));
   assert.ok(collapsed.textOnly.includes('审查附录'));
   assert.ok(!collapsed.textOnly.includes('总体初筛风险'));
   assert.ok(!collapsed.textOnly.includes('复审对比'));
@@ -3623,7 +3618,7 @@ test('ConclusionAppendix collapses by default, opens with defaultOpen and skips 
   assert.ok(prevented, 'summary click must preventDefault the native toggle');
 
   const open = fake.render(fake.React.createElement(parts.ConclusionAppendix, {
-    sources, delta, coverage, t, defaultOpen: true,
+    sources, coverage, t, defaultOpen: true,
   }));
   const text = open.textOnly;
   // The forced-open state really opens the details element.
@@ -3641,15 +3636,14 @@ test('ConclusionAppendix collapses by default, opens with defaultOpen and skips 
   assert.ok(text.includes('src/a.js:8'));
   assert.ok(text.includes('审查顺序'));
   assert.ok(text.includes('src/a.js — 入口改动'));
-  assert.ok(text.includes('复审对比'));
-  assert.ok(text.includes('已修复 1'));
-  assert.ok(text.includes('仍未解决 1'));
-  assert.ok(text.includes('已修复：a.js — 已修复点'));
+  // H1：结论页附录不渲染复审对比。
+  assert.ok(!text.includes('复审对比'));
+  assert.ok(!text.includes('已修复：a.js'));
   assert.ok(text.includes('未分析文件'));
   assert.ok(text.includes('src/b.js'));
 
   const empty = fake.render(fake.React.createElement(parts.ConclusionAppendix, {
-    sources: { risks: [], findings: [], order: [] }, delta: null, coverage: null, t, defaultOpen: true,
+    sources: { risks: [], findings: [], order: [] }, coverage: null, t, defaultOpen: true,
   }));
   assert.equal(empty.textOnly, '');
 });

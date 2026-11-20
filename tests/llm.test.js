@@ -342,8 +342,9 @@ test('buildCommentMarkdown: commit/version header, selection note and appendix',
   assert.match(markdown, /- \[阻塞\] 细节（行 5）\n {2}- 建议：补注释/);
   assert.match(markdown, /#### 审查顺序/);
   assert.match(markdown, /1\. `src\/a\.js` — 入口/);
-  assert.match(markdown, /#### 复审对比/);
-  assert.match(markdown, /- 已修复：`src\/a\.js` — 老问题/);
+  // 复审对比已从发布附录移除（H1：对比只属于审核工作面）。
+  assert.ok(!markdown.includes('#### 复审对比'));
+  assert.ok(!markdown.includes('已修复：`src/a.js`'));
   assert.match(markdown, /#### 未分析文件/);
   assert.match(markdown, /- `src\/b\.js`/);
   // The appendix sits before the footer, inside the body.

@@ -364,7 +364,8 @@ test('migrates a legacy cache into roundHistory and serializes the new fields', 
     assert.equal(round.conclusions[0].conclusion.verdict, 'block');
     // Published ids of the current round move into the round entry.
     assert.deepEqual(round.publishedIds, [555]);
-    assert.equal(round.delta, null);
+    // 复审对比不再挂结论阶段：轮次 entry 上没有 delta 字段。
+    assert.ok(!('delta' in round));
     assert.equal(round.feedback, null);
 
     // Legacy items get stable ids; top-level fields mirror the newest version.
@@ -388,8 +389,7 @@ test('migrates a legacy cache into roundHistory and serializes the new fields', 
   }
 });
 
-test('force review opens round 2: previousRound, cleared state, and delta on the next conclusion', async () => {
-  const diffText = 'diff --git a/src/a.js b/src/a.js\n@@ -1 +1 @@\n-a\n+b\n';
+test('force review opens round 2: previousRound, cleared state, and delta on the next conclusion', async () => {  const diffText = 'diff --git a/src/a.js b/src/a.js\n@@ -1 +1 @@\n-a\n+b\n';
   const fetchHandler = async (url) => {
     const target = String(url);
     if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
@@ -449,7 +449,8 @@ test('force review opens round 2: previousRound, cleared state, and delta on the
     assert.equal(openRound.round, 2);
     assert.equal(openRound.finishedAt > 0, true);
     assert.deepEqual(openRound.conclusions, []);
-    assert.equal(openRound.delta, null);
+    // 复审对比不挂结论阶段：开轮与结论路径都不再有 delta 字段。
+    assert.ok(!('delta' in openRound));
     assert.equal(openRound.feedback, null);
     assert.deepEqual(openRound.publishedIds, []);
     assert.equal(secondRound.conclusion, null);
@@ -465,46 +466,61 @@ test('force review opens round 2: previousRound, cleared state, and delta on the
     assert.equal(secondRound.roundHistory[0].conclusions[0].conclusion.verdict, 'block');
     assert.deepEqual(secondRound.roundHistory[0].publishedIds, [555]);
 
-    // Generating round 2's conclusion produces the re-review delta.
+    // Generating round 2's conclusion freezes the baseline findings snapshot, but the
+    // re-review comparison itself stays out of the conclusion stage: 第 1 轮的明细没有
+    // 快照（旧缓存形态），所以本轮也没有可对比的基准。
     await plugin.call('/pr-review-api/conclude', 'POST', { number: 1 });
     const reviewed = await plugin.waitForConcluding();
     assert.equal(reviewed.roundHistory[1].conclusions.length, 1);
     assert.equal(reviewed.conclusion.verdict, 'block');
-    assert.notEqual(reviewed.delta, null);
-    assert.equal(reviewed.delta.round, 2);
-    assert.equal(reviewed.delta.previousRound, 1);
-    assert.equal(reviewed.delta.stillOpen.length, 1);
-    assert.equal(reviewed.delta.stillOpen[0].point, '旧问题');
-    assert.deepEqual(reviewed.delta.resolved, []);
+    // 第 2 轮 conclude 时没有任何已完成的逐文件分析 → 快照为空数组（非 null）。
+    assert.deepEqual(reviewed.roundHistory[1].findings, []);
+    // 没有可对比的基准 → 无复审对比。
+    assert.equal(reviewed.delta, null);
   } finally {
     await plugin.dispose();
   }
 });
 
-test('the overview delta previews from per-file findings before any conclusion exists', async () => {
+test('the overview delta compares the baseline findings with this round per file', async () => {
+  const conclusion = { verdict: 'block', summary: '第一轮结论', blockers: [], suggestions: [], nextSteps: [] };
   const record = legacyReview({
     round: 2,
     conclusion: null,
     conclusionAt: 0,
     comment: null,
-    delta: null,
     published: [],
     publishedItems: [],
-    previousRound: {
-      round: 1,
-      headSha: 'abc123',
-      conclusion: { verdict: 'block', summary: '第一轮结论', blockers: [{ file: 'src/a.js', point: '旧问题' }], suggestions: [], nextSteps: [] },
-      items: [
-        { kind: 'blocker', file: 'src/a.js', point: '旧问题' },
-        { kind: 'suggestion', file: 'src/a.js', point: '旧建议' },
-      ],
-    },
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [555],
+        // 基准快照（第 1 轮生成结论时冻结）：两条意见。
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 1, suggestion: '' },
+          { index: 2, file: 'src/a.js', severity: 'suggest', point: '旧建议', line: 2, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0,
+        conclusions: [], feedback: null, publishedIds: [],
+      },
+    ],
     explanations: [{
       file: 'src/a.js',
       status: 'done',
       error: null,
-      // The finished analysis re-finds the round-1 blocker; the suggestion was not seen again.
-      explanation: { verdict: 'block', summary: '复现', issues: [{ severity: 'block', point: '旧问题', line: 1 }], suggestions: [] },
+      // 本轮分析：旧问题一仍出现（模型延续，roundItem: 1）；旧建议未再出现（判 fixed）。
+      explanation: {
+        verdict: 'block', summary: '复现',
+        issues: [{ severity: 'block', point: '旧问题', line: 1, roundItem: 1 }],
+        suggestions: [],
+      },
       chat: [],
       updatedAt: 150,
     }],
@@ -514,60 +530,53 @@ test('the overview delta previews from per-file findings before any conclusion e
     const review = await plugin.review();
     assert.equal(review.conclusion, null);
     assert.notEqual(review.delta, null);
-    assert.equal(review.delta.preview, true);
-    assert.equal(review.delta.round, 2);
-    assert.equal(review.delta.previousRound, 1);
-    // 早期「已修复」= 本轮未再发现：the suggestion was not re-found by the finished analysis.
-    assert.deepEqual(review.delta.resolved, [{ kind: 'suggestion', file: 'src/a.js', point: '旧建议' }]);
-    assert.deepEqual(review.delta.stillOpen, [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }]);
-    assert.equal(typeof review.delta.comparedAt, 'number');
-    // The preview is derived only: the persisted history entry stays empty.
-    assert.equal(review.roundHistory[0].delta, null);
+    assert.equal(review.delta.baselineRound, 1);
+    // 模型显式判定的「已修复」：旧建议本轮未再延续。
+    assert.deepEqual(review.delta.resolved, [
+      { index: 2, file: 'src/a.js', severity: 'suggest', point: '旧建议', line: 2, suggestion: '' },
+    ]);
+    // 仍未解决：上一轮意见 + 本轮的延续条目。
+    assert.equal(review.delta.stillOpen.length, 1);
+    assert.equal(review.delta.stillOpen[0].previous.point, '旧问题');
+    assert.equal(review.delta.stillOpen[0].current.point, '旧问题');
+    // 无未判定、无待分析：唯一文件已分析。
+    assert.deepEqual(review.delta.undetermined, []);
+    assert.deepEqual(review.delta.pending, []);
+    // 预览是派生的：轮次历史 entry 上没有 delta 字段。
+    assert.ok(!('delta' in review.roundHistory[0]));
+    assert.ok(!('delta' in review.roundHistory[1]));
   } finally {
     await plugin.dispose();
   }
 });
 
-test('a persisted round delta wins over the per-file preview', async () => {
-  const persisted = {
-    round: 2,
-    previousRound: 1,
-    resolved: [],
-    stillOpen: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }],
-    comparedAt: 1234,
-  };
+test('a baseline finding whose file was not re-analyzed stays pending', async () => {
+  const conclusion = { verdict: 'block', summary: '第一轮结论', blockers: [], suggestions: [], nextSteps: [] };
   const record = legacyReview({
     round: 2,
-    delta: persisted,
-    previousRound: { round: 1, headSha: 'abc123', conclusion: null, items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }] },
-    // The analysis re-finds the same point, but conclude's delta must be returned untouched.
-    explanations: [{
-      file: 'src/a.js',
-      status: 'done',
-      error: null,
-      explanation: { verdict: 'block', summary: '复现', issues: [{ severity: 'block', point: '旧问题', line: 1 }], suggestions: [] },
-      chat: [],
-      updatedAt: 150,
-    }],
-  });
-  const plugin = await setup({ reviews: { 1: record } });
-  try {
-    const review = await plugin.review();
-    assert.deepEqual(review.delta, persisted);
-    assert.equal(review.delta.preview, undefined);
-  } finally {
-    await plugin.dispose();
-  }
-});
-
-test('no preview delta without previous items or without finished analyses', async () => {
-  // previousRound: null, even though the one analysis is done.
-  const noPrevious = legacyReview({});
-  // previousRound exists, but the file has not been analysed yet: nothing may be
-  // reported as resolved while its analysis is still pending.
-  const notAnalyzed = legacyReview({
-    number: 2,
-    previousRound: { round: 1, headSha: 'abc123', conclusion: null, items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }] },
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 1, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0,
+        conclusions: [], feedback: null, publishedIds: [],
+      },
+    ],
     explanations: [{
       file: 'src/a.js',
       status: 'pending',
@@ -577,39 +586,52 @@ test('no preview delta without previous items or without finished analyses', asy
       updatedAt: 0,
     }],
   });
-  const plugin = await setup({ reviews: { 1: noPrevious, 2: notAnalyzed } });
+  const plugin = await setup({ reviews: { 1: record } });
   try {
-    assert.equal((await plugin.review(1)).delta, null);
-    assert.equal((await plugin.review(2)).delta, null);
+    const review = await plugin.review();
+    // 分析未覆盖：绝不判「已修复」。
+    assert.equal(review.delta.resolved.length, 0);
+    assert.equal(review.delta.pending.length, 1);
+    assert.equal(review.delta.pending[0].point, '旧问题');
   } finally {
     await plugin.dispose();
   }
 });
 
-test('an all-clean round with every analysis done shows every previous item as resolved', async () => {
+test('an all-clean round with every analysis done resolves every baseline finding', async () => {
   const files = [
     { path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
     { path: 'src/b.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
   ];
   const cleanExplanation = { verdict: 'pass', summary: '没有发现', issues: [], suggestions: [] };
+  const conclusion = { verdict: 'block', summary: '第一轮结论', blockers: [], suggestions: [], nextSteps: [] };
   const record = legacyReview({
     round: 2,
     conclusion: null,
     conclusionAt: 0,
     comment: null,
-    delta: null,
     files,
     published: [],
     publishedItems: [],
-    previousRound: {
-      round: 1,
-      headSha: 'abc123',
-      conclusion: null,
-      items: [
-        { kind: 'blocker', file: 'src/a.js', point: '旧问题' },
-        { kind: 'suggestion', file: 'src/b.js', point: '旧建议' },
-      ],
-    },
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 1, suggestion: '' },
+          { index: 2, file: 'src/b.js', severity: 'suggest', point: '旧建议', line: 2, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0,
+        conclusions: [], feedback: null, publishedIds: [],
+      },
+    ],
     explanations: [
       { file: 'src/a.js', status: 'done', error: null, explanation: cleanExplanation, chat: [], updatedAt: 150 },
       { file: 'src/b.js', status: 'done', error: null, explanation: cleanExplanation, chat: [], updatedAt: 150 },
@@ -618,100 +640,105 @@ test('an all-clean round with every analysis done shows every previous item as r
   const plugin = await setup({ reviews: { 1: record } });
   try {
     const review = await plugin.review();
-    // Zero findings plus full coverage is the honest「全部已修复」case.
-    assert.equal(review.delta.preview, true);
+    // 全覆盖且模型未延续任何基准条目：每条都是模型的显式「已修复」判定。
     assert.deepEqual(review.delta.resolved, [
-      { kind: 'blocker', file: 'src/a.js', point: '旧问题' },
-      { kind: 'suggestion', file: 'src/b.js', point: '旧建议' },
+      { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 1, suggestion: '' },
+      { index: 2, file: 'src/b.js', severity: 'suggest', point: '旧建议', line: 2, suggestion: '' },
     ]);
     assert.deepEqual(review.delta.stillOpen, []);
+    assert.deepEqual(review.delta.pending, []);
   } finally {
     await plugin.dispose();
   }
 });
 
-test('zero findings with an analysis still pending stays hidden', async () => {
+test('a re-analyzed file with no carry-over resolves its baseline finding explicitly', async () => {
+  const conclusion = { verdict: 'block', summary: '第一轮结论', blockers: [], suggestions: [], nextSteps: [] };
   const record = legacyReview({
     round: 2,
     conclusion: null,
     conclusionAt: 0,
     comment: null,
-    delta: null,
     files: [
       { path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
       { path: 'src/b.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
     ],
-    previousRound: {
-      round: 1,
-      headSha: 'abc123',
-      conclusion: null,
-      items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }],
-    },
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 1, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0,
+        conclusions: [], feedback: null, publishedIds: [],
+      },
+    ],
     explanations: [
-      // Only one of two files analysed, and it found nothing: not yet honest to report resolved.
+      // a.js 已重新分析且模型未延续：显式「已修复」。b.js 未分析 → 基准条目（若在）保持待分析。
       { file: 'src/a.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: '没有发现', issues: [], suggestions: [] }, chat: [], updatedAt: 150 },
     ],
   });
   const plugin = await setup({ reviews: { 1: record } });
   try {
-    assert.equal((await plugin.review()).delta, null);
+    const review = await plugin.review();
+    // 已分析文件的基准条目由模型显式判定（本例未延续 → 已修复）；待分析的文件另有状态。
+    assert.equal(review.delta.resolved.length, 1);
+    assert.equal(review.delta.pending.length, 0);
   } finally {
     await plugin.dispose();
   }
 });
 
-test('a done entry without an explanation body never completes the preview coverage', async () => {
+test('a done entry without an explanation body keeps its baseline finding pending', async () => {
   // startAnalysisBatch treats `done` with a null explanation as an empty analysis and
-  // requeues it; the preview must count the same way, or a restored record whose bodies
-  // are still missing would be misjudged as fully analysed and claim「全部已修复」.
+  // requeues it; the comparison must treat it the same way — an empty body is not an
+  // analysis, so its baseline findings can never be judged「已修复」.
   const onlyFileDoneWithoutBody = legacyReview({
     round: 2,
     conclusion: null,
     conclusionAt: 0,
     comment: null,
-    delta: null,
     published: [],
     publishedItems: [],
-    previousRound: {
-      round: 1,
-      headSha: 'abc123',
-      conclusion: null,
-      items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }],
-    },
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion: { verdict: 'block', summary: 'c', blockers: [], suggestions: [], nextSteps: [] }, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 1, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0,
+        conclusions: [], feedback: null, publishedIds: [],
+      },
+    ],
     explanations: [
       { file: 'src/a.js', status: 'done', error: null, explanation: null, chat: [], updatedAt: 150 },
     ],
   });
-  const doneWithoutBodyPlusPending = legacyReview({
-    number: 2,
-    files: [
-      { path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
-      { path: 'src/b.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
-    ],
-    round: 2,
-    conclusion: null,
-    conclusionAt: 0,
-    comment: null,
-    delta: null,
-    published: [],
-    publishedItems: [],
-    previousRound: {
-      round: 1,
-      headSha: 'abc123',
-      conclusion: null,
-      items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }],
-    },
-    explanations: [
-      { file: 'src/a.js', status: 'done', error: null, explanation: null, chat: [], updatedAt: 150 },
-    ],
-  });
-  const plugin = await setup({ reviews: { 1: onlyFileDoneWithoutBody, 2: doneWithoutBodyPlusPending } });
+  const plugin = await setup({ reviews: { 1: onlyFileDoneWithoutBody } });
   try {
-    // The only file reports done with a null body: under done-only counting this single
-    // record already reaches full coverage and would resolve the previous item.
-    assert.equal((await plugin.review(1)).delta, null);
-    // The done-without-body file plus a not-yet-analysed file stays hidden too.
-    assert.equal((await plugin.review(2)).delta, null);
+    const review = await plugin.review();
+    // done 但无 explanation 体：不算已分析 → 基准条目保持待分析。
+    assert.equal(review.delta.resolved.length, 0);
+    assert.equal(review.delta.pending.length, 1);
+    assert.equal(review.delta.pending[0].point, '旧问题');
   } finally {
     await plugin.dispose();
   }
@@ -761,9 +788,10 @@ test('async /conclude: returns started, rejects duplicates with 409, appends a m
     assert.equal(review.conclusion.blockers[0].id, latest.conclusion.blockers[0].id);
     assert.equal(review.conclusion.blockers[1].file, '');
     assert.match(review.conclusion.blockers[1].point, /^（未定位：src\/ghost\.js）/);
-    // No previousRound yet → no delta.
+    // No baseline snapshot yet（第 1 轮明细未在结论时冻结过——旧缓存形态）→ 无对比。
     assert.equal(review.delta, null);
-    assert.equal(round.delta, null);
+    // 复审对比不挂结论阶段：轮次 entry 上没有 delta 字段。
+    assert.ok(!('delta' in round));
     // Top-level mirrors the newest version.
     assert.deepEqual(review.conclusion, latest.conclusion);
     assert.equal(review.conclusionAt, latest.createdAt);

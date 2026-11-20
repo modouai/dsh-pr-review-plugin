@@ -231,7 +231,7 @@ function serializeReview(record) {
     published: record.published ?? [],
     publishedItems: record.publishedItems ?? [],
     feedback: record.feedback ?? null,
-    delta: reviewDeltaOf(record),
+    delta: findingsDeltaOf(record),
     conclusionAt: record.conclusionAt ?? 0,
     conclusion: record.conclusion,
     comment: record.comment ?? null,
@@ -241,62 +241,102 @@ function serializeReview(record) {
 }
 
 /**
- * Live resolved-vs-still-open preview from the finished per-file findings, for the
- * window before a conclusion exists. Honesty boundary: an early「已修复」only means
- * 「本轮未再发现」— analyses that have not finished cannot clear a previous item, so
- * the preview sharpens as analyses complete. Completeness rule: once every file is
- * analysed, zero findings honestly means 全部已修复 and every previous item shows as
- * resolved; while analyses are still incomplete and nothing has been found yet the
- * preview stays hidden (不可知, not 已修复). The result is ephemeral (never written
- * to the record, the cache, or the round history); the persisted conclusion delta
- * that conclude writes always wins over it (see reviewDeltaOf).
+ * Freeze the round's finished per-file findings as the next round's comparison baseline
+ * (review-delta spec v6): flattened through findingsOf, globally numbered, capped at
+ * 10 findings per file (block first, then line ascending, original order otherwise).
  */
-function previewDeltaOf(record) {
-  const previousItems = Array.isArray(record.previousRound?.items) ? record.previousRound.items : [];
-  if (previousItems.length === 0) return null;
-  // Live records hold a Map keyed by file; serialized shapes may be entry lists.
-  const entries = record.explanations instanceof Map
-    ? Array.from(record.explanations, ([filePath, entry]) => ({ ...entry, file: filePath }))
-    : (Array.isArray(record.explanations) ? record.explanations : []);
-  const totalFiles = Array.isArray(record.files) ? record.files.length : 0;
-  const current = [];
-  let analyzedFiles = 0;
-  for (const entry of entries) {
-    if (entry === null || typeof entry !== 'object' || entry.status !== 'done') continue;
-    // Counting parity with startAnalysisBatch: a `done` entry without an explanation body
-    // is an empty analysis that the batch requeues — counting it as analysed would let
-    // analysesComplete go true while the file is still waiting for a real result.
-    if (entry.explanation === null || entry.explanation === undefined) continue;
-    analyzedFiles += 1;
-    const file = typeof entry.file === 'string' ? entry.file : '';
-    for (const issue of Array.isArray(entry.explanation.issues) ? entry.explanation.issues : []) {
-      if (issue === null || typeof issue !== 'object' || typeof issue.point !== 'string' || issue.point.trim() === '') continue;
-      current.push({
-        kind: issue.severity === 'block' ? 'blocker' : 'suggestion',
-        file,
-        point: issue.point,
-      });
-    }
+function findingsSnapshotOf(record) {
+  const byFile = [];
+  for (const [filePath, entry] of record.explanations) {
+    if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
+    const group = findingsOf(entry.explanation).map((finding) => ({ ...finding, file: filePath }));
+    group.sort((left, right) => (left.severity === right.severity ? 0 : left.severity === 'block' ? -1 : 1) || left.line - right.line);
+    byFile.push(...group.slice(0, 10).map((finding) => ({
+      index: 0,
+      file: finding.file,
+      severity: finding.severity,
+      point: finding.point,
+      line: finding.line,
+      suggestion: finding.suggestion,
+    })));
   }
-  // An all-clean round is only honest once nothing is left un-analysed.
-  const analysesComplete = totalFiles > 0 && analyzedFiles >= totalFiles;
-  if (current.length === 0 && !analysesComplete) return null;
-  const compared = compareComments(previousItems, current);
-  return {
-    round: record.round ?? 1,
-    previousRound: record.previousRound?.round ?? (record.round ?? 1) - 1,
-    resolved: compared.resolved.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
-    stillOpen: compared.stillOpen.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
-    comparedAt: Date.now(),
-    preview: true,
-  };
+  return byFile.map((finding, index) => ({ ...finding, index: index + 1 }));
 }
 
-/** The delta the panel should show: the persisted one after conclude, a live preview before. */
-function reviewDeltaOf(record) {
-  if (record === null || record === undefined) return null;
-  if (record.delta !== null && record.delta !== undefined) return record.delta;
-  return previewDeltaOf(record);
+/**
+ * The baseline round for the re-review comparison: the newest earlier round that
+ * produced a conclusion (published or not) and thus froze a findings snapshot.
+ * Rounds without a conclusion are skipped — their analysis never completed the
+ * step that makes its findings a trustworthy baseline.
+ */
+function baselineRoundOf(record) {
+  const history = roundHistoryOf(record);
+  const current = currentRoundEntry(record);
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (entry === current) continue;
+    if ((entry.conclusions?.length ?? 0) > 0 && Array.isArray(entry.findings) && entry.findings.length > 0) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+/**
+ * The re-review comparison over the audit workspace (review-delta spec v6): the baseline
+ * round's frozen findings versus this round's analysis. Every baseline finding gets a
+ * status — resolved only when the model explicitly judged it fixed; still-open when the
+ * model carried it over (or never judged it: that falls back conservatively and is
+ * marked, never silently resolved); pending while its file has not been re-analyzed.
+ * Derived on read, never persisted; it never touches the conclusion layer (H1).
+ */
+function findingsDeltaOf(record) {
+  const baseline = baselineRoundOf(record);
+  if (baseline === null || !Array.isArray(baseline.findings) || baseline.findings.length === 0) return null;
+  const entries = record.explanations instanceof Map
+    ? record.explanations
+    : new Map((Array.isArray(record.explanations) ? record.explanations : []).map((entry) => [entry.file, entry]));
+  const analyzed = (filePath) => {
+    const entry = entries.get(filePath);
+    return entry !== undefined && entry.status === 'done'
+      && entry.explanation !== null && entry.explanation !== undefined;
+  };
+  // The carry-over map: baseline index → this round's entry (model-judged still-open,
+  // or the conservative unjudged fallback).
+  const carryOf = new Map();
+  for (const [filePath, entry] of entries) {
+    if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
+    for (const finding of findingsOf(entry.explanation)) {
+      if (finding.roundItem !== undefined) carryOf.set(finding.roundItem, { ...finding, file: filePath });
+    }
+  }
+  const resolved = [];
+  const stillOpen = [];
+  const undetermined = [];
+  const pending = [];
+  for (const finding of baseline.findings) {
+    if (!analyzed(finding.file)) {
+      pending.push(finding);
+      continue;
+    }
+    const carry = carryOf.get(finding.index);
+    if (carry === undefined) {
+      resolved.push(finding);
+      continue;
+    }
+    if (carry.unjudged === true) {
+      undetermined.push(finding);
+      continue;
+    }
+    stillOpen.push({ previous: finding, current: carry });
+  }
+  return {
+    baselineRound: baseline.round,
+    resolved,
+    stillOpen,
+    undetermined,
+    pending,
+  };
 }
 
 /** A quick status row for the pull list; the final conclusion wins over the initial report. */
@@ -481,7 +521,6 @@ function makeRoundEntry(round, headSha, startedAt) {
     finishedAt: 0,
     conclusions: [],
     findings: null,
-    delta: null,
     feedback: null,
     publishedIds: [],
   };
@@ -504,7 +543,6 @@ function roundHistoryOf(record) {
         conclusion,
         coverage: record.coverage ?? null,
       }],
-      delta: record.delta ?? null,
       feedback: record.feedback ?? null,
       publishedIds: (Array.isArray(record.published) ? record.published : [])
         .filter((entry) => (entry.round ?? round) === round && typeof entry.id === 'number')
@@ -530,7 +568,6 @@ function latestConclusionVersionOf(record) {
 function syncTopLevelFromHistory(record) {
   const round = currentRoundEntry(record);
   record.round = round.round;
-  record.delta = round.delta ?? null;
   record.feedback = round.feedback ?? null;
   const version = round.conclusions.length === 0 ? null : round.conclusions[round.conclusions.length - 1];
   record.conclusion = version === null ? null : version.conclusion;
@@ -577,7 +614,6 @@ function sanitizeRoundEntry(entry, index) {
     startedAt: Number.isFinite(entry?.startedAt) ? entry.startedAt : 0,
     finishedAt: Number.isFinite(entry?.finishedAt) ? entry.finishedAt : 0,
     conclusions,
-    delta: entry?.delta ?? null,
     feedback: entry?.feedback ?? null,
     findings: Array.isArray(entry?.findings) && entry.findings.length > 0 ? entry.findings : null,
     publishedIds: Array.isArray(entry?.publishedIds) ? entry.publishedIds.filter((id) => typeof id === 'number') : [],
@@ -827,7 +863,6 @@ export function apply(ctx, config) {
         published: record.published ?? [],
         publishedItems: record.publishedItems ?? [],
         feedback: record.feedback ?? null,
-        delta: record.delta ?? null,
         previousRound: record.previousRound ?? null,
         conclusionAt: record.conclusionAt ?? 0,
         conclusion: record.conclusion,
@@ -946,7 +981,6 @@ export function apply(ctx, config) {
       })),
       publishedItems: Array.isArray(saved.publishedItems) ? saved.publishedItems : [],
       feedback: saved.feedback ?? null,
-      delta: saved.delta ?? null,
       previousRound: saved.previousRound ?? null,
       conclusionAt: saved.conclusionAt ?? 0,
       conclusion: saved.conclusion ?? null,
@@ -986,7 +1020,6 @@ export function apply(ctx, config) {
               conclusion: record.conclusion,
               coverage: record.coverage ?? null,
             }],
-        delta: record.delta ?? null,
         feedback: record.feedback ?? null,
         publishedIds: record.published
           .filter((entry) => (entry.round ?? legacyRound) === legacyRound && typeof entry.id === 'number')
@@ -1437,8 +1470,6 @@ export function apply(ctx, config) {
       published: [],
       publishedItems: [],
       feedback: null,
-      delta: null,
-      previousRound: null,
       humanItemIds: [],
       coverage: null,
       roundHistory: [],
@@ -1491,7 +1522,6 @@ export function apply(ctx, config) {
     record.comment = null;
     record.publishedItems = [];
     record.feedback = null;
-    record.delta = null;
     record.humanItemIds = [];
     record.coverage = null;
     record.concludeError = null;
@@ -2033,62 +2063,6 @@ export function apply(ctx, config) {
     return { files, done, fileSeverities, coverage: conclusionCoverage(record.explanations, files) };
   }
 
-  /** Resolved-vs-still-open delta against the previous round's items. */
-  function concludeDeltaOf(record) {
-    const previousItems = Array.isArray(record.previousRound?.items) ? record.previousRound.items : [];
-    if (previousItems.length === 0) return null;
-    const compared = compareComments(previousItems, commentItems(record.conclusion));
-    return {
-      round: record.round ?? 1,
-      previousRound: record.previousRound?.round ?? (record.round ?? 1) - 1,
-      resolved: compared.resolved.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
-      stillOpen: compared.stillOpen.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
-      comparedAt: Date.now(),
-    };
-  }
-
-  /**
-   * Freeze the round's finished per-file findings as the next round's comparison baseline
-   * (review-delta spec v6): flattened through findingsOf, globally numbered, capped at
-   * 10 findings per file (block first, then line ascending, original order otherwise).
-   */
-  function findingsSnapshotOf(record) {
-    const byFile = [];
-    for (const [filePath, entry] of record.explanations) {
-      if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-      const group = findingsOf(entry.explanation).map((finding) => ({ ...finding, file: filePath }));
-      group.sort((left, right) => (left.severity === right.severity ? 0 : left.severity === 'block' ? -1 : 1) || left.line - right.line);
-      byFile.push(...group.slice(0, 10).map((finding) => ({
-        index: 0,
-        file: finding.file,
-        severity: finding.severity,
-        point: finding.point,
-        line: finding.line,
-        suggestion: finding.suggestion,
-      })));
-    }
-    return byFile.map((finding, index) => ({ ...finding, index: index + 1 }));
-  }
-
-  /**
-   * The baseline round for the re-review comparison: the newest earlier round that
-   * produced a conclusion (published or not) and thus froze a findings snapshot.
-   * Rounds without a conclusion are skipped — their analysis never completed the
-   * step that makes its findings a trustworthy baseline.
-   */
-  function baselineRoundOf(record) {
-    const history = roundHistoryOf(record);
-    const current = currentRoundEntry(record);
-    for (let i = history.length - 1; i >= 0; i -= 1) {
-      const entry = history[i];
-      if (entry === current) continue;
-      if ((entry.conclusions?.length ?? 0) > 0 && Array.isArray(entry.findings) && entry.findings.length > 0) {
-        return entry;
-      }
-    }
-    return null;
-  }
-
   async function runConclude(record, abort) {
     const stillCurrent = () => record.concludingAbort === abort;
     try {
@@ -2135,9 +2109,6 @@ export function apply(ctx, config) {
       record.reportUpdatedAt = 0;
       record.error = null;
       record.concludeError = null;
-      const delta = concludeDeltaOf(record);
-      currentRoundEntry(record).delta = delta;
-      record.delta = delta;
       scheduleSave();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2502,10 +2473,6 @@ export function apply(ctx, config) {
         reason: typeof item?.reason === 'string' ? item.reason : '',
       }))
       .filter((item) => item.file !== '');
-    const deltaItems = (list) => (Array.isArray(list) ? list : [])
-      .map((item) => ({ file: typeof item?.file === 'string' ? item.file : '', point: pointOf(item) }))
-      .filter((item) => item.point !== '');
-    const delta = record.delta ?? null;
     const coverage = record.coverage ?? null;
     const unanalyzed = Array.isArray(coverage?.unanalyzed)
       ? coverage.unanalyzed.filter((file) => typeof file === 'string' && file !== '')
@@ -2514,9 +2481,6 @@ export function apply(ctx, config) {
       risks,
       files,
       order,
-      delta: delta === null
-        ? null
-        : { resolved: deltaItems(delta.resolved), stillOpen: deltaItems(delta.stillOpen) },
       unanalyzed,
     };
   }
@@ -2895,11 +2859,6 @@ export function apply(ctx, config) {
       for (const [id, state] of entries) {
         lines.push(`- ${id}：${state?.status ?? '?'}${state?.reason ? `（${state.reason}）` : ''}`);
       }
-    }
-    const delta = entry.delta ?? null;
-    if (delta !== null && typeof delta === 'object') {
-      if (Array.isArray(delta.resolved) && delta.resolved.length > 0) lines.push(`已修复：${delta.resolved.length} 项`);
-      if (Array.isArray(delta.stillOpen) && delta.stillOpen.length > 0) lines.push(`仍未解决：${delta.stillOpen.length} 项`);
     }
     return toolText(lines);
   }
