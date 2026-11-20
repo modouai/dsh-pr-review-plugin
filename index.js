@@ -3215,7 +3215,7 @@ export function apply(ctx, config) {
       },
       {
         name: 'review_list_rounds',
-        description: '列出审查轮次：每轮 head、结论版本数、是否发布、实现者反馈与复审对比摘要。',
+        description: '列出审查轮次：每轮 head、结论版本数、是否发布与实现者反馈。',
         parameters: { type: 'object', additionalProperties: false, properties: { number: numberProperty } },
         output: textOutput,
         async execute(args, exec) {
@@ -3234,7 +3234,7 @@ export function apply(ctx, config) {
       },
       {
         name: 'review_get_round',
-        description: '读取指定轮次的结论、实现者反馈状态与复审对比（已修复/仍未解决）。',
+        description: '读取指定轮次的结论与实现者反馈状态。',
         parameters: {
           type: 'object',
           additionalProperties: false,

@@ -1436,7 +1436,7 @@ const COMMENT_FOOTER = {
 
 const COMMENT_APPENDIX = {
   zh: {
-    summary: '审查附录：总体初筛风险 / 逐文件审查发现 / 审查顺序 / 复审对比',
+    summary: '审查附录：总体初筛风险 / 逐文件审查发现 / 审查顺序',
     risks: '总体初筛风险',
     files: '逐文件审查发现',
     order: '审查顺序',
