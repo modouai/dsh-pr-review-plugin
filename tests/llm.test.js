@@ -32,6 +32,7 @@ import {
   normalizeEvidenceNeeds,
   normalizeExplanation,
   normalizeFindingOps,
+  normalizePreviousVerdicts,
   normalizeReport,
   normalizeUnverified,
   normalizeVerdict,
@@ -581,6 +582,53 @@ test('explain prompt: test gaps, adaptive length and the issue shape', () => {
   assert.match(text, /verdict 语义：block=存在应先修复的缺陷/);
   assert.match(text, /pass=可按原样合并/);
   assert.match(text, /「可选：」或「nit：」/);
+  // 无基准快照：不含逐条判定段，也不要求 previousVerdicts。
+  assert.ok(!text.includes('基准轮审查意见'));
+  assert.ok(!text.includes('"previousVerdicts"'));
+});
+
+test('explain prompt carries the baseline findings for per-item verdicts', () => {
+  const prompt = buildExplainPrompt(
+    {
+      repo: 'group/project', number: 1, title: 't', author: 'a',
+      headRef: 'h', baseRef: 'b', changedFiles: 1, additions: 1, deletions: 0, body: '',
+    },
+    { path: 'a.js', status: 'modified', additions: 1, deletions: 0 },
+    '', null, '', '',
+    {
+      language: 'zh',
+      baselineFindings: [
+        { index: 1, file: 'a.js', severity: 'block', point: '空指针风险', line: 2, suggestion: '先判空' },
+        { index: 2, file: 'b.js', severity: 'suggest', point: '补测试', line: 0, suggestion: '' },
+      ],
+    },
+  );
+  const text = prompt.messages[0].content[0].text;
+  assert.match(text, /基准轮审查意见（本轮必须逐条判定修复状态）/);
+  assert.match(text, /1\. \[block\] a\.js 空指针风险（行 2） —— 建议：先判空/);
+  assert.match(text, /2\. \[suggest\] b\.js 补测试/);
+  assert.match(text, /previousVerdicts 必须恰好包含 2 条判定/);
+  assert.ok(text.includes('"previousVerdicts"'));
+  assert.match(text, /"carryOver"|"roundItem"/);
+});
+
+test('normalizePreviousVerdicts keeps one valid verdict per baseline index', () => {
+  const verdicts = normalizePreviousVerdicts([
+    { index: 1, status: 'fixed' },
+    { index: 1, status: 'still-open', point: '重复认领被丢弃' },
+    { index: 0, status: 'fixed' },
+    { index: 9, status: 'fixed' },
+    { index: 2, status: 'nonsense' },
+    { index: 3 },
+    { index: 2, status: 'still-open', point: ' 补测试 ', line: 7, severity: 'block', suggestion: '补集成测试' },
+    'junk',
+  ], 3);
+  assert.deepEqual(verdicts, [
+    { index: 1, status: 'fixed' },
+    { index: 2, status: 'still-open', point: '补测试', line: 7, severity: 'block', suggestion: '补集成测试' },
+  ]);
+  assert.deepEqual(normalizePreviousVerdicts(undefined, 3), []);
+  assert.deepEqual(normalizePreviousVerdicts([], 0), []);
 });
 
 test('prompt language normalizes case and region tags and falls back to Chinese', () => {

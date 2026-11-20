@@ -286,6 +286,24 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
   const reportLine = report === null || report === undefined
     ? ''
     : `\nPR 总体结论：${report.verdict ?? ''}；${report.summary ?? ''}`;
+  // Baseline findings (review-delta spec v6): the previous concluded round's findings are
+  // re-judged one by one — "fixed" leaves the issue list, "still-open" re-enters it with
+  // a roundItem reference. The full globally-numbered snapshot goes in so the model can
+  // carry a finding across a renamed file.
+  const baseline = Array.isArray(options.baselineFindings) ? options.baselineFindings : [];
+  const baselineSection = baseline.length === 0 ? [] : [
+    '## 基准轮审查意见（本轮必须逐条判定修复状态）',
+    ...baseline.map((item) => {
+      const where = item.line > 0 ? `（行 ${item.line}）` : '';
+      const advice = typeof item.suggestion === 'string' && item.suggestion !== '' ? ` —— 建议：${item.suggestion}` : '';
+      return `${item.index}. [${item.severity}] ${item.file === '' ? '' : `${item.file} `}${item.point}${where}${advice}`;
+    }),
+    '对上面每一条意见，结合当前代码逐条判定：该问题在本次改动后是否仍存在。',
+    '- 仍存在 → 在 previousVerdicts 输出 "status": "still-open"，并把该问题作为一条审查意见写入 issues（severity/point/line 按当前代码重写），同时带 "roundItem": <上面的序号>；',
+    '- 已修复 / 不再存在 → 在 previousVerdicts 输出 "status": "fixed"，不要把它写入 issues；',
+    `- 基准轮共 ${baseline.length} 条意见，previousVerdicts 必须恰好包含 ${baseline.length} 条判定，一条都不能少。`,
+    '- 本轮新发现的问题照常写入 issues（不带 roundItem）。',
+  ];
   const user = [
     `平台：${platformLabel(pull.platform)}；仓库：${pull.repo}`,
     `PR #${pull.number}：${pull.title}（${pull.headRef} → ${pull.baseRef}）`,
@@ -299,6 +317,7 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
       ? `## 该文件的完整内容（PR head，行号格式为「行号<TAB>代码」，可能被截断）\n${numberLines(fileContent, 3000)}`
       : '## 该文件的完整内容不可用（只有 diff；分析时不要臆测未出现的代码）',
     '',
+    ...baselineSection,
     '分析要求：结合完整文件说明相关函数/类的职责、被谁调用、与周边代码的关系；不要只描述 diff 片段。',
     '请输出严格 JSON。分析要详细、可读、面向要理解这次改动的人：',
     '{',
@@ -306,6 +325,9 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
     '  "logic": "整体逻辑分析（只写全局）：这个文件原来做什么 → 现在整体变成怎样 → 函数/模块的上下游调用关系 → 数据与状态怎么流动 → 关键边界条件与错误路径。不要复述 walkthrough 中各段落的具体改动细节。篇幅随改动规模自适应：大改动 400-800 字，小改动 200-400 字即可，不要为凑字数填充。",',
     '  "walkthrough": [{ "title": "段落/函数名 + 一句话作用（如「cleanupInterruptedMacInstall：启动时清理中断残留」），不要写 hunk 编号", "detail": "用人话讲清：这段做了什么、为什么需要它、影响谁、有什么风险；2-5 句；不要复述 logic 的整体链路，不要把审查意见写进来", "hunk": 1, "context": { "label": "所属函数/类名", "startLine": 230, "endLine": 275 } }],',
     '  "changes": "逐类说明具体变化：新增了什么、删除了什么、重命名/移动了什么",',
+    ...(baseline.length > 0
+      ? ['  "previousVerdicts": [{ "index": 1, "status": "fixed | still-open", "point": "still-open 时：当前代码的表述（可省略沿用原文）", "line": 0, "severity": "block | suggest", "suggestion": "可省略沿用原建议" }],']
+      : []),
     '  "concerns": [{ "severity": "block | suggest", "point": "问题 + 影响（一条只写一个核心问题）", "suggestion": "具体修法（可选；没有明确修法就省略，不要把修法写进 point）", "line": 0 }],',
     '  "evidenceNeeds": [{ "concern": 1, "kind": "callers | definition | callee | schema | test | file", "path": "文件路径", "symbol": "符号名", "reason": "为什么需要它" }],',
     '  "verdict": "block | suggest | pass"',
@@ -633,9 +655,40 @@ export function buildConcludePrompt(pull, report, explanations, currentConclusio
   return { system: reviewerSystem(languageOf(options)), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 8000, timeoutMs: 300_000 };
 }
 
+/**
+ * Normalize the per-item verdicts the model produces for the baseline findings
+ * (review-delta spec v6): one valid verdict per baseline index, duplicates keep
+ * the first, everything malformed is dropped — a dropped verdict falls back to
+ * the conservative "still-open" at the call site, never to "fixed".
+ */
+export function normalizePreviousVerdicts(raw, baselineCount) {
+  if (!Array.isArray(raw) || !Number.isInteger(baselineCount) || baselineCount <= 0) return [];
+  const seen = new Set();
+  const verdicts = [];
+  for (const item of Array.isArray(raw) ? raw : []) {
+    if (item === null || typeof item !== 'object') continue;
+    const index = Number.isInteger(item.index) && item.index >= 1 && item.index <= baselineCount ? item.index : 0;
+    if (index === 0 || seen.has(index)) continue;
+    if (item.status !== 'fixed' && item.status !== 'still-open') continue;
+    seen.add(index);
+    if (item.status === 'fixed') {
+      verdicts.push({ index, status: 'fixed' });
+      continue;
+    }
+    verdicts.push({
+      index,
+      status: 'still-open',
+      ...(typeof item.point === 'string' && item.point.trim() !== '' ? { point: item.point.trim() } : {}),
+      ...(Number.isInteger(item.line) && item.line > 0 ? { line: Math.floor(item.line) } : {}),
+      ...(item.severity === 'block' || item.severity === 'suggest' ? { severity: item.severity } : {}),
+      ...(typeof item.suggestion === 'string' && item.suggestion.trim() !== '' ? { suggestion: item.suggestion.trim() } : {}),
+    });
+  }
+  return verdicts;
+}
+
 /** Candidate problems from the triage pass; none of them is a finding until the verifier scores it. */
-export function normalizeConcerns(raw) {
-  return (Array.isArray(raw) ? raw : [])
+export function normalizeConcerns(raw) {  return (Array.isArray(raw) ? raw : [])
     .filter((item) => item !== null && typeof item === 'object')
     .map((item) => ({
       severity: item.severity === 'block' ? 'block' : 'suggest',
@@ -882,6 +935,11 @@ export function findingsOf(explanation) {
       point: typeof item.point === 'string' ? item.point.trim() : '',
       suggestion: typeof item.suggestion === 'string' ? item.suggestion.trim() : '',
       line: typeof item.line === 'number' && Number.isFinite(item.line) && item.line > 0 ? Math.floor(item.line) : 0,
+      // Re-review lineage (spec v6): roundItem references the baseline snapshot entry this
+      // finding carries over; unjudged marks entries the model never explicitly judged
+      // (they fall back to still-open instead of "fixed"). Absent on fresh findings.
+      ...(Number.isInteger(item.roundItem) && item.roundItem > 0 ? { roundItem: Math.floor(item.roundItem) } : {}),
+      ...(item.unjudged === true ? { unjudged: true } : {}),
     }))
     .filter((item) => item.point !== '');
   const legacy = (Array.isArray(explanation?.suggestions) ? explanation.suggestions : [])

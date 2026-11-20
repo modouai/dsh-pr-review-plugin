@@ -51,6 +51,7 @@ import {
   normalizeConclusion,
   normalizeEvidenceNeeds,
   normalizeExplanation,
+  normalizePreviousVerdicts,
   normalizeReport,
   normalizeReportDraft,
   normalizeVerdict,
@@ -1719,6 +1720,9 @@ export function apply(ctx, config) {
       console.warn('[pr-review] 读取文件完整内容失败，讲解退化为仅 diff：', error);
     }
     const pull = record.pull ?? { number, title: '', repo: provider.repo, platform: provider.platform };
+    // The baseline snapshot (the newest concluded round's findings) rides along with the
+    // analysis prompt: the model re-judges every baseline finding for this file.
+    const baselineFindings = baselineRoundOf(record)?.findings ?? [];
     const prompt = buildExplainPrompt(
       pull,
       file,
@@ -1726,7 +1730,7 @@ export function apply(ctx, config) {
       record.report,
       focus,
       fileContent,
-      { language: commentLanguage() },
+      { language: commentLanguage(), baselineFindings },
     );
     if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
@@ -1739,6 +1743,40 @@ export function apply(ctx, config) {
       throw new Error(`模型没有返回完整的分析 JSON。原始输出：${answer.raw.slice(0, 400)}`);
     }
     const concerns = normalizeConcerns(parsed.concerns);
+    // Baseline re-judgement (review-delta spec v6): every baseline finding must come out
+    // of the analysis with a status. "fixed" drops it (the model's explicit resolved
+    // verdict); "still-open" re-enters this round's findings as a carry-over that skips
+    // verification (the baseline round already confirmed it). A baseline finding the
+    // model never judged falls back conservatively to still-open (marked unjudged) when
+    // its file was analyzed here, and stays pending when the file wasn't.
+    const baselineVerdicts = normalizePreviousVerdicts(parsed.previousVerdicts, baselineFindings.length);
+    const verdictByIndex = new Map(baselineVerdicts.map((item) => [item.index, item]));
+    const carried = [];
+    for (const item of baselineFindings) {
+      const verdict = verdictByIndex.get(item.index);
+      if (verdict === undefined) {
+        if (item.file === filePath) {
+          carried.push({
+            severity: item.severity,
+            point: item.point,
+            suggestion: item.suggestion,
+            line: item.line,
+            roundItem: item.index,
+            unjudged: true,
+          });
+        }
+        continue;
+      }
+      if (verdict.status === 'still-open') {
+        carried.push({
+          severity: verdict.severity ?? item.severity,
+          point: verdict.point ?? item.point,
+          suggestion: verdict.suggestion ?? item.suggestion,
+          line: verdict.line ?? item.line,
+          roundItem: item.index,
+        });
+      }
+    }
     // One concern carries one suggestion; the verifier's suggestion rewrites win, the
     // candidate's are the fallback. Legacy model output that still carries a separate
     // `suggestions` array is folded into issues by normalizeExplanation (findingsOf).
@@ -1766,6 +1804,9 @@ export function apply(ctx, config) {
         unverified = verdicts.unverified;
       }
     }
+    // Carried-over baseline findings lead the list: they were confirmed in the baseline
+    // round and only re-checked for survival this round.
+    issues = [...carried, ...issues];
     // Verdict reconciliation (semantic contract):
     // - any confirmed blocker -> block: never "pass" a file with confirmed blockers;
     // - no confirmed findings -> pass: an all-dropped triage is a pass, since a "suggest"

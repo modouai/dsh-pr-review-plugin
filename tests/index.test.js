@@ -3704,3 +3704,138 @@ test('the frozen baseline survives a cache round-trip', async () => {
     await plugin.dispose();
   }
 });
+
+test('a per-file analysis re-judges the baseline findings one by one', async () => {
+  const roundOneConclusion = { verdict: 'block', summary: '结论', blockers: [], suggestions: [], nextSteps: [] };
+  const baselineRows = [
+    { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题一', line: 2, suggestion: '修一下' },
+    { index: 2, file: 'src/a.js', severity: 'suggest', point: '旧问题二', line: 4, suggestion: '' },
+    { index: 3, file: 'src/a.js', severity: 'suggest', point: '未判定条目', line: 6, suggestion: '' },
+  ];
+  const roundOneHistory = [{
+    round: 1,
+    headSha: 'abc123',
+    startedAt: 100,
+    finishedAt: 200,
+    conclusions: [{ version: 1, createdAt: 300, source: 'model', conclusion: roundOneConclusion, coverage: null }],
+    delta: null,
+    feedback: null,
+    publishedIds: [],
+    findings: baselineRows,
+  }];
+  const reportReply = JSON.stringify({
+    verdict: 'suggest', summary: '第 2 轮报告',
+    risks: [], order: [{ file: 'src/a.js', reason: '' }], focus: {},
+  });
+  const explainReply = JSON.stringify({
+    verdict: 'pass',
+    summary: '重新分析',
+    logic: '', changes: '',
+    // index 1 判 fixed（本轮不再出现）；index 2 判 still-open 并重写表述；index 3 模型漏判
+    previousVerdicts: [
+      { index: 1, status: 'fixed' },
+      { index: 2, status: 'still-open', point: '旧问题二（仍在）', line: 5 },
+    ],
+    concerns: [{ severity: 'suggest', point: '新发现', suggestion: '修法', line: 9 }],
+  });
+  const recordedPrompts = [];
+  const plugin = await setup({
+    reviews: { 1: legacyReview({ roundHistory: roundOneHistory, conclusion: roundOneConclusion, conclusionAt: 300 }) },
+    fetch: roundReviewFetch,
+    evidenceVerify: false,
+    llm: (streamOptions) => {
+      const promptText = JSON.stringify(streamOptions.messages);
+      recordedPrompts.push(promptText);
+      let reply;
+      if (promptText.includes('基准轮审查意见')) reply = explainReply;
+      else if (promptText.includes('## 变更文件清单')) reply = reportReply;
+      else reply = JSON.stringify({ verdict: 'pass', summary: '第 2 轮报告兜底', blockers: [], suggestions: [], nextSteps: [] });
+      return llmFromText(reply)(streamOptions);
+    },
+  });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    // 延续条目在前（按基准序号序）、新发现在后；漏判条目保守落「仍未解决」（unjudged）而非消失。
+    assert.deepEqual(result.json.explanation.issues, [
+      { severity: 'suggest', point: '旧问题二（仍在）', suggestion: '', line: 5, roundItem: 2 },
+      { severity: 'suggest', point: '未判定条目', suggestion: '', line: 6, roundItem: 3, unjudged: true },
+      { severity: 'suggest', point: '新发现', suggestion: '修法', line: 9 },
+    ]);
+    // prompt 携带基准快照（全局编号 + 强制逐条要求）。
+    const explainPrompt = recordedPrompts.find((text) => text.includes('基准轮审查意见'));
+    assert.ok(explainPrompt !== undefined, 'explain prompt carries the baseline section');
+    assert.match(explainPrompt, /1\. \[block\] src\/a\.js 旧问题一（行 2）/);
+    assert.match(explainPrompt, /previousVerdicts 必须恰好包含 3 条判定/);
+    // index 1 被判 fixed：不再出现在本轮意见里。
+    assert.ok(!result.json.explanation.issues.some((issue) => issue.roundItem === 1));
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a carry-over finding skips verification while new concerns go through it', async () => {
+  const carryConclusion = { verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] };
+  const carryBaseline = [
+    { index: 1, file: 'src/a.js', severity: 'suggest', point: '上一轮意见', line: 3, suggestion: '' },
+  ];
+  const carryHistory = [{
+    round: 1,
+    headSha: 'abc123',
+    startedAt: 100,
+    finishedAt: 200,
+    conclusions: [{ version: 1, createdAt: 300, source: 'model', conclusion: carryConclusion, coverage: null }],
+    delta: null,
+    feedback: null,
+    publishedIds: [],
+    findings: carryBaseline,
+  }];
+  const verifierPrompts = [];
+  const plugin = await setup({
+    reviews: { 1: legacyReview({ roundHistory: carryHistory, conclusion: carryConclusion, conclusionAt: 300 }) },
+    fetch: roundReviewFetch,
+    llm: (streamOptions) => {
+      const promptText = JSON.stringify(streamOptions.messages);
+      let reply;
+      if (promptText.includes('基准轮审查意见')) {
+        reply = JSON.stringify({
+          verdict: 'suggest',
+          summary: '重新分析',
+          logic: '', changes: '',
+          previousVerdicts: [{ index: 1, status: 'still-open' }],
+          concerns: [{ severity: 'suggest', point: '新发现', suggestion: '修法', line: 9 }],
+        });
+      } else if (promptText.includes('## 候选问题')) {
+        verifierPrompts.push(promptText);
+        reply = JSON.stringify({
+          results: [{ index: 1, confidence: 90, point: '新发现', line: 9 }],
+          extraIssues: [],
+        });
+      } else if (promptText.includes('## 变更文件清单')) {
+        reply = JSON.stringify({ verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} });
+      } else {
+        reply = JSON.stringify({ verdict: 'pass', summary: '结论兜底', blockers: [], suggestions: [], nextSteps: [] });
+      }
+      return llmFromText(reply)(streamOptions);
+    },
+  });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    // 延续条目在前（未经复审），新发现在后（经复审确认）。
+    assert.deepEqual(result.json.explanation.issues, [
+      { severity: 'suggest', point: '上一轮意见', suggestion: '', line: 3, roundItem: 1 },
+      { severity: 'suggest', point: '新发现', suggestion: '修法', line: 9 },
+    ]);
+    // verifier 只见过新发现候选：延续条目不进复审。
+    assert.equal(verifierPrompts.length, 1);
+    assert.ok(!verifierPrompts[0].includes('上一轮意见'));
+    assert.ok(verifierPrompts[0].includes('新发现'));
+  } finally {
+    await plugin.dispose();
+  }
+});
