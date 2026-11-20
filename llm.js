@@ -286,7 +286,7 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
   const reportLine = report === null || report === undefined
     ? ''
     : `\nPR 总体结论：${report.verdict ?? ''}；${report.summary ?? ''}`;
-  // Baseline findings (review-delta spec v6): the previous concluded round's findings are
+  // Baseline findings (review-delta spec v7): the previous concluded round's findings are
   // re-judged one by one — "fixed" leaves the issue list, "still-open" re-enters it with
   // a roundItem reference. The full globally-numbered snapshot goes in so the model can
   // carry a finding across a renamed file.
@@ -677,7 +677,7 @@ export function buildConcludePrompt(pull, report, explanations, currentConclusio
 
 /**
  * Normalize the per-item verdicts the model produces for the baseline findings
- * (review-delta spec v6): one valid verdict per baseline index, duplicates keep
+ * (review-delta spec v7): one valid verdict per baseline index, duplicates keep
  * the first, everything malformed is dropped — a dropped verdict falls back to
  * the conservative "still-open" at the call site, never to "fixed".
  */
@@ -956,7 +956,7 @@ export function findingsOf(explanation) {
       point: typeof item.point === 'string' ? item.point.trim() : '',
       suggestion: typeof item.suggestion === 'string' ? item.suggestion.trim() : '',
       line: typeof item.line === 'number' && Number.isFinite(item.line) && item.line > 0 ? Math.floor(item.line) : 0,
-      // Re-review lineage (spec v6): roundItem references the baseline snapshot entry this
+      // Re-review lineage (spec v7): roundItem references the baseline snapshot entry this
       // finding carries over; unjudged marks entries the model never explicitly judged
       // (they fall back to still-open instead of "fixed"). Absent on fresh findings.
       ...(Number.isInteger(item.roundItem) && item.roundItem > 0 ? { roundItem: Math.floor(item.roundItem) } : {}),

@@ -289,7 +289,7 @@ function baselineRoundOf(record) {
 }
 
 /**
- * The re-review comparison over the audit workspace (review-delta spec v6): the baseline
+ * The re-review comparison over the audit workspace (review-delta spec v7): the baseline
  * round's frozen findings versus this round's re-judgement. Every baseline finding gets a
  * status from the *persisted* baselineVerdicts the analysis wrote: resolved only when the
  * model explicitly judged it fixed (the single source of「已修复」), still-open when it
@@ -982,7 +982,8 @@ export function apply(ctx, config) {
         chat: Array.isArray(entry.chat) ? entry.chat : [],
         updatedAt: entry.updatedAt ?? 0,
         // The persisted per-item verdicts drive the re-review comparison; a legacy
-        // cache without them falls back to the claim-based approximation.
+        // cache without them lands every baseline finding in「未判定」(undetermined) —
+        // conservative: no data never means resolved.
         baselineVerdicts: Array.isArray(entry.baselineVerdicts)
           ? entry.baselineVerdicts
             .filter((item) => item !== null && typeof item === 'object'
@@ -1809,7 +1810,7 @@ export function apply(ctx, config) {
       throw new Error(`模型没有返回完整的分析 JSON。原始输出：${answer.raw.slice(0, 400)}`);
     }
     const concerns = normalizeConcerns(parsed.concerns);
-    // Baseline re-judgement (review-delta spec v6): every baseline finding must come out
+    // Baseline re-judgement (review-delta spec v7): every baseline finding must come out
     // of the analysis with a status. "fixed" drops it (the model's explicit resolved
     // verdict); "still-open" re-enters this round's findings as a carry-over that skips
     // verification (the baseline round already confirmed it). A baseline finding the
@@ -1909,7 +1910,7 @@ export function apply(ctx, config) {
       explanation,
       chat: cached?.chat ?? [],
       updatedAt: Date.now(),
-      // The baseline re-judgement is persisted with the entry (review-delta spec v6):
+      // The baseline re-judgement is persisted with the entry (review-delta spec v7):
       // findingsDeltaOf reads explicit verdicts instead of inferring "no claim = fixed",
       // so later issue rewrites (chat findOps, review_update_analysis, clearFindings)
       // can never manufacture a fake resolved state.
@@ -2151,7 +2152,7 @@ export function apply(ctx, config) {
       const version = pushConclusionVersion(record, 'model', calibrated, coverage);
       if (version === null) throw new Error('模型返回了空结论。');
       // Freeze the round's findings as the next round's comparison baseline (review-delta
-      // spec v6): the conclusion is the marker of a completed round, so its snapshot is
+      // spec v7): the conclusion is the marker of a completed round, so its snapshot is
       // what a later round compares against — skipping any conclusion-less rounds between.
       currentRoundEntry(record).findings = findingsSnapshotOf(record);
       record.conclusionEditedAt = 0;

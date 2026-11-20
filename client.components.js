@@ -173,7 +173,7 @@ window.__ModuleLoader__.load({
         );
       }
 
-      /** Workspace comparison: the baseline findings vs this round (review-delta spec v6). */
+      /** Workspace comparison: the baseline findings vs this round (review-delta spec v7). */
       function DeltaBlock(props) {
         const { delta, t } = props;
         if (delta === null || delta === undefined) return null;
