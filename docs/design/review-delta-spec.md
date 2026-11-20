@@ -152,16 +152,17 @@
 | 状态 | 判定条件 | 语义 |
 |---|---|---|
 | **已修复**（resolved） | 模型对该条显式输出 `fixed` | 模型对照当前代码判定问题已不存在——**唯一**的已修复来源 |
-| **仍未解决**（still-open） | 模型输出 `still-open`（对应本轮延续条目）；**或该条无判定**（保守，含输出缺失） | 问题仍在 |
+| **仍未解决**（still-open） | 模型输出 `still-open`（对应本轮延续条目） | 问题仍在 |
+| **未判定**（undetermined） | 模型没有判定该条（漏判、prompt 截断、旧缓存无判定数据、零判定折叠） | 状态未知；展示并入「仍未解决」并标注「模型未逐条判定」，**绝不判「已修复」** |
 | **待分析**（pending） | 本轮该文件尚未（重新）分析 | 状态未定，**不计入已修复** |
 
 规则要点：
 
 - 「该文件已完成分析」是进入判定的前置条件——分析没覆盖就宣称修复是最严重的越权；此条件是**逐文件**的，不是全局的；
 - **file 为空的基准快照条目**（未定位到文件）：随明细一起下发与判定；基准快照中无 file 的条目单独成组，其「已修复」的前置条件是本轮**全部分析完成**且模型未延续它；
-- **被截断（未进 prompt）的基准快照条目**：无法被判定——状态保持「待分析」，并在 prompt 与快照声明「上一轮意见已截断」；下一轮快照重建时自然恢复完整；
+- **被截断（未进 prompt）的基准快照条目**：模型不可能判定它——状态为「未判定」（undetermined，面板标注「模型未逐条判定」），**绝不判「已修复」**；快照全量冻结，仅 prompt 下发时按文件截断并显式声明；
 - 复审否决（候选被 verifier 以低置信度丢弃——现有两遍管线的概念）属于**新发现**的处理，不影响上一轮条目的判定；
-- 用户可在面板手动改判：「已修复」→「仍未解决」需记录审计（谁、何时）；不提供反向入口（「仍未解决」→「已修复」走重新分析）；
+- **（v7 延后）手动改判**：面板级「已修复→仍未解决」入口与审计落盘本轮不实现，列为后续工作；误判的纠正是下一轮重新分析（以及把不属于该文件的条目从该文件意见中移除，避免快照继承）；
 - **H1 的推论**：结论的生成与否、结论的条目内容，均不参与上述任何判定。
 
 ## 6. 数据形状
@@ -216,7 +217,7 @@ type FindingsDelta = {
 }
 ```
 
-快照条目上限：单文件最多保留 10 条；截断排序为 block 优先、line 升序、其余保持原序。**被截断的条目不参与逐条判定**（不下发 prompt）：状态保持「待分析」，并在 prompt 中声明「上一轮意见已截断」；下一轮快照重建时自然恢复完整。
+快照**全量冻结**（不丢任何条目）；仅 prompt 下发时按文件截断到 10 条（block 优先、line 升序、其余保持原序），并在段内显式声明「上一轮意见已截断」。被截断的条目**状态为「未判定」**（undetermined），绝不静默消失、绝不判「已修复」。
 
 ## 7. 各时点行为
 
@@ -257,13 +258,13 @@ type FindingsDelta = {
 
 ## 10. 验收标准
 
-1. **上一轮意见零丢失**：上一轮 N 条意见，本轮分析完成后每条都有状态（fixed / still-open）；不存在「无判定即消失」的条目（缺失判定保守落「仍未解决」并有标注）。
+1. **上一轮意见零丢失**：上一轮 N 条意见，本轮分析完成后每条都有状态（fixed / still-open）；不存在「无判定即消失」的条目（缺失判定落「未判定」（undetermined）并有标注）。
 2. **「已修复」只来自显式判定**：模型未输出 `fixed` 的上一轮条目，任何代码路径都不得落「已修复」。
 3. **未修复天然延续**：模型判 `still-open` 的条目自动进入本轮意见列表（roundItem 引用、表述/行号可更新），不需要 carryOver 标注或系统匹配；**它不经过取证复审**。
 4. **同义重写免疫**：模型对本轮 point 的重写不影响状态——状态挂在 previousVerdicts 上，与文本相似度无关。
 5. **结论零耦合**：结论生成前后，复审对比的状态与展示完全不变；结论正文与发布评论中不出现任何「已修复 / 仍未解决」对比内容（代码库中不存在「结论条目 vs 明细条目」或「明细条目 vs 结论条目」的比较路径）。
 6. **prompt 含上一轮意见**：explain prompt 在有快照时包含「上一轮审查意见（逐条判定）」段落（全局编号 + 强制逐条要求 + 截断声明）；无快照时不含该段落，也不要求 `previousVerdicts`。
-7. `pnpm test` 通过；新增用例覆盖：逐条判定落库（fixed / still-open / 表述更新）、缺失判定保守落「仍未解决」、非法 status/index 忽略、still-open 绕过取证复审、基准轮选取跳过无结论轮次、结论生成冻结基准快照、快照截断落「未判定」、改写 issues 不改变对比状态、结论生成不影响已确定对比状态。
+7. `pnpm test` 通过；新增用例覆盖：逐条判定落库（fixed / still-open / 表述更新）、缺失判定落「未判定」（undetermined）、非法 status/index 忽略、still-open 绕过取证复审、基准轮选取跳过无结论轮次、结论生成冻结基准快照、快照截断落「未判定」、改写 issues 不改变对比状态、结论生成不影响已确定对比状态。
 
 ## 11. 与现有实现的映射（实施参考）
 
@@ -274,7 +275,7 @@ type FindingsDelta = {
 | `rollNewRound`（index.js） | **不再写对比快照**（基准改为结论时冻结进轮次历史）；`previousRound.items` 保留——实现者反馈流程用它匹配上一轮结论条目，与复审对比无关 |
 | `buildExplainPrompt`（llm.js） | 新增可选段「基准轮审查意见（逐条判定）」（`options.baselineFindings`，全局编号 + 强制逐条要求 + 截断声明）；输出 JSON 增加 `previousVerdicts` 字段说明 |
 | `explainFileUncached`（index.js） | 传入基准快照；解析 `previousVerdicts` → 持久化到 entry 的 `baselineVerdicts`（对比的唯一判定来源）；延续条目（roundItem）进 issues、新 concerns 走复审、无判定保守落、跨文件认领仅在归属文件缺席时落库、同文去重 |
-| `previewDeltaOf`（index.js） | 重写：基于 previousVerdicts 聚合三态（fixed→resolved / still-open→stillOpen / 无判定→保守 stillOpen / 未分析文件→pending）；删除「上轮结论 vs 本轮明细」的跨层路径 |
+| `previewDeltaOf` → `findingsDeltaOf`（index.js） | 依据 entry 持久化的 `baselineVerdicts` 聚合：fixed→resolved / still-open→stillOpen / 无判定（旧缓存、零判定、工具新建 entry、漏判、截断）→undetermined / 未分析→pending；issues 的任何后续改写不影响状态；跨层路径删除 |
 | `concludeDeltaOf` / `record.delta` / `runConclude` 的 delta 写入 / `reviewDeltaOf` 的优先级 | **删除**（复审对比不属结论阶段） |
 | `commentAppendixOf` 的 delta 段 / `buildCommentAppendix` 的 delta 渲染 / `COMMENT_APPENDIX.delta` / `roundText` 的「已修复：N 项」 | **删除**（发布评论与轮次文本不含复审对比） |
 | 客户端 `DeltaBlock` / `OverviewPage` 的 delta / `ConclusionAppendix` 的 delta 段 / `serializeReview` 的 `delta` 字段 | 改为消费明细通道四态聚合（resolved / stillOpen / undetermined→并入 stillOpen 展示 / pending）；结论页的 delta 段删除 |

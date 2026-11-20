@@ -524,6 +524,10 @@ test('the overview delta compares the baseline findings with this round per file
       },
       chat: [],
       updatedAt: 150,
+      baselineVerdicts: [
+        { index: 1, status: 'still-open' },
+        { index: 2, status: 'fixed' },
+      ],
     }],
   });
   const plugin = await setup({ reviews: { 1: record } });
@@ -634,8 +638,8 @@ test('an all-clean round with every analysis done resolves every baseline findin
       },
     ],
     explanations: [
-      { file: 'src/a.js', status: 'done', error: null, explanation: cleanExplanation, chat: [], updatedAt: 150 },
-      { file: 'src/b.js', status: 'done', error: null, explanation: cleanExplanation, chat: [], updatedAt: 150 },
+      { file: 'src/a.js', status: 'done', error: null, explanation: cleanExplanation, chat: [], updatedAt: 150, baselineVerdicts: [{ index: 1, status: 'fixed' }] },
+      { file: 'src/b.js', status: 'done', error: null, explanation: cleanExplanation, chat: [], updatedAt: 150, baselineVerdicts: [{ index: 2, status: 'fixed' }] },
     ],
   });
   const plugin = await setup({ reviews: { 1: record } });
@@ -686,7 +690,7 @@ test('a re-analyzed file with no carry-over resolves its baseline finding explic
     ],
     explanations: [
       // a.js 已重新分析且模型未延续：显式「已修复」。b.js 未分析 → 基准条目（若在）保持待分析。
-      { file: 'src/a.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: '没有发现', issues: [], suggestions: [] }, chat: [], updatedAt: 150 },
+      { file: 'src/a.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: '没有发现', issues: [], suggestions: [] }, chat: [], updatedAt: 150, baselineVerdicts: [{ index: 1, status: 'fixed' }] },
     ],
   });
   const plugin = await setup({ reviews: { 1: record } });
@@ -3917,6 +3921,7 @@ test('the owning file newest analysis outranks a stale cross-file claim', async 
         },
         chat: [],
         updatedAt: 100,
+        baselineVerdicts: [{ index: 1, status: 'still-open' }],
       },
       {
         file: 'src/tests.js',
@@ -3926,6 +3931,7 @@ test('the owning file newest analysis outranks a stale cross-file claim', async 
         explanation: { verdict: 'pass', summary: '后跑', issues: [], suggestions: [] },
         chat: [],
         updatedAt: 200,
+        baselineVerdicts: [{ index: 1, status: 'fixed' }],
       },
     ],
   });
@@ -3985,6 +3991,7 @@ test('the analysis does not duplicate a baseline finding as a fresh concern', as
         },
         chat: [],
         updatedAt: 200,
+        baselineVerdicts: [{ index: 1, status: 'still-open' }],
       },
     ],
   });
@@ -4254,6 +4261,91 @@ test('the analysis pipeline drops a fresh concern that repeats a still-open verd
     assert.deepEqual(result.json.explanation.issues, [
       { severity: 'suggest', point: '回退链仍可到满格', suggestion: '', line: 264, roundItem: 1 },
     ]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+
+test('clearing issues through the tool never manufactures a resolved baseline finding', async () => {
+  // 审查漏洞 A：零判定折叠为 null（或旧缓存）时，review_update_analysis 清空 issues
+  // 曾让聚合走「无认领 = resolved」的回退。现在「已完成分析但无持久化判定」一律
+  // 落「未判定」。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'suggest', point: '旧问题', line: 1, suggestion: '' },
+        ],
+      },
+      { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+    explanations: [{
+      file: 'src/a.js', status: 'done', error: null,
+      explanation: { verdict: 'pass', summary: '分析', issues: [], suggestions: [] },
+      chat: [], updatedAt: 200,
+      // 模型当轮没有输出任何合法判定 → 折叠为 null（与旧缓存同形）。
+      baselineVerdicts: null,
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const before = await plugin.review();
+    assert.deepEqual(before.delta.undetermined.map((item) => item.index), [1]);
+    assert.deepEqual(before.delta.resolved, []);
+    // 工具清空 issues 后：仍是「未判定」，绝不变成「已修复」。
+    await plugin.runTool('review_update_analysis', { revision: before.revision, path: 'src/a.js', issues: [] });
+    const after = await plugin.review();
+    assert.deepEqual(after.delta.resolved, []);
+    assert.deepEqual(after.delta.undetermined.map((item) => item.index), [1]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the tool creating an entry for an unanalyzed file never resolves baselines', async () => {
+  // 审查漏洞 B：review_update_analysis 为未分析文件新建 entry（无 baselineVerdicts），
+  // 曾让聚合按「无认领」判 resolved。现在一律「未判定」。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'suggest', point: '旧问题', line: 1, suggestion: '' },
+        ],
+      },
+      { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+    // a.js 尚未分析。
+    explanations: [],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const before = await plugin.review();
+    assert.deepEqual(before.delta.pending.map((item) => item.index), [1]);
+    await plugin.runTool('review_update_analysis', { revision: before.revision, path: 'src/a.js', issues: [] });
+    const after = await plugin.review();
+    assert.deepEqual(after.delta.resolved, []);
+    assert.deepEqual(after.delta.undetermined.map((item) => item.index), [1]);
   } finally {
     await plugin.dispose();
   }

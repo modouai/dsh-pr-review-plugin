@@ -242,8 +242,10 @@ function serializeReview(record) {
 
 /**
  * Freeze the round's finished per-file findings as the next round's comparison baseline
- * (review-delta spec v6): flattened through findingsOf, globally numbered, capped at
- * 10 findings per file (block first, then line ascending, original order otherwise).
+ * (review-delta spec v7): flattened through findingsOf and globally numbered, frozen in
+ * full — per-file ordering is block first, then line ascending, original order otherwise.
+ * Truncation happens only when the prompt is built (10 per file, declared there), so a
+ * frozen finding never silently disappears from the comparison.
  */
 function findingsSnapshotOf(record) {
   const byFile = [];
@@ -331,10 +333,11 @@ function findingsDeltaOf(record) {
     const entry = entries.get(finding.file);
     const fileAnalyzed = analyzed(finding.file);
     const verdicts = entry !== undefined && Array.isArray(entry.baselineVerdicts) ? entry.baselineVerdicts : null;
-    if (fileAnalyzed && verdicts !== null) {
-      const verdict = verdicts.find((item) => item.index === finding.index);
+    if (fileAnalyzed) {
+      // 已完成分析：状态只认持久化的 baselineVerdicts——没有判定（旧缓存、工具新建
+      // 的 entry、零判定折叠、漏判、截断）一律「未判定」，绝不因「无认领」判已修复。
+      const verdict = verdicts === null ? undefined : verdicts.find((item) => item.index === finding.index);
       if (verdict === undefined) {
-        // 模型没有判定（漏判或 prompt 截断）——保守落「未判定」，绝不算已修复。
         undetermined.push(finding);
         continue;
       }
@@ -345,27 +348,13 @@ function findingsDeltaOf(record) {
       stillOpen.push({ previous: finding, current: claimOf.get(finding.index)?.finding });
       continue;
     }
+    // 归属文件本轮未分析：跨文件认领（重命名场景）算「仍未解决」；否则保持待分析。
     const claim = claimOf.get(finding.index);
-    if (!fileAnalyzed) {
-      // 归属文件未分析：跨文件认领（重命名场景）仍算「仍未解决」；否则保持待分析。
-      if (claim !== undefined && claim.fromFile !== finding.file) {
-        stillOpen.push({ previous: finding, current: claim.finding });
-      } else {
-        pending.push(finding);
-      }
-      continue;
+    if (claim !== undefined && claim.fromFile !== finding.file) {
+      stillOpen.push({ previous: finding, current: claim.finding });
+    } else {
+      pending.push(finding);
     }
-    // 旧缓存（entry 无 baselineVerdicts）：回退到认领推断——过渡数据的保守近似。
-    const ownClaim = claim !== undefined && claim.fromFile === finding.file ? claim.finding : undefined;
-    if (ownClaim === undefined) {
-      resolved.push(finding);
-      continue;
-    }
-    if (ownClaim.unjudged === true) {
-      undetermined.push(finding);
-      continue;
-    }
-    stillOpen.push({ previous: finding, current: ownClaim });
   }
   return {
     baselineRound: baseline.round,
