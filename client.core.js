@@ -259,7 +259,9 @@ window.__ModuleLoader__.load({
         ? null
         : {
             done: analyzedCount,
-            total: files.length > 0 ? files.length : analyzedCount,
+            // Files is the honest total; fall back to the batch total, then to the
+            // analyzed count, so a malformed record can never render a full bar.
+            total: files.length > 0 ? files.length : (analyzing.total > 0 ? analyzing.total : analyzedCount),
             failed: Math.min(Math.max(analyzing.failed ?? 0, 0), analyzing.total ?? 0),
           };
       const hasConclusion = versions.length > 0;

@@ -688,7 +688,8 @@ export function normalizePreviousVerdicts(raw, baselineCount) {
 }
 
 /** Candidate problems from the triage pass; none of them is a finding until the verifier scores it. */
-export function normalizeConcerns(raw) {  return (Array.isArray(raw) ? raw : [])
+export function normalizeConcerns(raw) {
+  return (Array.isArray(raw) ? raw : [])
     .filter((item) => item !== null && typeof item === 'object')
     .map((item) => ({
       severity: item.severity === 'block' ? 'block' : 'suggest',

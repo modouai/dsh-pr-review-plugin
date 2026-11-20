@@ -389,7 +389,8 @@ test('migrates a legacy cache into roundHistory and serializes the new fields', 
   }
 });
 
-test('force review opens round 2: previousRound, cleared state, and delta on the next conclusion', async () => {  const diffText = 'diff --git a/src/a.js b/src/a.js\n@@ -1 +1 @@\n-a\n+b\n';
+test('force review opens round 2: previousRound, cleared state, and delta on the next conclusion', async () => {
+  const diffText = 'diff --git a/src/a.js b/src/a.js\n@@ -1 +1 @@\n-a\n+b\n';
   const fetchHandler = async (url) => {
     const target = String(url);
     if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
