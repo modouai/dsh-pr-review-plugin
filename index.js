@@ -1813,6 +1813,11 @@ export function apply(ctx, config) {
         continue;
       }
       if (verdict.status === 'still-open') {
+        // 归属文件在本轮会被分析：该条目的判定与展示归它（其最新分析是权威），认领只在
+        // 归属文件缺席时落库——重命名场景（旧文件已不在变更列表，新文件认领延续）。
+        const owningListed = item.file !== filePath
+          && (Array.isArray(record.files) ? record.files : []).some((file) => file.path === item.file);
+        if (owningListed) continue;
         carried.push({
           severity: verdict.severity ?? item.severity,
           point: verdict.point ?? item.point,
@@ -1849,6 +1854,11 @@ export function apply(ctx, config) {
         unverified = verdicts.unverified;
       }
     }
+    // 同文去重：模型有时把已判 still-open 的问题又作为一条新发现写进 issues（完全同文）。
+    // 延续条目优先，同文的无 roundItem 条目丢弃——不做语义猜测，只认归一后的完全相等。
+    const comparablePoint = (value) => String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const carriedPoints = new Set(carried.map((item) => comparablePoint(item.point)));
+    issues = issues.filter((item) => !carriedPoints.has(comparablePoint(item.point)));
     // Carried-over baseline findings lead the list: they were confirmed in the baseline
     // round and only re-checked for survival this round.
     issues = [...carried, ...issues];

@@ -302,7 +302,7 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
     '- 仍存在 → 在 previousVerdicts 输出 "status": "still-open"，并把该问题作为一条审查意见写入 issues（severity/point/line 按当前代码重写），同时带 "roundItem": <上面的序号>；',
     '- 已修复 / 不再存在 → 在 previousVerdicts 输出 "status": "fixed"，不要把它写入 issues；',
     `- 基准轮共 ${baseline.length} 条意见，previousVerdicts 必须恰好包含 ${baseline.length} 条判定，一条都不能少。`,
-    '- 本轮新发现的问题照常写入 issues（不带 roundItem）。',
+    '- 本轮新发现的问题照常写入 issues（不带 roundItem）——不要重复报告：已在 previousVerdicts 中判定 still-open 的问题只写一次，不要同时作为新发现再写一条。',
   ];
   const user = [
     `平台：${platformLabel(pull.platform)}；仓库：${pull.repo}`,

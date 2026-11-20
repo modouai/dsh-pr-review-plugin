@@ -3941,3 +3941,119 @@ test('the owning file newest analysis outranks a stale cross-file claim', async 
     await plugin.dispose();
   }
 });
+
+test('the analysis does not duplicate a baseline finding as a fresh concern', async () => {
+  // PR #32 第 7 轮：模型对同一问题既输出 previousVerdicts still-open（带更新表述），
+  // 又把同一段文字作为新 concern 写进 issues——落库后同文两条。延续条目优先，
+  // 完全同文（经 comparable 归一）的新发现丢弃。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '回退链仍可到满格', line: 264, suggestion: '' },
+        ],
+      },
+      { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+    explanations: [
+      {
+        file: 'src/a.js',
+        status: 'done',
+        error: null,
+        explanation: {
+          verdict: 'block',
+          summary: '复现',
+          issues: [
+            // 延续条目（still-open，表述与基准相同）
+            { severity: 'block', point: '回退链仍可到满格', line: 264, roundItem: 1 },
+            // 同一问题又被写成新发现（无 roundItem，文本相同）
+            { severity: 'block', point: '  回退链仍可到满格 ', line: 264 },
+            // 真正的新问题
+            { severity: 'suggest', point: '另一个新问题', line: 9 },
+          ],
+          suggestions: [],
+        },
+        chat: [],
+        updatedAt: 200,
+      },
+    ],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    // 落库层的去重发生在分析管线；这里验证聚合不受重复影响——同一基准条目只出一次。
+    const review = await plugin.review();
+    assert.equal(review.delta.stillOpen.length, 1);
+    assert.equal(review.delta.stillOpen[0].previous.point, '回退链仍可到满格');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a cross-file claim is not stored when the owning file is analyzed this round', async () => {
+  // 归属文件在本轮 files 列表里：认领条目不落进认领文件的 issues（判定权归归属文件，
+  // 避免同一条目在两个文件下重复展示）。归属文件不在本轮时认领仍落库（重命名场景）。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const roundHistory = [
+    {
+      round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+      conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+      feedback: null, publishedIds: [],
+      findings: [
+        { index: 1, file: 'src/owned.js', severity: 'suggest', point: '归属文件的问题', line: 3, suggestion: '' },
+      ],
+    },
+    { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+  ];
+  const reply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '分析',
+    logic: '', changes: '',
+    // 分析 src/impl.js 时跨文件认领归属文件的基准条目
+    previousVerdicts: [{ index: 1, status: 'still-open' }],
+    concerns: [],
+  });
+  const plugin = await setup({
+    reviews: {
+      1: legacyReview({
+        round: 2,
+        conclusion: null,
+        conclusionAt: 0,
+        comment: null,
+        published: [],
+        publishedItems: [],
+        files: [
+          { path: 'src/impl.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+          { path: 'src/owned.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+        ],
+        roundHistory,
+        explanations: [{ file: 'src/impl.js', status: 'pending', error: null, explanation: null, chat: [], updatedAt: 0 }],
+      }),
+    },
+    fetch: roundReviewFetch,
+    evidenceVerify: false,
+    llm: (streamOptions) => {
+      const promptText = JSON.stringify(streamOptions.messages);
+      const res = promptText.includes('基准轮审查意见') ? reply
+        : JSON.stringify({ verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} });
+      return llmFromText(res)(streamOptions);
+    },
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/impl.js', force: true });
+    assert.equal(result.status, 200);
+    // 归属文件（src/owned.js）在本轮 files 里：认领条目不落库。
+    assert.deepEqual(result.json.explanation.issues, []);
+  } finally {
+    await plugin.dispose();
+  }
+});
