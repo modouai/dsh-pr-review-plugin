@@ -301,13 +301,20 @@ function findingsDeltaOf(record) {
     return entry !== undefined && entry.status === 'done'
       && entry.explanation !== null && entry.explanation !== undefined;
   };
-  // The carry-over map: baseline index → this round's entry (model-judged still-open,
-  // or the conservative unjudged fallback).
-  const carryOf = new Map();
+  // Claims: baseline index → the carry-over entry referencing it. The same index can be
+  // claimed by several analyses (a cross-file claim from an earlier analysis, then the
+  // owning file's own analysis); the newest updatedAt wins so a stale claim can never
+  // outrank a later explicit verdict.
+  const claimOf = new Map();
   for (const [filePath, entry] of entries) {
     if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
     for (const finding of findingsOf(entry.explanation)) {
-      if (finding.roundItem !== undefined) carryOf.set(finding.roundItem, { ...finding, file: filePath });
+      if (finding.roundItem === undefined) continue;
+      const previous = claimOf.get(finding.roundItem);
+      const updatedAt = entry.updatedAt ?? 0;
+      if (previous === undefined || updatedAt >= previous.updatedAt) {
+        claimOf.set(finding.roundItem, { finding: { ...finding, file: filePath }, fromFile: filePath, updatedAt });
+      }
     }
   }
   const resolved = [];
@@ -315,20 +322,28 @@ function findingsDeltaOf(record) {
   const undetermined = [];
   const pending = [];
   for (const finding of baseline.findings) {
-    if (!analyzed(finding.file)) {
-      pending.push(finding);
+    const fileAnalyzed = analyzed(finding.file);
+    const claim = claimOf.get(finding.index);
+    if (!fileAnalyzed) {
+      // 归属文件未分析：跨文件认领（重命名场景）仍算「仍未解决」；否则保持待分析。
+      if (claim !== undefined && claim.fromFile !== finding.file) {
+        stillOpen.push({ previous: finding, current: claim.finding });
+      } else {
+        pending.push(finding);
+      }
       continue;
     }
-    const carry = carryOf.get(finding.index);
-    if (carry === undefined) {
+    // 归属文件自己的分析拥有最终权：带 roundItem 认领 → 仍未解决；不带 → 显式已修复。
+    const ownClaim = claim !== undefined && claim.fromFile === finding.file ? claim.finding : undefined;
+    if (ownClaim === undefined) {
       resolved.push(finding);
       continue;
     }
-    if (carry.unjudged === true) {
+    if (ownClaim.unjudged === true) {
       undetermined.push(finding);
       continue;
     }
-    stillOpen.push({ previous: finding, current: carry });
+    stillOpen.push({ previous: finding, current: ownClaim });
   }
   return {
     baselineRound: baseline.round,

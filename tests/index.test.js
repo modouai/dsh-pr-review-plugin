@@ -3868,3 +3868,76 @@ test('a carry-over finding skips verification while new concerns go through it',
     await plugin.dispose();
   }
 });
+
+
+test('the owning file newest analysis outranks a stale cross-file claim', async () => {
+  // 真实事故复现（PR #32 第 7 轮）：llm.js 的分析先跑（旧代码时刻）跨文件认领了 tests
+  // 文件的基准条目判 still-open；tests 文件自己的分析后跑（修复后）判 fixed 且不带
+  // roundItem。归属文件的最新显式判定必须胜出——不能被过时的认领拖住。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    files: [
+      { path: 'src/impl.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+      { path: 'src/tests.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+    ],
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/tests.js', severity: 'block', point: '挤成一行', line: 392, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0,
+        conclusions: [], feedback: null, publishedIds: [],
+      },
+    ],
+    explanations: [
+      {
+        file: 'src/impl.js',
+        status: 'done',
+        error: null,
+        // 先跑（旧代码时刻）：跨文件认领 tests 的基准条目，判仍存在。
+        explanation: {
+          verdict: 'suggest', summary: '先跑',
+          issues: [{ severity: 'block', point: 'tests 中 test 声明仍挤在一行', line: 0, roundItem: 1 }],
+          suggestions: [],
+        },
+        chat: [],
+        updatedAt: 100,
+      },
+      {
+        file: 'src/tests.js',
+        status: 'done',
+        error: null,
+        // 后跑（修复后）：归属文件自己的分析判 fixed（不输出 roundItem）。
+        explanation: { verdict: 'pass', summary: '后跑', issues: [], suggestions: [] },
+        chat: [],
+        updatedAt: 200,
+      },
+    ],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const review = await plugin.review();
+    // 归属文件（tests）的最新分析是权威：显式 fixed → 已修复。
+    assert.deepEqual(review.delta.resolved, [
+      { index: 1, file: 'src/tests.js', severity: 'block', point: '挤成一行', line: 392, suggestion: '' },
+    ]);
+    assert.deepEqual(review.delta.stillOpen, []);
+  } finally {
+    await plugin.dispose();
+  }
+});
