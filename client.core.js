@@ -246,12 +246,21 @@ window.__ModuleLoader__.load({
       const version = versions.length > 0 ? versions[versions.length - 1].version : 0;
       if (data.status === 'error') return { phase: 'error', progress: null, nextAction: null, version };
       const analyzing = isAnalyzing(data.analyzing) ? data.analyzing : null;
+      // Batch progress is restated in the global ledger (analyzed / all changed files), the
+      // same numbers the completeness line shows — a header badge of "3/9" next to an
+      // overview "6/12" used to read as two disagreeing facts. The batch object only
+      // answers "is a run active" and how many hard failures it hit.
+      const files = Array.isArray(data.files) ? data.files : [];
+      const explanations = Array.isArray(data.explanations) ? data.explanations : [];
+      const analyzedCount = explanations.filter((entry) => (
+        entry !== null && typeof entry === 'object' && entry.status === 'done' && entry.explanation !== null && entry.explanation !== undefined
+      )).length;
       const progress = analyzing === null
         ? null
         : {
-            done: Math.min(Math.max(analyzing.done ?? 0, 0), analyzing.total),
-            total: analyzing.total,
-            failed: Math.min(Math.max(analyzing.failed ?? 0, 0), analyzing.total),
+            done: analyzedCount,
+            total: files.length > 0 ? files.length : analyzedCount,
+            failed: Math.min(Math.max(analyzing.failed ?? 0, 0), analyzing.total ?? 0),
           };
       const hasConclusion = versions.length > 0;
       const stale = staleInfo !== null && staleInfo !== undefined;

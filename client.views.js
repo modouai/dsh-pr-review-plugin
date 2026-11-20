@@ -42,15 +42,17 @@ window.__ModuleLoader__.load({
         // A batch always reports a positive total; anything else is not usable progress and
         // falls back to the plain file count instead of showing "0/0".
         const analyzing = isAnalyzing(props.analyzing) ? props.analyzing : null;
-        const done = analyzing === null ? 0 : Math.min(Math.max(analyzing.done ?? 0, 0), analyzing.total);
-        const failed = analyzing === null ? 0 : Math.min(Math.max(analyzing.failed ?? 0, 0), analyzing.total);
-        const countLabel = analyzing === null
-          ? `${files.length} ${t('fileUnit')}`
-          : fill(t('analyzingFiles'), { done, total: analyzing.total })
-            + (failed > 0 ? fill(t('analyzingFailed'), { failed }) : '');
         const fileCounts = React.useMemo(() => cleanCountOf(review), [review]);
         const failedFiles = fileCounts.failed;
         const analyzedFiles = fileCounts.done;
+        // Batch progress speaks the global ledger (analyzed / all changed files): the same
+        // two numbers as the completeness line, so the header and the overview can never
+        // disagree about how much is left. The batch object only answers "is a run active"
+        // and how many hard failures it hit — its internal done/total never render.
+        const countLabel = analyzing === null
+          ? `${files.length} ${t('fileUnit')}`
+          : fill(t('analyzingFiles'), { done: analyzedFiles, total: files.length })
+            + (failedFiles > 0 ? fill(t('analyzingFailed'), { failed: failedFiles }) : '');
         const filesTone = filesBadgeTone(analyzing, failedFiles, analyzedFiles, files.length);
         const processing = phase !== null && phase !== undefined
           && (phase.phase === 'reviewing' || phase.phase === 'analyzing');

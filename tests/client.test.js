@@ -484,6 +484,7 @@ function makeReview(options = {}) {
     published: options.published ?? [],
     publishedItems: [],
     concluding: options.concluding ?? null,
+    analyzing: options.analyzing ?? null,
     concludeError: null,
     publishing: false,
     comment: null,
@@ -1650,6 +1651,11 @@ test('the file column shows batch progress and the manual analyze-all button', (
     template,
   );
   const files = [{ path: 'src/a.js', order: 1, severity: '', additions: 1, deletions: 0, reason: '' }];
+  // The global ledger the header badge speaks: one analyzed file, one failed entry.
+  const explanations = [
+    { file: 'src/a.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: 'x', issues: [] }, chat: [], updatedAt: 1 },
+    { file: 'src/b.js', status: 'error', error: 'boom', explanation: null, chat: [], updatedAt: 2 },
+  ];
   const hits = [];
   const render = (extra) => fake.render(fake.React.createElement(parts.FilesPane, {
     t,
@@ -1657,7 +1663,7 @@ test('the file column shows batch progress and the manual analyze-all button', (
     onSelectOverview: () => {},
     files,
     filePath: '',
-    review: { files },
+    review: { files, explanations },
     onOpenFile: () => {},
     ...extra,
   }));
@@ -1666,19 +1672,20 @@ test('the file column shows batch progress and the manual analyze-all button', (
   );
 
   // Automatic mode: progress replaces the file count and no button competes with it.
+  // The numbers are the global ledger (analyzed / all changed files), not the batch's own.
   const running = render({ analyzing: { total: 3, done: 1, failed: 0, current: 'src/a.js' } });
-  assert.ok(running.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 3 })));
+  assert.ok(running.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
   assert.equal(running.textOnly.includes(dict.fileUnit), false, 'progress replaces the file count');
   assert.equal(running.textOnly.includes(dict.analyzingFailed.replace('{failed}', '0')), false);
   assert.equal(analyzeAllButton(running), undefined);
 
   const failing = render({ analyzing: { total: 3, done: 2, failed: 1, current: 'src/b.js' } });
-  assert.ok(failing.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 3 })));
+  assert.ok(failing.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
   assert.ok(failing.textOnly.includes(fill(dict.analyzingFailed, { failed: 1 })));
 
   const allFailed = render({ analyzing: { total: 2, done: 2, failed: 2 } });
-  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 2 })));
-  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFailed, { failed: 2 })));
+  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
+  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFailed, { failed: 1 })));
 
   // Progress without a usable total is not a batch: keep the plain count.
   const degenerate = render({ analyzing: { total: 0, done: 0, failed: 0 } });
@@ -1687,14 +1694,15 @@ test('the file column shows batch progress and the manual analyze-all button', (
   const noTotal = render({ analyzing: { done: 1, failed: 0 } });
   assert.ok(noTotal.textOnly.includes(dict.fileUnit));
 
-  // Counts are clamped to the total: a bad payload never renders "5/3".
+  // The global ledger is what shows: a batch claiming more than the ledger has still
+  // renders the ledger numbers ("5/3" cannot happen).
   const clamped = render({ analyzing: { total: 2, done: 5, failed: 9 } });
-  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 2 })));
-  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFailed, { failed: 2 })));
+  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
+  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFailed, { failed: 1 })));
 
   // The last file of a batch still reports progress until the host clears `analyzing`.
   const finishing = render({ analyzing: { total: 2, done: 2, failed: 0, current: '' } });
-  assert.ok(finishing.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 2 })));
+  assert.ok(finishing.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
 
   // Automatic mode with no batch: the plain count returns and no button appears.
   const idle = render({});
@@ -1712,7 +1720,7 @@ test('the file column shows batch progress and the manual analyze-all button', (
   // A batch already running wins over the button, whatever the mode says.
   const manualRunning = render({ manual: true, analyzing: { total: 2, done: 1, failed: 0, current: 'src/a.js' } });
   assert.equal(analyzeAllButton(manualRunning), undefined);
-  assert.ok(manualRunning.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 2 })));
+  assert.ok(manualRunning.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
 
   // While the request is in flight the button reports the work and cannot be clicked twice.
   const busy = render({ manual: true, analyzeAllBusy: true, onAnalyzeAll: () => hits.push('again') });
@@ -2863,19 +2871,35 @@ test('derivePhase folds host state into one phase', () => {
     'concluding',
   );
 
-  const analyzing = { ...base, status: 'done', analyzing: { done: 12, total: 30, failed: 1, current: 'src/a.js' } };
+  // Batch progress is restated in the global ledger: done = analyzed files, total = all
+  // changed files — the same two numbers the completeness line shows, so the header badge
+  // and the overview can never disagree about how much is left.
+  const analyzing = makeReview({
+    status: 'done',
+    files: [
+      { path: 'src/a.js', status: 'modified', additions: 1, deletions: 0 },
+      { path: 'src/b.js', status: 'modified', additions: 1, deletions: 0 },
+      { path: 'src/c.js', status: 'modified', additions: 1, deletions: 0 },
+    ],
+    explanations: [
+      { file: 'src/a.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: 'x', issues: [] }, chat: [], updatedAt: 1 },
+      { file: 'src/b.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: 'y', issues: [] }, chat: [], updatedAt: 2 },
+      { file: 'src/c.js', status: 'error', error: 'boom', explanation: null, chat: [], updatedAt: 3 },
+    ],
+    analyzing: { done: 12, total: 30, failed: 1, current: 'src/c.js' },
+  });
   const phase = parts.derivePhase(analyzing, null);
   assert.equal(phase.phase, 'analyzing');
-  assert.deepEqual(plain(phase.progress), { done: 12, total: 30, failed: 1 });
+  assert.deepEqual(plain(phase.progress), { done: 2, total: 3, failed: 1 });
   assert.equal(phase.nextAction, null);
   assert.equal(parts.derivePhase(analyzing, null, { manual: true }).nextAction, 'analyzeAll');
 
-  // Progress is clamped into [0, total]; a negative failed count folds to 0.
+  // A negative failed count folds to 0; a record without files falls back to the batch total.
   const clamped = parts.derivePhase(
     { ...base, status: 'done', analyzing: { done: 99, total: 30, failed: -1, current: 'x' } },
     null,
   );
-  assert.deepEqual(plain(clamped.progress), { done: 30, total: 30, failed: 0 });
+  assert.deepEqual(plain(clamped.progress), { done: 0, total: 1, failed: 0 });
 
   assert.equal(parts.derivePhase({ ...base, conclusion: null, conclusionAt: 0 }, null).phase, 'ready');
   assert.equal(parts.derivePhase({ ...base, conclusion: null, conclusionAt: 0 }, null).nextAction, 'conclude');
