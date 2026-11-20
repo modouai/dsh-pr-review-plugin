@@ -364,7 +364,8 @@ test('migrates a legacy cache into roundHistory and serializes the new fields', 
     assert.equal(round.conclusions[0].conclusion.verdict, 'block');
     // Published ids of the current round move into the round entry.
     assert.deepEqual(round.publishedIds, [555]);
-    assert.equal(round.delta, null);
+    // 复审对比不再挂结论阶段：轮次 entry 上没有 delta 字段。
+    assert.ok(!('delta' in round));
     assert.equal(round.feedback, null);
 
     // Legacy items get stable ids; top-level fields mirror the newest version.
@@ -388,7 +389,7 @@ test('migrates a legacy cache into roundHistory and serializes the new fields', 
   }
 });
 
-test('force review opens round 2: previousRound, cleared state, and delta on the next conclusion', async () => {
+test('force review opens round 2: previousRound, cleared state, and a frozen baseline on conclude', async () => {
   const diffText = 'diff --git a/src/a.js b/src/a.js\n@@ -1 +1 @@\n-a\n+b\n';
   const fetchHandler = async (url) => {
     const target = String(url);
@@ -449,7 +450,8 @@ test('force review opens round 2: previousRound, cleared state, and delta on the
     assert.equal(openRound.round, 2);
     assert.equal(openRound.finishedAt > 0, true);
     assert.deepEqual(openRound.conclusions, []);
-    assert.equal(openRound.delta, null);
+    // 复审对比不挂结论阶段：开轮与结论路径都不再有 delta 字段。
+    assert.ok(!('delta' in openRound));
     assert.equal(openRound.feedback, null);
     assert.deepEqual(openRound.publishedIds, []);
     assert.equal(secondRound.conclusion, null);
@@ -465,48 +467,67 @@ test('force review opens round 2: previousRound, cleared state, and delta on the
     assert.equal(secondRound.roundHistory[0].conclusions[0].conclusion.verdict, 'block');
     assert.deepEqual(secondRound.roundHistory[0].publishedIds, [555]);
 
-    // Generating round 2's conclusion produces the re-review delta.
+    // Generating round 2's conclusion freezes the baseline findings snapshot, but the
+    // re-review comparison itself stays out of the conclusion stage: 第 1 轮的明细没有
+    // 快照（旧缓存形态），所以本轮也没有可对比的基准。
     await plugin.call('/pr-review-api/conclude', 'POST', { number: 1 });
     const reviewed = await plugin.waitForConcluding();
     assert.equal(reviewed.roundHistory[1].conclusions.length, 1);
     assert.equal(reviewed.conclusion.verdict, 'block');
-    assert.notEqual(reviewed.delta, null);
-    assert.equal(reviewed.delta.round, 2);
-    assert.equal(reviewed.delta.previousRound, 1);
-    assert.equal(reviewed.delta.stillOpen.length, 1);
-    assert.equal(reviewed.delta.stillOpen[0].point, '旧问题');
-    assert.deepEqual(reviewed.delta.resolved, []);
+    // 第 2 轮 conclude 时没有任何已完成的逐文件分析 → 快照为空数组（非 null）。
+    assert.deepEqual(reviewed.roundHistory[1].findings, []);
+    // 没有可对比的基准 → 无复审对比。
+    assert.equal(reviewed.delta, null);
   } finally {
     await plugin.dispose();
   }
 });
 
-test('the overview delta previews from per-file findings before any conclusion exists', async () => {
+test('the overview delta compares the baseline findings with this round per file', async () => {
+  const conclusion = { verdict: 'block', summary: '第一轮结论', blockers: [], suggestions: [], nextSteps: [] };
   const record = legacyReview({
     round: 2,
     conclusion: null,
     conclusionAt: 0,
     comment: null,
-    delta: null,
     published: [],
     publishedItems: [],
-    previousRound: {
-      round: 1,
-      headSha: 'abc123',
-      conclusion: { verdict: 'block', summary: '第一轮结论', blockers: [{ file: 'src/a.js', point: '旧问题' }], suggestions: [], nextSteps: [] },
-      items: [
-        { kind: 'blocker', file: 'src/a.js', point: '旧问题' },
-        { kind: 'suggestion', file: 'src/a.js', point: '旧建议' },
-      ],
-    },
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [555],
+        // 基准快照（第 1 轮生成结论时冻结）：两条意见。
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 1, suggestion: '' },
+          { index: 2, file: 'src/a.js', severity: 'suggest', point: '旧建议', line: 2, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0,
+        conclusions: [], feedback: null, publishedIds: [],
+      },
+    ],
     explanations: [{
       file: 'src/a.js',
       status: 'done',
       error: null,
-      // The finished analysis re-finds the round-1 blocker; the suggestion was not seen again.
-      explanation: { verdict: 'block', summary: '复现', issues: [{ severity: 'block', point: '旧问题', line: 1 }], suggestions: [] },
+      // 本轮分析：旧问题一仍出现（模型延续，roundItem: 1）；旧建议未再出现（判 fixed）。
+      explanation: {
+        verdict: 'block', summary: '复现',
+        issues: [{ severity: 'block', point: '旧问题', line: 1, roundItem: 1 }],
+        suggestions: [],
+      },
       chat: [],
       updatedAt: 150,
+      baselineVerdicts: [
+        { index: 1, status: 'still-open' },
+        { index: 2, status: 'fixed' },
+      ],
     }],
   });
   const plugin = await setup({ reviews: { 1: record } });
@@ -514,60 +535,53 @@ test('the overview delta previews from per-file findings before any conclusion e
     const review = await plugin.review();
     assert.equal(review.conclusion, null);
     assert.notEqual(review.delta, null);
-    assert.equal(review.delta.preview, true);
-    assert.equal(review.delta.round, 2);
-    assert.equal(review.delta.previousRound, 1);
-    // 早期「已修复」= 本轮未再发现：the suggestion was not re-found by the finished analysis.
-    assert.deepEqual(review.delta.resolved, [{ kind: 'suggestion', file: 'src/a.js', point: '旧建议' }]);
-    assert.deepEqual(review.delta.stillOpen, [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }]);
-    assert.equal(typeof review.delta.comparedAt, 'number');
-    // The preview is derived only: the persisted history entry stays empty.
-    assert.equal(review.roundHistory[0].delta, null);
+    assert.equal(review.delta.baselineRound, 1);
+    // 模型显式判定的「已修复」：旧建议本轮未再延续。
+    assert.deepEqual(review.delta.resolved, [
+      { index: 2, file: 'src/a.js', severity: 'suggest', point: '旧建议', line: 2, suggestion: '' },
+    ]);
+    // 仍未解决：上一轮意见 + 本轮的延续条目。
+    assert.equal(review.delta.stillOpen.length, 1);
+    assert.equal(review.delta.stillOpen[0].previous.point, '旧问题');
+    assert.equal(review.delta.stillOpen[0].current.point, '旧问题');
+    // 无未判定、无待分析：唯一文件已分析。
+    assert.deepEqual(review.delta.undetermined, []);
+    assert.deepEqual(review.delta.pending, []);
+    // 预览是派生的：轮次历史 entry 上没有 delta 字段。
+    assert.ok(!('delta' in review.roundHistory[0]));
+    assert.ok(!('delta' in review.roundHistory[1]));
   } finally {
     await plugin.dispose();
   }
 });
 
-test('a persisted round delta wins over the per-file preview', async () => {
-  const persisted = {
-    round: 2,
-    previousRound: 1,
-    resolved: [],
-    stillOpen: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }],
-    comparedAt: 1234,
-  };
+test('a baseline finding whose file was not re-analyzed stays pending', async () => {
+  const conclusion = { verdict: 'block', summary: '第一轮结论', blockers: [], suggestions: [], nextSteps: [] };
   const record = legacyReview({
     round: 2,
-    delta: persisted,
-    previousRound: { round: 1, headSha: 'abc123', conclusion: null, items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }] },
-    // The analysis re-finds the same point, but conclude's delta must be returned untouched.
-    explanations: [{
-      file: 'src/a.js',
-      status: 'done',
-      error: null,
-      explanation: { verdict: 'block', summary: '复现', issues: [{ severity: 'block', point: '旧问题', line: 1 }], suggestions: [] },
-      chat: [],
-      updatedAt: 150,
-    }],
-  });
-  const plugin = await setup({ reviews: { 1: record } });
-  try {
-    const review = await plugin.review();
-    assert.deepEqual(review.delta, persisted);
-    assert.equal(review.delta.preview, undefined);
-  } finally {
-    await plugin.dispose();
-  }
-});
-
-test('no preview delta without previous items or without finished analyses', async () => {
-  // previousRound: null, even though the one analysis is done.
-  const noPrevious = legacyReview({});
-  // previousRound exists, but the file has not been analysed yet: nothing may be
-  // reported as resolved while its analysis is still pending.
-  const notAnalyzed = legacyReview({
-    number: 2,
-    previousRound: { round: 1, headSha: 'abc123', conclusion: null, items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }] },
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 1, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0,
+        conclusions: [], feedback: null, publishedIds: [],
+      },
+    ],
     explanations: [{
       file: 'src/a.js',
       status: 'pending',
@@ -577,141 +591,159 @@ test('no preview delta without previous items or without finished analyses', asy
       updatedAt: 0,
     }],
   });
-  const plugin = await setup({ reviews: { 1: noPrevious, 2: notAnalyzed } });
+  const plugin = await setup({ reviews: { 1: record } });
   try {
-    assert.equal((await plugin.review(1)).delta, null);
-    assert.equal((await plugin.review(2)).delta, null);
+    const review = await plugin.review();
+    // 分析未覆盖：绝不判「已修复」。
+    assert.equal(review.delta.resolved.length, 0);
+    assert.equal(review.delta.pending.length, 1);
+    assert.equal(review.delta.pending[0].point, '旧问题');
   } finally {
     await plugin.dispose();
   }
 });
 
-test('an all-clean round with every analysis done shows every previous item as resolved', async () => {
+test('an all-clean round with every analysis done resolves every baseline finding', async () => {
   const files = [
     { path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
     { path: 'src/b.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
   ];
   const cleanExplanation = { verdict: 'pass', summary: '没有发现', issues: [], suggestions: [] };
+  const conclusion = { verdict: 'block', summary: '第一轮结论', blockers: [], suggestions: [], nextSteps: [] };
   const record = legacyReview({
     round: 2,
     conclusion: null,
     conclusionAt: 0,
     comment: null,
-    delta: null,
     files,
     published: [],
     publishedItems: [],
-    previousRound: {
-      round: 1,
-      headSha: 'abc123',
-      conclusion: null,
-      items: [
-        { kind: 'blocker', file: 'src/a.js', point: '旧问题' },
-        { kind: 'suggestion', file: 'src/b.js', point: '旧建议' },
-      ],
-    },
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 1, suggestion: '' },
+          { index: 2, file: 'src/b.js', severity: 'suggest', point: '旧建议', line: 2, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0,
+        conclusions: [], feedback: null, publishedIds: [],
+      },
+    ],
     explanations: [
-      { file: 'src/a.js', status: 'done', error: null, explanation: cleanExplanation, chat: [], updatedAt: 150 },
-      { file: 'src/b.js', status: 'done', error: null, explanation: cleanExplanation, chat: [], updatedAt: 150 },
+      { file: 'src/a.js', status: 'done', error: null, explanation: cleanExplanation, chat: [], updatedAt: 150, baselineVerdicts: [{ index: 1, status: 'fixed' }] },
+      { file: 'src/b.js', status: 'done', error: null, explanation: cleanExplanation, chat: [], updatedAt: 150, baselineVerdicts: [{ index: 2, status: 'fixed' }] },
     ],
   });
   const plugin = await setup({ reviews: { 1: record } });
   try {
     const review = await plugin.review();
-    // Zero findings plus full coverage is the honest「全部已修复」case.
-    assert.equal(review.delta.preview, true);
+    // 全覆盖且模型未延续任何基准条目：每条都是模型的显式「已修复」判定。
     assert.deepEqual(review.delta.resolved, [
-      { kind: 'blocker', file: 'src/a.js', point: '旧问题' },
-      { kind: 'suggestion', file: 'src/b.js', point: '旧建议' },
+      { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 1, suggestion: '' },
+      { index: 2, file: 'src/b.js', severity: 'suggest', point: '旧建议', line: 2, suggestion: '' },
     ]);
     assert.deepEqual(review.delta.stillOpen, []);
+    assert.deepEqual(review.delta.pending, []);
   } finally {
     await plugin.dispose();
   }
 });
 
-test('zero findings with an analysis still pending stays hidden', async () => {
+test('a re-analyzed file with no carry-over resolves its baseline finding explicitly', async () => {
+  const conclusion = { verdict: 'block', summary: '第一轮结论', blockers: [], suggestions: [], nextSteps: [] };
   const record = legacyReview({
     round: 2,
     conclusion: null,
     conclusionAt: 0,
     comment: null,
-    delta: null,
     files: [
       { path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
       { path: 'src/b.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
     ],
-    previousRound: {
-      round: 1,
-      headSha: 'abc123',
-      conclusion: null,
-      items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }],
-    },
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 1, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0,
+        conclusions: [], feedback: null, publishedIds: [],
+      },
+    ],
     explanations: [
-      // Only one of two files analysed, and it found nothing: not yet honest to report resolved.
-      { file: 'src/a.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: '没有发现', issues: [], suggestions: [] }, chat: [], updatedAt: 150 },
+      // a.js 已重新分析且模型未延续：显式「已修复」。b.js 未分析 → 基准条目（若在）保持待分析。
+      { file: 'src/a.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: '没有发现', issues: [], suggestions: [] }, chat: [], updatedAt: 150, baselineVerdicts: [{ index: 1, status: 'fixed' }] },
     ],
   });
   const plugin = await setup({ reviews: { 1: record } });
   try {
-    assert.equal((await plugin.review()).delta, null);
+    const review = await plugin.review();
+    // 已分析文件的基准条目由模型显式判定（本例未延续 → 已修复）；待分析的文件另有状态。
+    assert.equal(review.delta.resolved.length, 1);
+    assert.equal(review.delta.pending.length, 0);
   } finally {
     await plugin.dispose();
   }
 });
 
-test('a done entry without an explanation body never completes the preview coverage', async () => {
+test('a done entry without an explanation body keeps its baseline finding pending', async () => {
   // startAnalysisBatch treats `done` with a null explanation as an empty analysis and
-  // requeues it; the preview must count the same way, or a restored record whose bodies
-  // are still missing would be misjudged as fully analysed and claim「全部已修复」.
+  // requeues it; the comparison must treat it the same way — an empty body is not an
+  // analysis, so its baseline findings can never be judged「已修复」.
   const onlyFileDoneWithoutBody = legacyReview({
     round: 2,
     conclusion: null,
     conclusionAt: 0,
     comment: null,
-    delta: null,
     published: [],
     publishedItems: [],
-    previousRound: {
-      round: 1,
-      headSha: 'abc123',
-      conclusion: null,
-      items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }],
-    },
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion: { verdict: 'block', summary: 'c', blockers: [], suggestions: [], nextSteps: [] }, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 1, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0,
+        conclusions: [], feedback: null, publishedIds: [],
+      },
+    ],
     explanations: [
       { file: 'src/a.js', status: 'done', error: null, explanation: null, chat: [], updatedAt: 150 },
     ],
   });
-  const doneWithoutBodyPlusPending = legacyReview({
-    number: 2,
-    files: [
-      { path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
-      { path: 'src/b.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
-    ],
-    round: 2,
-    conclusion: null,
-    conclusionAt: 0,
-    comment: null,
-    delta: null,
-    published: [],
-    publishedItems: [],
-    previousRound: {
-      round: 1,
-      headSha: 'abc123',
-      conclusion: null,
-      items: [{ kind: 'blocker', file: 'src/a.js', point: '旧问题' }],
-    },
-    explanations: [
-      { file: 'src/a.js', status: 'done', error: null, explanation: null, chat: [], updatedAt: 150 },
-    ],
-  });
-  const plugin = await setup({ reviews: { 1: onlyFileDoneWithoutBody, 2: doneWithoutBodyPlusPending } });
+  const plugin = await setup({ reviews: { 1: onlyFileDoneWithoutBody } });
   try {
-    // The only file reports done with a null body: under done-only counting this single
-    // record already reaches full coverage and would resolve the previous item.
-    assert.equal((await plugin.review(1)).delta, null);
-    // The done-without-body file plus a not-yet-analysed file stays hidden too.
-    assert.equal((await plugin.review(2)).delta, null);
+    const review = await plugin.review();
+    // done 但无 explanation 体：不算已分析 → 基准条目保持待分析。
+    assert.equal(review.delta.resolved.length, 0);
+    assert.equal(review.delta.pending.length, 1);
+    assert.equal(review.delta.pending[0].point, '旧问题');
   } finally {
     await plugin.dispose();
   }
@@ -761,9 +793,10 @@ test('async /conclude: returns started, rejects duplicates with 409, appends a m
     assert.equal(review.conclusion.blockers[0].id, latest.conclusion.blockers[0].id);
     assert.equal(review.conclusion.blockers[1].file, '');
     assert.match(review.conclusion.blockers[1].point, /^（未定位：src\/ghost\.js）/);
-    // No previousRound yet → no delta.
+    // No baseline snapshot yet（第 1 轮明细未在结论时冻结过——旧缓存形态）→ 无对比。
     assert.equal(review.delta, null);
-    assert.equal(round.delta, null);
+    // 复审对比不挂结论阶段：轮次 entry 上没有 delta 字段。
+    assert.ok(!('delta' in round));
     // Top-level mirrors the newest version.
     assert.deepEqual(review.conclusion, latest.conclusion);
     assert.equal(review.conclusionAt, latest.createdAt);
@@ -922,7 +955,22 @@ test('publish selection: /comment/preview includeIds filters markdown, returns f
     suggestions: [{ id: 's-keep03', file: 'src/a.js', line: 30, point: '建议一' }],
     nextSteps: ['先修问题一'],
   });
-  const plugin = await setup({ llm: llmFromText(conclusionReply), fetch: fetchHandler });
+  const plugin = await setup({
+    llm: llmFromText(conclusionReply),
+    fetch: fetchHandler,
+    reviews: {
+      1: legacyReview({
+        explanations: [{
+          file: 'src/a.js',
+          status: 'done',
+          error: null,
+          explanation: { verdict: 'suggest', summary: '文件分析', issues: [{ severity: 'block', point: '会崩', suggestion: '加判空', line: 3 }] },
+          chat: [],
+          updatedAt: 150,
+        }],
+      }),
+    },
+  });
   try {
     await plugin.call('/pr-review-api/conclude', 'POST', { number: 1 });
     const review = await plugin.waitForConcluding();
@@ -946,6 +994,8 @@ test('publish selection: /comment/preview includeIds filters markdown, returns f
     assert.match(full.json.markdown, /<details>/);
     assert.match(full.json.markdown, /#### 逐文件审查发现/);
     assert.match(full.json.markdown, /#### 总体初筛风险/);
+    // 附录逐文件小节里，意见 bullet 与建议子行都出现（不只是节标题）：
+    assert.match(full.json.markdown, /\*\*src\/a\.js\*\*[\s\S]*- \[阻塞\] 会崩[\s\S]*- 建议：加判空/);
 
     // Selection keeps only the chosen ids (unknown ids ignored), items list stays full.
     const selected = await plugin.call('/pr-review-api/comment/preview', 'POST', {
@@ -1128,6 +1178,120 @@ test('autoReconclude regenerates in the background after the report is edited', 
   }
 });
 
+test('a file chat applies findingOps to the merged findings list', async () => {
+  const plugin = await setup({
+    llm: llmFromText(JSON.stringify({
+      answer: '好',
+      findingOps: [
+        { op: 'update', index: 2, point: '改写后的第二条', suggestion: '新修法' },
+        { op: 'remove', index: 1 },
+        { op: 'add', point: '新增意见', severity: 'block', line: 9 },
+      ],
+    })),
+    reviews: {
+      1: legacyReview({
+        explanations: [{
+          file: 'src/a.js',
+          status: 'done',
+          error: null,
+          explanation: {
+            verdict: 'suggest',
+            summary: '文件分析',
+            issues: [
+              { severity: 'block', point: '第一条', suggestion: '修法一', line: 1 },
+              { severity: 'suggest', point: '第二条', suggestion: '', line: 2 },
+            ],
+          },
+          chat: [],
+          updatedAt: 150,
+        }],
+      }),
+    },
+  });
+  try {
+    const chat = await plugin.call('/pr-review-api/chat', 'POST', { number: 1, message: '第二条不对', path: 'src/a.js' });
+    assert.equal(chat.status, 200);
+    assert.equal(chat.json.applied.length, 3);
+    const review = await plugin.review();
+    const entry = review.explanations.find((item) => item.file === 'src/a.js');
+    assert.deepEqual(entry.explanation.issues, [
+      { severity: 'suggest', point: '改写后的第二条', suggestion: '新修法', line: 2 },
+      { severity: 'block', point: '新增意见', suggestion: '', line: 9 },
+    ]);
+    assert.ok(!('suggestions' in entry.explanation));
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a file chat with legacy suggestionOps still rewrites findings', async () => {
+  const plugin = await setup({
+    llm: llmFromText(JSON.stringify({
+      answer: '好',
+      suggestionOps: [{ op: 'update', index: 1, text: '旧写法改写' }],
+    })),
+    reviews: {
+      1: legacyReview({
+        explanations: [{
+          file: 'src/a.js',
+          status: 'done',
+          error: null,
+          explanation: {
+            verdict: 'suggest',
+            summary: '文件分析',
+            issues: [
+              { severity: 'block', point: '第一条', suggestion: '修法一', line: 1 },
+              { severity: 'suggest', point: '第二条', suggestion: '', line: 2 },
+            ],
+          },
+          chat: [],
+          updatedAt: 150,
+        }],
+      }),
+    },
+  });
+  try {
+    const chat = await plugin.call('/pr-review-api/chat', 'POST', { number: 1, message: '第一条不对', path: 'src/a.js' });
+    assert.equal(chat.status, 200);
+    assert.equal(chat.json.applied.length, 1);
+    const review = await plugin.review();
+    const entry = review.explanations.find((item) => item.file === 'src/a.js');
+    assert.deepEqual(entry.explanation.issues[0], { severity: 'block', point: '旧写法改写', suggestion: '修法一', line: 1 });
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a file chat edits the merged list review_update_analysis wrote and leaves no legacy key', async () => {
+  const plugin = await setup({
+    llm: llmFromText(JSON.stringify({
+      answer: '好',
+      findingOps: [{ op: 'update', index: 1, suggestion: '新修法' }],
+    })),
+  });
+  try {
+    // review_update_analysis 只写合并形状（issues[].suggestion）；随后的文件对话在同一个
+    // 列表上按 1 起始的编号改写，写回仍不得出现 legacy suggestions 键。
+    await plugin.runTool('review_update_analysis', {
+      path: 'src/a.js',
+      revision: 0,
+      summary: '工具改写',
+      issues: [{ point: '人写的问题', suggestion: '', line: 3, severity: 'block' }],
+    });
+    const chat = await plugin.call('/pr-review-api/chat', 'POST', { number: 1, message: '第二条补个修法', path: 'src/a.js' });
+    assert.equal(chat.status, 200);
+    assert.equal(chat.json.applied.length, 1);
+    const review = await plugin.review();
+    const entry = review.explanations.find((item) => item.file === 'src/a.js');
+    assert.ok(!('suggestions' in entry.explanation));
+    assert.deepEqual(entry.explanation.issues, [
+      { severity: 'block', point: '人写的问题', suggestion: '新修法', line: 3 },
+    ]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 test('a failed review is retried in the same round, never as a new round', async () => {
   // The poll sees the same head sha: retrying must not bump `round` or grow the history.
   const fetchWithSameHead = async (url) => {
@@ -1291,10 +1455,12 @@ test('review_get and review_list_files read the loaded review', async () => {
     assert.match(summary, /PR #1/);
     assert.match(summary, /第 1 轮/);
     assert.match(summary, /已分析 1\/1/);
+    assert.match(summary, /逐文件审查意见 1 条/);
 
     const files = await plugin.runTool('review_list_files');
     assert.match(files, /src\/a\.js/);
-    assert.match(files, /已分析/);
+    assert.match(files, /已分析（1 条意见）/);
+    assert.doesNotMatch(files, / \/ 建议/);
 
     const report = await plugin.runTool('review_get_report');
     assert.match(report, /初步报告/);
@@ -1303,6 +1469,39 @@ test('review_get and review_list_files read the loaded review', async () => {
     const analysis = await plugin.runTool('review_get_analysis', { path: 'src/a.js' });
     assert.match(analysis, /文件分析/);
     assert.match(analysis, /审查意见/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('review_get_analysis renders one findings section with inline suggestions', async () => {
+  const plugin = await setup({
+    reviews: {
+      1: legacyReview({
+        explanations: [{
+          file: 'src/a.js',
+          status: 'done',
+          error: null,
+          explanation: {
+            verdict: 'suggest',
+            summary: 's',
+            issues: [
+              { severity: 'block', point: '会崩', suggestion: '加判空', line: 3 },
+              { severity: 'suggest', point: '补测试', suggestion: '', line: 0 },
+            ],
+          },
+          chat: [],
+          updatedAt: 150,
+        }],
+      }),
+    },
+  });
+  try {
+    const analysis = await plugin.runTool('review_get_analysis', { path: 'src/a.js' });
+    assert.match(analysis, /审查意见：/);
+    assert.match(analysis, /- \[block\] 会崩（行 3） —— 建议：加判空/);
+    assert.match(analysis, /^- \[suggest\] 补测试$/m);
+    assert.doesNotMatch(analysis, /改进建议：/);
   } finally {
     await plugin.dispose();
   }
@@ -1365,7 +1564,26 @@ test('review_get_comments returns the platform comments oldest first', async () 
 });
 
 test('review_update_analysis writes with an optimistic lock and records audit', async () => {
-  const plugin = await setup();
+  const plugin = await setup({
+    reviews: {
+      1: legacyReview({
+        explanations: [{
+          file: 'src/a.js',
+          status: 'done',
+          error: null,
+          explanation: {
+            verdict: 'suggest',
+            summary: '文件分析',
+            logic: '读取后逐段处理',
+            issues: [{ severity: 'suggest', point: '注意', line: 1 }],
+            unverified: [{ point: '未能核实的说法', missing: '缺少证据' }],
+          },
+          chat: [],
+          updatedAt: 150,
+        }],
+      }),
+    },
+  });
   try {
     const summary = await plugin.runTool('review_get');
     assert.match(summary, /revision：0/);
@@ -1385,17 +1603,25 @@ test('review_update_analysis writes with an optimistic lock and records audit', 
       revision: 0,
       verdict: 'block',
       summary: '改写后的结论',
-      issues: [{ point: '人写的问题', line: 3, severity: 'block' }],
-      suggestions: [{ point: '改成分片读取', line: 5 }],
+      issues: [{ point: '人写的问题', suggestion: '人写的修法', line: 3, severity: 'block' }],
     });
     assert.match(written, /已更新分析/);
     assert.match(written, /revision 1/);
-    assert.match(written, /意见 1 条 \/ 建议 1 条/);
+    assert.match(written, /意见 1 条/);
+    assert.doesNotMatch(written, / \/ 建议/);
 
     const stored = await plugin.review();
     assert.equal(stored.revision, 1);
-    assert.equal(stored.explanations[0].explanation.summary, '改写后的结论');
-    assert.equal(stored.explanations[0].explanation.issues[0].point, '人写的问题');
+    const explanation = stored.explanations[0].explanation;
+    assert.equal(explanation.summary, '改写后的结论');
+    assert.equal(explanation.logic, '读取后逐段处理', 'fields the call omits survive the rewrite');
+    assert.deepEqual(explanation.issues, [
+      { severity: 'block', point: '人写的问题', suggestion: '人写的修法', line: 3 },
+    ]);
+    assert.ok(!('suggestions' in explanation), 'no legacy suggestions key is written');
+    // A human edit used to drop the unverified list; the write goes through
+    // normalizeExplanation now and keeps it.
+    assert.deepEqual(explanation.unverified, [{ point: '未能核实的说法', missing: '缺少证据' }]);
     assert.equal(stored.audit.length, 1);
     assert.equal(stored.audit[0].tool, 'review_update_analysis');
     assert.match(stored.audit[0].summary, /src\/a\.js/);
@@ -1506,6 +1732,8 @@ test('/focus makes the snapshot follow the panel', async () => {
       pane: 'diff',
     });
     assert.match(plugin.promptContext('session-a'), /当前查看：文件 src\/a\.js/);
+    assert.match(plugin.promptContext('session-a'), /已分析（1 条意见）/);
+    assert.doesNotMatch(plugin.promptContext('session-a'), / \/ 建议/);
   } finally {
     await plugin.dispose();
   }
@@ -1532,7 +1760,26 @@ test('a rejected runtime-context registration leaves the plugin usable', async (
 });
 
 test('review_update_analysis writes with an optimistic lock and records audit', async () => {
-  const plugin = await setup();
+  const plugin = await setup({
+    reviews: {
+      1: legacyReview({
+        explanations: [{
+          file: 'src/a.js',
+          status: 'done',
+          error: null,
+          explanation: {
+            verdict: 'suggest',
+            summary: '文件分析',
+            logic: '读取后逐段处理',
+            issues: [{ severity: 'suggest', point: '注意', line: 1 }],
+            unverified: [{ point: '未能核实的说法', missing: '缺少证据' }],
+          },
+          chat: [],
+          updatedAt: 150,
+        }],
+      }),
+    },
+  });
   try {
     const summary = await plugin.runTool('review_get');
     assert.match(summary, /revision：0/);
@@ -1552,17 +1799,25 @@ test('review_update_analysis writes with an optimistic lock and records audit', 
       revision: 0,
       verdict: 'block',
       summary: '改写后的结论',
-      issues: [{ point: '人写的问题', line: 3, severity: 'block' }],
-      suggestions: [{ point: '改成分片读取', line: 5 }],
+      issues: [{ point: '人写的问题', suggestion: '人写的修法', line: 3, severity: 'block' }],
     });
     assert.match(written, /已更新分析/);
     assert.match(written, /revision 1/);
-    assert.match(written, /意见 1 条 \/ 建议 1 条/);
+    assert.match(written, /意见 1 条/);
+    assert.doesNotMatch(written, / \/ 建议/);
 
     const stored = await plugin.review();
     assert.equal(stored.revision, 1);
-    assert.equal(stored.explanations[0].explanation.summary, '改写后的结论');
-    assert.equal(stored.explanations[0].explanation.issues[0].point, '人写的问题');
+    const explanation = stored.explanations[0].explanation;
+    assert.equal(explanation.summary, '改写后的结论');
+    assert.equal(explanation.logic, '读取后逐段处理', 'fields the call omits survive the rewrite');
+    assert.deepEqual(explanation.issues, [
+      { severity: 'block', point: '人写的问题', suggestion: '人写的修法', line: 3 },
+    ]);
+    assert.ok(!('suggestions' in explanation), 'no legacy suggestions key is written');
+    // A human edit used to drop the unverified list; the write goes through
+    // normalizeExplanation now and keeps it.
+    assert.deepEqual(explanation.unverified, [{ point: '未能核实的说法', missing: '缺少证据' }]);
     assert.equal(stored.audit.length, 1);
     assert.equal(stored.audit[0].tool, 'review_update_analysis');
     assert.match(stored.audit[0].summary, /src\/a\.js/);
@@ -1599,6 +1854,35 @@ test('review_update_report rewrites the report and marks the conclusion stale', 
     const summary = await plugin.runTool('review_get');
     assert.match(summary, /revision：1/);
     assert.match(summary, /结论之后有新的报告/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('review_update_analysis normalizes the written explanation and drops the legacy suggestions argument', async () => {
+  const plugin = await setup();
+  try {
+    // `suggestions` 参数已从 schema 移除：宿主不读它，旧调用方式的内容不会被当成独立
+    // 建议保留——修法必须通过 issues[].suggestion 表达。写入统一经 normalizeExplanation
+    // 归一为四键 issues，且不再产出 legacy suggestions 键。
+    const written = await plugin.runTool('review_update_analysis', {
+      path: 'src/a.js',
+      revision: 0,
+      verdict: 'block',
+      summary: '旧参数改写',
+      issues: [{ point: '阻塞意见', suggestion: '修法', line: 1, severity: 'block' }],
+      suggestions: [{ point: '旧参数建议', line: 7 }],
+    });
+    assert.match(written, /意见 1 条/);
+    assert.doesNotMatch(written, / \/ 建议/);
+
+    const stored = await plugin.review();
+    const explanation = stored.explanations[0].explanation;
+    assert.deepEqual(explanation.issues, [
+      { severity: 'block', point: '阻塞意见', suggestion: '修法', line: 1 },
+    ]);
+    assert.ok(!('suggestions' in explanation));
+    assert.ok(!JSON.stringify(explanation).includes('旧参数建议'), 'the dropped argument must not survive anywhere');
   } finally {
     await plugin.dispose();
   }
@@ -1819,8 +2103,17 @@ test('review_update_overview rewrites the whole overview in one call and clears 
     });
     assert.match(written, /已更新总览/);
     assert.match(written, /初筛风险 0 条/);
-    assert.match(written, /逐文件意见 0 条 \/ 建议 0 条/);
+    assert.match(written, /逐文件审查意见 0 条/);
     assert.match(written, /已清理/);
+    // 结论层的「修改建议 N 条」保留；逐文件层不再出现「/ 建议 N 条」计数。
+    assert.match(written, /修改建议 0 条/);
+    assert.doesNotMatch(written, / \/ 建议 \d+ 条/);
+
+    // Schema 收敛后弃用的 `suggestions` scope 不再由工具层承诺。
+    assert.deepEqual(
+      plugin.tools.get('review_update_overview').parameters.properties.clearFindings.enum,
+      ['none', 'suggest', 'all'],
+    );
 
     const stored = await plugin.review();
     assert.equal(stored.revision, 1);
@@ -1831,7 +2124,7 @@ test('review_update_overview rewrites the whole overview in one call and clears 
     assert.equal(stored.conclusion.suggestions.length, 0);
     assert.equal(stored.conclusion.nextSteps.length, 0);
     assert.equal(stored.explanations[0].explanation.issues.length, 0);
-    assert.equal(stored.explanations[0].explanation.suggestions.length, 0);
+    assert.equal(stored.explanations[0].explanation.suggestions, undefined);
     const round = stored.roundHistory[stored.roundHistory.length - 1];
     assert.equal(round.conclusions[round.conclusions.length - 1].source, 'human');
     assert.equal(stored.audit[0].tool, 'review_update_overview');
@@ -1853,26 +2146,114 @@ test('review_update_overview rewrites the whole overview in one call and clears 
 });
 
 test('review_update_overview clearFindings keeps block items for narrower scopes', async () => {
-  const suggestionsOnly = await setup({ reviews: { 1: overviewFixture() } });
-  try {
-    await suggestionsOnly.runTool('review_update_overview', { revision: 0, clearFindings: 'suggestions' });
-    const stored = await suggestionsOnly.review();
-    assert.equal(stored.explanations[0].explanation.suggestions.length, 0);
-    assert.equal(stored.explanations[0].explanation.issues.length, 2, 'narrow scope keeps every issue');
-    assert.deepEqual(stored.report.risks.map((item) => item.severity), ['block'], 'block risk survives');
-  } finally {
-    await suggestionsOnly.dispose();
-  }
+  // Merged-shape fixture: one block finding and one suggest finding, each carrying its own
+  // suggestion, plus one block and one suggest initial risk.
+  const mergedFixture = () => legacyReview({
+    report: {
+      verdict: 'suggest',
+      summary: '初筛报告',
+      risks: [
+        { severity: 'block', file: 'src/a.js', point: '阻塞级风险' },
+        { severity: 'suggest', file: 'src/a.js', point: '建议级风险' },
+      ],
+      order: [{ file: 'src/a.js', reason: '' }],
+      focus: {},
+    },
+    explanations: [{
+      file: 'src/a.js',
+      status: 'done',
+      error: null,
+      explanation: {
+        verdict: 'suggest',
+        summary: '文件分析',
+        issues: [
+          { severity: 'block', point: '阻塞', suggestion: '', line: 1 },
+          { severity: 'suggest', point: '改进', suggestion: '修法', line: 2 },
+        ],
+      },
+      chat: [],
+      updatedAt: 150,
+    }],
+    conclusion: {
+      verdict: 'suggest',
+      summary: '旧结论',
+      blockers: [],
+      suggestions: [],
+      nextSteps: ['旧下一步'],
+    },
+  });
 
-  const suggestOnly = await setup({ reviews: { 1: overviewFixture() } });
+  const clearWith = async (scope) => {
+    const plugin = await setup({ reviews: { 1: mergedFixture() } });
+    try {
+      await plugin.runTool('review_update_overview', { revision: 0, clearFindings: scope });
+      const stored = await plugin.review();
+      return {
+        issues: stored.explanations[0].explanation.issues,
+        risks: stored.report.risks.map((item) => item.severity),
+      };
+    } finally {
+      await plugin.dispose();
+    }
+  };
+
+  // `suggest` clears suggest-severity findings and risks; block items on both layers survive.
+  const suggestCleared = await clearWith('suggest');
+  assert.deepEqual(suggestCleared.issues, [{ severity: 'block', point: '阻塞', suggestion: '', line: 1 }]);
+  assert.deepEqual(suggestCleared.risks, ['block']);
+
+  // `all` clears every finding and every initial risk.
+  const allCleared = await clearWith('all');
+  assert.deepEqual(allCleared.issues, []);
+  assert.deepEqual(allCleared.risks, []);
+
+  // The tool schema narrowed with the merge: the deprecated `suggestions` scope is no longer
+  // promised at the tool layer (callers pass `suggest`, asserted against the enum above in
+  // the overview-rewrite test). The harness executes tools without schema validation though,
+  // so this call still reaches the function-level alias shim — pinned here: the alias must
+  // keep behaving exactly like `suggest` (clear suggest findings/risks, keep block).
+  const aliasCleared = await clearWith('suggestions');
+  assert.deepEqual(aliasCleared.issues, [{ severity: 'block', point: '阻塞', suggestion: '', line: 1 }]);
+  assert.deepEqual(aliasCleared.risks, ['block']);
+
+  // `none` and unknown scopes clear nothing (defense against typo'd callers).
+  for (const scope of ['none', 'whatever']) {
+    const untouched = await clearWith(scope);
+    assert.deepEqual(untouched.issues, [
+      { severity: 'block', point: '阻塞', suggestion: '', line: 1 },
+      { severity: 'suggest', point: '改进', suggestion: '修法', line: 2 },
+    ]);
+    assert.deepEqual(untouched.risks, ['block', 'suggest']);
+  }
+});
+
+test('clearFindings clears tool-written findings and the legacy suggestions argument stays dropped', async () => {
+  const plugin = await setup();
   try {
-    await suggestOnly.runTool('review_update_overview', { revision: 0, clearFindings: 'suggest' });
-    const stored = await suggestOnly.review();
-    assert.equal(stored.explanations[0].explanation.issues.length, 1);
-    assert.equal(stored.explanations[0].explanation.issues[0].severity, 'block');
-    assert.deepEqual(stored.report.risks.map((item) => item.severity), ['block']);
+    // Task 6 起 review_update_analysis 只写合并形状：旧 `suggestions` 参数被整体忽略，
+    // 「模型后来补的建议」不会进列表，也不会有 legacy 键落库。
+    await plugin.runTool('review_update_analysis', {
+      path: 'src/a.js',
+      revision: 0,
+      verdict: 'block',
+      summary: '人工改写',
+      issues: [{ point: '阻塞意见', suggestion: '修法', line: 1, severity: 'block' }],
+      suggestions: [{ point: '模型后来补的建议', line: 2 }],
+    });
+
+    // 清空必须清得干净且计数如实：只有 1 条意见可清（旧参数建议从未进列表）。
+    const written = await plugin.runTool('review_update_overview', { revision: 1, clearFindings: 'all' });
+    assert.match(written, /已清理：意见 1 条、风险 1 条/);
+
+    const stored = await plugin.review();
+    const explanation = stored.explanations[0].explanation;
+    assert.deepEqual(explanation.issues, []);
+    assert.equal(explanation.suggestions, undefined);
+    const analysis = await plugin.runTool('review_get_analysis', { path: 'src/a.js' });
+    assert.doesNotMatch(analysis, /模型后来补的建议/);
+    assert.doesNotMatch(analysis, /审查意见：/);
   } finally {
-    await suggestOnly.dispose();
+    await plugin.dispose();
   }
 });
 
@@ -2622,6 +3003,102 @@ test('a restored entry without an explanation is analyzed again', async () => {
   }
 });
 
+test('restored legacy cache folds suggestions into suggest findings', async () => {
+  const restored = legacyReview({
+    files: [{ path: 'src/a.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 }],
+    explanations: [{
+      file: 'src/a.js',
+      status: 'done',
+      error: null,
+      // The legacy shape: a separate `suggestions` list next to `issues`.
+      explanation: {
+        verdict: 'block',
+        summary: '旧分析',
+        issues: [{ severity: 'block', point: '旧问题', line: 1 }],
+        suggestions: [{ text: '旧的独立建议', line: 4 }],
+        unverified: [],
+      },
+      chat: [],
+      updatedAt: 150,
+    }],
+  });
+  const plugin = await setup({ fetch: batchFetch, reviews: { 1: restored } });
+  try {
+    const review = await plugin.review();
+    const entry = review.explanations.find((item) => item.file === 'src/a.js');
+    assert.deepEqual(entry.explanation.issues, [
+      { severity: 'block', point: '旧问题', suggestion: '', line: 1 },
+      { severity: 'suggest', point: '旧的独立建议', suggestion: '', line: 4 },
+    ]);
+    assert.equal(entry.explanation.suggestions, undefined);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a restored legacy record persists the merged shape with no suggestions key', async () => {
+  const legacy = legacyReview({
+    conclusion: null,
+    explanations: [{
+      file: 'src/a.js',
+      status: 'done',
+      error: null,
+      // The legacy shape: `issues` next to a separate string `suggestions` list.
+      explanation: {
+        verdict: 'block',
+        summary: '旧分析',
+        issues: [{ severity: 'block', point: '旧问题', line: 3 }],
+        suggestions: ['补个测试'],
+      },
+      chat: [],
+      updatedAt: 150,
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: legacy } });
+  let payload;
+  try {
+    // Any write schedules a save; review_update_report leaves the explanations untouched,
+    // so the persisted bytes reflect exactly what restore normalized into memory.
+    await plugin.runTool('review_update_report', { revision: 0, summary: '初筛报告' });
+    const cacheFile = path.join(plugin.home, '.dsh', 'pr-review', CACHE_SLUG);
+    // Poll for the saved content instead of sleeping past the 800ms debounce: the cache
+    // file already exists (the legacy pre-save bytes), so only the merged shape proves
+    // the rewrite landed, however slow the flush is.
+    const deadline = Date.now() + 5000;
+    payload = null;
+    while (payload === null && Date.now() < deadline) {
+      await delay(50);
+      try {
+        const parsed = JSON.parse(await readFile(cacheFile, 'utf8'));
+        const explanation = parsed.reviews?.['1']?.explanations?.[0]?.explanation;
+        if (explanation !== undefined && !JSON.stringify(parsed).includes('"suggestions"')) payload = parsed;
+      } catch {
+        // Save not landed yet (or mid-rename); keep polling.
+      }
+    }
+    assert.notEqual(payload, null, 'the debounced save rewrote the cache with the merged shape');
+    const saved = payload.reviews['1'].explanations[0].explanation;
+    assert.deepEqual(saved.issues, [
+      { severity: 'block', point: '旧问题', suggestion: '', line: 3 },
+      { severity: 'suggest', point: '补个测试', suggestion: '', line: 0 },
+    ]);
+    assert.equal(JSON.stringify(payload).includes('"suggestions"'), false, 'no suggestions key survives on disk');
+  } finally {
+    await plugin.dispose();
+  }
+
+  // Re-restoring the round-tripped cache yields the identical merged shape (no oscillation).
+  const second = await setup({ cacheText: JSON.stringify(payload) });
+  try {
+    const review = await second.review();
+    const entry = review.explanations.find((item) => item.file === 'src/a.js');
+    assert.deepEqual(entry.explanation.issues, payload.reviews['1'].explanations[0].explanation.issues);
+    assert.equal(entry.explanation.suggestions, undefined);
+  } finally {
+    await second.dispose();
+  }
+});
+
 test('failed batches release their analysis slots for later batches', async () => {
   const llm = (options) => {
     const prompt = JSON.stringify(options.messages);
@@ -2838,11 +3315,19 @@ test('a concern becomes a finding only after the verifier scores it against evid
     summary: '讲解',
     logic: '逻辑',
     changes: '改动',
-    concerns: [{ severity: 'block', point: '空指针风险', line: 2 }],
-    evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
-    suggestions: [],
+    concerns: [
+      { severity: 'block', point: '空指针风险', suggestion: '先判空再取值', line: 2 },
+      { severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 },
+    ],
+    evidenceNeeds: [
+      { concern: 1, kind: 'file', path: 'src/a.js' },
+      { concern: 2, kind: 'file', path: 'src/a.js' },
+    ],
   }, {
-    results: [{ index: 1, confidence: 90, severity: 'block', point: '空指针风险', line: 2 }],
+    results: [
+      { index: 1, confidence: 90, severity: 'block', point: '空指针风险', line: 2, suggestion: '取值前加空值检查' },
+      { index: 2, confidence: 85, point: '命名不清', line: 4 },
+    ],
     extraIssues: [],
   });
   const recording = (options) => {
@@ -2853,7 +3338,11 @@ test('a concern becomes a finding only after the verifier scores it against evid
   try {
     const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
     assert.equal(result.status, 200);
-    assert.deepEqual(result.json.explanation.issues, [{ severity: 'block', point: '空指针风险', line: 2 }]);
+    // The verifier's suggestion rewrite wins; a result without one falls back to the candidate's.
+    assert.deepEqual(result.json.explanation.issues, [
+      { severity: 'block', point: '空指针风险', suggestion: '取值前加空值检查', line: 2 },
+      { severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 },
+    ]);
     assert.deepEqual(result.json.explanation.unverified, []);
     assert.equal(prompts.length, 2, 'triage + verifier');
     assert.match(prompts[1], /## 候选问题/);
@@ -2902,9 +3391,11 @@ test('evidenceVerify off keeps the single-pass contract', async () => {
           summary: '讲解',
           logic: '逻辑',
           changes: '改动',
-          concerns: [{ severity: 'suggest', point: '命名不清', line: 4 }],
+          concerns: [{ severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 }],
           evidenceNeeds: [],
-          suggestions: [],
+          // A model that has not caught up with the merged prompt still answers with the
+          // legacy suggestions list; it folds into the tail of issues.
+          suggestions: ['补一条测试'],
         }),
       };
       yield { type: 'finish', reason: { kind: 'stop' } };
@@ -2913,7 +3404,10 @@ test('evidenceVerify off keeps the single-pass contract', async () => {
   try {
     const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
     assert.equal(calls, 1, 'no verifier call when evidenceVerify is off');
-    assert.deepEqual(result.json.explanation.issues, [{ severity: 'suggest', point: '命名不清', line: 4 }]);
+    assert.deepEqual(result.json.explanation.issues, [
+      { severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 },
+      { severity: 'suggest', point: '补一条测试', suggestion: '', line: 0 },
+    ]);
     assert.deepEqual(result.json.explanation.unverified, []);
   } finally {
     await plugin.dispose();
@@ -3098,20 +3592,22 @@ test('a suggestion the diff already implements is dropped by the verifier', asyn
       summary: '讲解',
       logic: '逻辑',
       changes: '改动',
-      concerns: [],
-      evidenceNeeds: [],
-      suggestions: ['补齐三行配置', '补一条测试'],
+      // Pure-improvement noise now travels as a suggest-level concern carrying its own
+      // suggestion; the verifier's confidence scoring is what filters it out.
+      concerns: [{ severity: 'suggest', point: '补齐三行配置', suggestion: '在配置里补齐三行', line: 3 }],
+      evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
     }, {
-      results: [],
+      results: [{ index: 1, confidence: 10, point: '补齐三行配置' }],
       extraIssues: [],
-      suggestionResults: [{ index: 1, keep: false, reason: 'diff 已包含' }, { index: 2, keep: true }],
     }),
   });
   try {
     const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
     assert.equal(result.status, 200);
-    assert.deepEqual(result.json.explanation.suggestions, ['补一条测试']);
     assert.deepEqual(result.json.explanation.issues, []);
+    assert.deepEqual(result.json.explanation.unverified, []);
+    // 空意见即通过：复审把模型的候选全数否决后，一个 suggest 判定失去了依据。
+    assert.equal(result.json.explanation.verdict, 'pass');
   } finally {
     await plugin.dispose();
   }
@@ -3141,6 +3637,35 @@ test('a confirmed blocker raises the file verdict', async () => {
   }
 });
 
+test('verdict reconciliation: suggest findings respect the model, a bare block degrades', async () => {
+  const build = (modelVerdict, resultSeverity) => llmTriageThenVerify({
+    verdict: modelVerdict,
+    summary: '讲解',
+    logic: '逻辑',
+    changes: '改动',
+    concerns: [{ severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 }],
+    evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
+  }, {
+    results: [{ index: 1, confidence: 90, severity: resultSeverity, point: '命名不清', line: 4 }],
+    extraIssues: [],
+  });
+  const run = async (llm) => {
+    const plugin = await setup({ fetch: batchFetch, llm });
+    try {
+      const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+      return result.json.explanation.verdict;
+    } finally {
+      await plugin.dispose();
+    }
+  };
+  // 纯优化/非阻塞意见不阻碍合并：模型的 pass 保留（Approve-with-comments 语义）。
+  assert.equal(await run(build('pass', 'suggest')), 'pass');
+  // 模型的 suggest 保留。
+  assert.equal(await run(build('suggest', 'suggest')), 'suggest');
+  // 裸 block（无确认的阻断项却喊阻塞）降为 suggest。
+  assert.equal(await run(build('block', 'suggest')), 'suggest');
+});
+
 test('a verifier reply with no results leaves every candidate visible', async () => {
   const plugin = await setup({
     fetch: batchFetch,
@@ -3160,6 +3685,667 @@ test('a verifier reply with no results leaves every candidate visible', async ()
     assert.deepEqual(result.json.explanation.unverified, [
       { point: '空指针风险', missing: '复审未返回该候选的判定' },
     ]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('concluding a round freezes its findings snapshot as the next baseline', async () => {
+  // legacyReview 预置第 1 轮：一个文件的 done 分析（issues: 注意/1）+ 旧结论。
+  // 生成结论时，该轮明细冻结为下一轮的对比基准（全局编号，经 findingsOf 归一）。
+  const plugin = await setup({
+    fetch: batchFetch,
+    evidenceVerify: false,
+    llm: llmFromText(JSON.stringify({ verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] })),
+  });
+  try {
+    await plugin.call('/pr-review-api/conclude', 'POST', { number: 1 });
+    const reviewed = await plugin.waitForConcluding();
+    const entry = reviewed.roundHistory[reviewed.roundHistory.length - 1];
+    assert.deepEqual(entry.findings, [
+      { index: 1, file: 'src/a.js', severity: 'suggest', point: '注意', line: 1, suggestion: '' },
+    ]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the frozen baseline survives a cache round-trip', async () => {
+  // 预置带 findings 快照的轮次历史：restore 后 sanitizeRoundEntry 必须放行该字段。
+  const conclusion = { verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] };
+  const roundHistory = [{
+    round: 1,
+    headSha: 'abc123',
+    startedAt: 100,
+    finishedAt: 200,
+    conclusions: [{ version: 1, createdAt: 300, source: 'model', conclusion, coverage: null }],
+    delta: null,
+    feedback: null,
+    publishedIds: [],
+    findings: [{ index: 1, file: 'src/a.js', severity: 'suggest', point: '注意', line: 1, suggestion: '' }],
+  }];
+  const plugin = await setup({
+    reviews: { 1: legacyReview({ roundHistory, conclusion, conclusionAt: 300 }) },
+  });
+  try {
+    const reviewed = await plugin.review(1);
+    const entry = reviewed.roundHistory[reviewed.roundHistory.length - 1];
+    assert.deepEqual(entry.findings, [
+      { index: 1, file: 'src/a.js', severity: 'suggest', point: '注意', line: 1, suggestion: '' },
+    ]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a per-file analysis re-judges the baseline findings one by one', async () => {
+  const roundOneConclusion = { verdict: 'block', summary: '结论', blockers: [], suggestions: [], nextSteps: [] };
+  const baselineRows = [
+    { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题一', line: 2, suggestion: '修一下' },
+    { index: 2, file: 'src/a.js', severity: 'suggest', point: '旧问题二', line: 4, suggestion: '' },
+    { index: 3, file: 'src/a.js', severity: 'suggest', point: '未判定条目', line: 6, suggestion: '' },
+  ];
+  const roundOneHistory = [{
+    round: 1,
+    headSha: 'abc123',
+    startedAt: 100,
+    finishedAt: 200,
+    conclusions: [{ version: 1, createdAt: 300, source: 'model', conclusion: roundOneConclusion, coverage: null }],
+    delta: null,
+    feedback: null,
+    publishedIds: [],
+    findings: baselineRows,
+  }];
+  const reportReply = JSON.stringify({
+    verdict: 'suggest', summary: '第 2 轮报告',
+    risks: [], order: [{ file: 'src/a.js', reason: '' }], focus: {},
+  });
+  const explainReply = JSON.stringify({
+    verdict: 'pass',
+    summary: '重新分析',
+    logic: '', changes: '',
+    // index 1 判 fixed（本轮不再出现）；index 2 判 still-open 并重写表述；index 3 模型漏判
+    previousVerdicts: [
+      { index: 1, status: 'fixed' },
+      { index: 2, status: 'still-open', point: '旧问题二（仍在）', line: 5 },
+    ],
+    concerns: [{ severity: 'suggest', point: '新发现', suggestion: '修法', line: 9 }],
+  });
+  const recordedPrompts = [];
+  const plugin = await setup({
+    reviews: { 1: legacyReview({ roundHistory: roundOneHistory, conclusion: roundOneConclusion, conclusionAt: 300 }) },
+    fetch: roundReviewFetch,
+    evidenceVerify: false,
+    llm: (streamOptions) => {
+      const promptText = JSON.stringify(streamOptions.messages);
+      recordedPrompts.push(promptText);
+      let reply;
+      if (promptText.includes('基准轮审查意见')) reply = explainReply;
+      else if (promptText.includes('## 变更文件清单')) reply = reportReply;
+      else reply = JSON.stringify({ verdict: 'pass', summary: '第 2 轮报告兜底', blockers: [], suggestions: [], nextSteps: [] });
+      return llmFromText(reply)(streamOptions);
+    },
+  });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    // 延续条目在前（按基准序号序）、新发现在后；漏判条目保守落「仍未解决」（unjudged）而非消失。
+    assert.deepEqual(result.json.explanation.issues, [
+      { severity: 'suggest', point: '旧问题二（仍在）', suggestion: '', line: 5, roundItem: 2 },
+      { severity: 'suggest', point: '未判定条目', suggestion: '', line: 6, roundItem: 3, unjudged: true },
+      { severity: 'suggest', point: '新发现', suggestion: '修法', line: 9 },
+    ]);
+    // prompt 携带基准快照（全局编号 + 强制逐条要求）。
+    const explainPrompt = recordedPrompts.find((text) => text.includes('基准轮审查意见'));
+    assert.ok(explainPrompt !== undefined, 'explain prompt carries the baseline section');
+    assert.match(explainPrompt, /1\. \[block\] src\/a\.js 旧问题一（行 2）/);
+    assert.match(explainPrompt, /previousVerdicts 必须恰好包含 3 条判定/);
+    // index 1 被判 fixed：不再出现在本轮意见里。
+    assert.ok(!result.json.explanation.issues.some((issue) => issue.roundItem === 1));
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a carry-over finding skips verification while new concerns go through it', async () => {
+  const carryConclusion = { verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] };
+  const carryBaseline = [
+    { index: 1, file: 'src/a.js', severity: 'suggest', point: '上一轮意见', line: 3, suggestion: '' },
+  ];
+  const carryHistory = [{
+    round: 1,
+    headSha: 'abc123',
+    startedAt: 100,
+    finishedAt: 200,
+    conclusions: [{ version: 1, createdAt: 300, source: 'model', conclusion: carryConclusion, coverage: null }],
+    delta: null,
+    feedback: null,
+    publishedIds: [],
+    findings: carryBaseline,
+  }];
+  const verifierPrompts = [];
+  const plugin = await setup({
+    reviews: { 1: legacyReview({ roundHistory: carryHistory, conclusion: carryConclusion, conclusionAt: 300 }) },
+    fetch: roundReviewFetch,
+    llm: (streamOptions) => {
+      const promptText = JSON.stringify(streamOptions.messages);
+      let reply;
+      if (promptText.includes('基准轮审查意见')) {
+        reply = JSON.stringify({
+          verdict: 'suggest',
+          summary: '重新分析',
+          logic: '', changes: '',
+          previousVerdicts: [{ index: 1, status: 'still-open' }],
+          concerns: [{ severity: 'suggest', point: '新发现', suggestion: '修法', line: 9 }],
+        });
+      } else if (promptText.includes('## 候选问题')) {
+        verifierPrompts.push(promptText);
+        reply = JSON.stringify({
+          results: [{ index: 1, confidence: 90, point: '新发现', line: 9 }],
+          extraIssues: [],
+        });
+      } else if (promptText.includes('## 变更文件清单')) {
+        reply = JSON.stringify({ verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} });
+      } else {
+        reply = JSON.stringify({ verdict: 'pass', summary: '结论兜底', blockers: [], suggestions: [], nextSteps: [] });
+      }
+      return llmFromText(reply)(streamOptions);
+    },
+  });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    await plugin.waitFor(1, (current) => current.round === 2 && current.status === 'done');
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    // 延续条目在前（未经复审），新发现在后（经复审确认）。
+    assert.deepEqual(result.json.explanation.issues, [
+      { severity: 'suggest', point: '上一轮意见', suggestion: '', line: 3, roundItem: 1 },
+      { severity: 'suggest', point: '新发现', suggestion: '修法', line: 9 },
+    ]);
+    // verifier 只见过新发现候选：延续条目不进复审。
+    assert.equal(verifierPrompts.length, 1);
+    assert.ok(!verifierPrompts[0].includes('上一轮意见'));
+    assert.ok(verifierPrompts[0].includes('新发现'));
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+
+test('the owning file newest analysis outranks a stale cross-file claim', async () => {
+  // 真实事故复现（PR #32 第 7 轮）：llm.js 的分析先跑（旧代码时刻）跨文件认领了 tests
+  // 文件的基准条目判 still-open；tests 文件自己的分析后跑（修复后）判 fixed 且不带
+  // roundItem。归属文件的最新显式判定必须胜出——不能被过时的认领拖住。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    files: [
+      { path: 'src/impl.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+      { path: 'src/tests.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+    ],
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/tests.js', severity: 'block', point: '挤成一行', line: 392, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0,
+        conclusions: [], feedback: null, publishedIds: [],
+      },
+    ],
+    explanations: [
+      {
+        file: 'src/impl.js',
+        status: 'done',
+        error: null,
+        // 先跑（旧代码时刻）：跨文件认领 tests 的基准条目，判仍存在。
+        explanation: {
+          verdict: 'suggest', summary: '先跑',
+          issues: [{ severity: 'block', point: 'tests 中 test 声明仍挤在一行', line: 0, roundItem: 1 }],
+          suggestions: [],
+        },
+        chat: [],
+        updatedAt: 100,
+        baselineVerdicts: [{ index: 1, status: 'still-open' }],
+      },
+      {
+        file: 'src/tests.js',
+        status: 'done',
+        error: null,
+        // 后跑（修复后）：归属文件自己的分析判 fixed（不输出 roundItem）。
+        explanation: { verdict: 'pass', summary: '后跑', issues: [], suggestions: [] },
+        chat: [],
+        updatedAt: 200,
+        baselineVerdicts: [{ index: 1, status: 'fixed' }],
+      },
+    ],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const review = await plugin.review();
+    // 归属文件（tests）的最新分析是权威：显式 fixed → 已修复。
+    assert.deepEqual(review.delta.resolved, [
+      { index: 1, file: 'src/tests.js', severity: 'block', point: '挤成一行', line: 392, suggestion: '' },
+    ]);
+    assert.deepEqual(review.delta.stillOpen, []);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the analysis does not duplicate a baseline finding as a fresh concern', async () => {
+  // PR #32 第 7 轮：模型对同一问题既输出 previousVerdicts still-open（带更新表述），
+  // 又把同一段文字作为新 concern 写进 issues——落库后同文两条。延续条目优先，
+  // 完全同文（经 comparable 归一）的新发现丢弃。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '回退链仍可到满格', line: 264, suggestion: '' },
+        ],
+      },
+      { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+    explanations: [
+      {
+        file: 'src/a.js',
+        status: 'done',
+        error: null,
+        explanation: {
+          verdict: 'block',
+          summary: '复现',
+          issues: [
+            // 延续条目（still-open，表述与基准相同）
+            { severity: 'block', point: '回退链仍可到满格', line: 264, roundItem: 1 },
+            // 同一问题又被写成新发现（无 roundItem，文本相同）
+            { severity: 'block', point: '  回退链仍可到满格 ', line: 264 },
+            // 真正的新问题
+            { severity: 'suggest', point: '另一个新问题', line: 9 },
+          ],
+          suggestions: [],
+        },
+        chat: [],
+        updatedAt: 200,
+        baselineVerdicts: [{ index: 1, status: 'still-open' }],
+      },
+    ],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    // 落库层的去重发生在分析管线；这里验证聚合不受重复影响——同一基准条目只出一次。
+    const review = await plugin.review();
+    assert.equal(review.delta.stillOpen.length, 1);
+    assert.equal(review.delta.stillOpen[0].previous.point, '回退链仍可到满格');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a cross-file claim is not stored when the owning file is analyzed this round', async () => {
+  // 归属文件在本轮 files 列表里：认领条目不落进认领文件的 issues（判定权归归属文件，
+  // 避免同一条目在两个文件下重复展示）。归属文件不在本轮时认领仍落库（重命名场景）。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const roundHistory = [
+    {
+      round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+      conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+      feedback: null, publishedIds: [],
+      findings: [
+        { index: 1, file: 'src/owned.js', severity: 'suggest', point: '归属文件的问题', line: 3, suggestion: '' },
+      ],
+    },
+    { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+  ];
+  const reply = JSON.stringify({
+    verdict: 'suggest',
+    summary: '分析',
+    logic: '', changes: '',
+    // 分析 src/impl.js 时跨文件认领归属文件的基准条目
+    previousVerdicts: [{ index: 1, status: 'still-open' }],
+    concerns: [],
+  });
+  const plugin = await setup({
+    reviews: {
+      1: legacyReview({
+        round: 2,
+        conclusion: null,
+        conclusionAt: 0,
+        comment: null,
+        published: [],
+        publishedItems: [],
+        files: [
+          { path: 'src/impl.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+          { path: 'src/owned.js', previousPath: '', status: 'modified', additions: 1, deletions: 0, changes: 1 },
+        ],
+        roundHistory,
+        explanations: [{ file: 'src/impl.js', status: 'pending', error: null, explanation: null, chat: [], updatedAt: 0 }],
+      }),
+    },
+    fetch: roundReviewFetch,
+    evidenceVerify: false,
+    llm: (streamOptions) => {
+      const promptText = JSON.stringify(streamOptions.messages);
+      const res = promptText.includes('基准轮审查意见') ? reply
+        : JSON.stringify({ verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} });
+      return llmFromText(res)(streamOptions);
+    },
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/impl.js', force: true });
+    assert.equal(result.status, 200);
+    // 归属文件（src/owned.js）在本轮 files 里：认领条目不落库。
+    assert.deepEqual(result.json.explanation.issues, []);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+
+test('persisted verdicts keep the comparison stable when issues are rewritten or cleared', async () => {
+  // I1（审查发现）：聊天 findingOps / review_update_analysis / clearFindings 改写 issues
+  // 不得改变对比判定——状态只来自 entry 的 baselineVerdicts，而不是「有没有认领」。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '已修复的问题', line: 1, suggestion: '' },
+          { index: 2, file: 'src/a.js', severity: 'suggest', point: '仍在的问题', line: 2, suggestion: '' },
+        ],
+      },
+      { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+    explanations: [{
+      file: 'src/a.js',
+      status: 'done',
+      error: null,
+      // 分析完成后 issues 被清空（例如 clearFindings 或对话改写了条目）——
+      // 判定结果不受影响，仍按分析时持久化的 verdicts。
+      explanation: { verdict: 'pass', summary: '复现', issues: [], suggestions: [] },
+      chat: [],
+      updatedAt: 200,
+      baselineVerdicts: [
+        { index: 1, status: 'fixed' },
+        { index: 2, status: 'still-open' },
+      ],
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const review = await plugin.review();
+    assert.deepEqual(review.delta.resolved.map((item) => item.index), [1]);
+    assert.deepEqual(review.delta.stillOpen.map((item) => item.previous.index), [2]);
+    // issues 被清掉：仍是「仍未解决」，但没有本轮表述（current 缺省）。
+    assert.equal(review.delta.stillOpen[0].current, undefined);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a concluded round with an empty snapshot is the baseline — no comparison, no backtracking', async () => {
+  // I2（审查发现）：基准 = 最近一个生成过结论的轮次。它快照为空（上一轮干净）时，
+  // 不应回溯到更早的轮次拿旧意见做对比。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 3,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1, headSha: 'sha1', startedAt: 100, finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '更早轮的问题', line: 1, suggestion: '' },
+        ],
+      },
+      {
+        round: 2, headSha: 'sha2', startedAt: 160, finishedAt: 180,
+        conclusions: [{ version: 1, createdAt: 190, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings: [],
+      },
+      { round: 3, headSha: 'sha3', startedAt: 210, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+    explanations: [{
+      file: 'src/a.js', status: 'done', error: null,
+      explanation: { verdict: 'pass', summary: '干净', issues: [], suggestions: [] },
+      chat: [], updatedAt: 220,
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const review = await plugin.review();
+    // 基准是第 2 轮（空快照）→ 无对比可渲染；若错误回溯到第 1 轮会出现 resolved/stillOpen。
+    assert.equal(review.delta, null);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('baseline findings the prompt could not carry land undetermined, never resolved', async () => {
+  // I3（审查发现）：快照全量冻结；下发按文件截断到 10 条。被截断的条目没有判定 →
+  // 「未判定」，绝不静默判「已修复」。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const findings = Array.from({ length: 12 }, (_, index) => ({
+    index: index + 1,
+    file: 'src/a.js',
+    severity: 'suggest',
+    point: `第 ${index + 1} 条`,
+    line: index + 1,
+    suggestion: '',
+  }));
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings,
+      },
+      { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+    explanations: [{
+      file: 'src/a.js', status: 'done', error: null,
+      explanation: { verdict: 'pass', summary: '复现', issues: [], suggestions: [] },
+      chat: [], updatedAt: 200,
+      // 模型只判了前 10 条（后 2 条因截断未下发）。
+      baselineVerdicts: findings.slice(0, 10).map((item) => ({ index: item.index, status: 'fixed' })),
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const review = await plugin.review();
+    assert.equal(review.delta.resolved.length, 10);
+    assert.deepEqual(review.delta.undetermined.map((item) => item.index), [11, 12]);
+    assert.equal(review.delta.pending.length, 0);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+
+test('the analysis pipeline drops a fresh concern that repeats a still-open verdict verbatim', async () => {
+  // I4（审查发现）：只测聚合是空转。端到端走 explain 管线：模型对同一问题既输出
+  // previousVerdicts still-open、又把同一段文字作为新 concern 写进 issues——
+  // 落库的 issues 必须只有一条（延续条目）。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const roundHistory = [
+    {
+      round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+      conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+      feedback: null, publishedIds: [],
+      findings: [
+        { index: 1, file: 'src/a.js', severity: 'suggest', point: '回退链仍可到满格', line: 264, suggestion: '' },
+      ],
+    },
+    { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+  ];
+  const plugin = await setup({
+    reviews: {
+      1: legacyReview({
+        round: 2,
+        conclusion: null,
+        conclusionAt: 0,
+        comment: null,
+        published: [],
+        publishedItems: [],
+        roundHistory,
+        explanations: [{ file: 'src/a.js', status: 'pending', error: null, explanation: null, chat: [], updatedAt: 0 }],
+      }),
+    },
+    fetch: roundReviewFetch,
+    evidenceVerify: false,
+    llm: (streamOptions) => {
+      const promptText = JSON.stringify(streamOptions.messages);
+      const reply = promptText.includes('基准轮审查意见')
+        ? JSON.stringify({
+            verdict: 'suggest',
+            summary: '复现',
+            logic: '', changes: '',
+            previousVerdicts: [{ index: 1, status: 'still-open' }],
+            // 同一问题又被当成新发现写一遍（文本相同、多了空白）。
+            concerns: [{ severity: 'suggest', point: '  回退链仍可到满格 ', suggestion: '', line: 264 }],
+          })
+        : JSON.stringify({ verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} });
+      return llmFromText(reply)(streamOptions);
+    },
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    // 落库只有延续条目一条（同文的新发现被丢弃）。
+    assert.deepEqual(result.json.explanation.issues, [
+      { severity: 'suggest', point: '回退链仍可到满格', suggestion: '', line: 264, roundItem: 1 },
+    ]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+
+test('clearing issues through the tool never manufactures a resolved baseline finding', async () => {
+  // 审查漏洞 A：零判定折叠为 null（或旧缓存）时，review_update_analysis 清空 issues
+  // 曾让聚合走「无认领 = resolved」的回退。现在「已完成分析但无持久化判定」一律
+  // 落「未判定」。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'suggest', point: '旧问题', line: 1, suggestion: '' },
+        ],
+      },
+      { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+    explanations: [{
+      file: 'src/a.js', status: 'done', error: null,
+      explanation: { verdict: 'pass', summary: '分析', issues: [], suggestions: [] },
+      chat: [], updatedAt: 200,
+      // 模型当轮没有输出任何合法判定 → 折叠为 null（与旧缓存同形）。
+      baselineVerdicts: null,
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const before = await plugin.review();
+    assert.deepEqual(before.delta.undetermined.map((item) => item.index), [1]);
+    assert.deepEqual(before.delta.resolved, []);
+    // 工具清空 issues 后：仍是「未判定」，绝不变成「已修复」。
+    await plugin.runTool('review_update_analysis', { revision: before.revision, path: 'src/a.js', issues: [] });
+    const after = await plugin.review();
+    assert.deepEqual(after.delta.resolved, []);
+    assert.deepEqual(after.delta.undetermined.map((item) => item.index), [1]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the tool creating an entry for an unanalyzed file never resolves baselines', async () => {
+  // 审查漏洞 B：review_update_analysis 为未分析文件新建 entry（无 baselineVerdicts），
+  // 曾让聚合按「无认领」判 resolved。现在一律「未判定」。
+  const conclusion = { verdict: 'pass', summary: '基准', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1, headSha: 'abc123', startedAt: 100, finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null, publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'suggest', point: '旧问题', line: 1, suggestion: '' },
+        ],
+      },
+      { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+    // a.js 尚未分析。
+    explanations: [],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const before = await plugin.review();
+    assert.deepEqual(before.delta.pending.map((item) => item.index), [1]);
+    await plugin.runTool('review_update_analysis', { revision: before.revision, path: 'src/a.js', issues: [] });
+    const after = await plugin.review();
+    assert.deepEqual(after.delta.resolved, []);
+    assert.deepEqual(after.delta.undetermined.map((item) => item.index), [1]);
   } finally {
     await plugin.dispose();
   }

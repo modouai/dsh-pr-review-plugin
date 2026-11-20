@@ -173,12 +173,14 @@ window.__ModuleLoader__.load({
         );
       }
 
-      /** Comparison between the previous and this round. */
+      /** Workspace comparison: the baseline findings vs this round (review-delta spec v7). */
       function DeltaBlock(props) {
         const { delta, t } = props;
         if (delta === null || delta === undefined) return null;
         const resolved = Array.isArray(delta.resolved) ? delta.resolved : [];
         const stillOpen = Array.isArray(delta.stillOpen) ? delta.stillOpen : [];
+        const undetermined = Array.isArray(delta.undetermined) ? delta.undetermined : [];
+        const pending = Array.isArray(delta.pending) ? delta.pending : [];
         const describe = (item) => `${text(item?.file) === '' ? '' : `${item.file} — `}${text(item?.point)}`;
         return h(
           'div',
@@ -190,7 +192,7 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'prr-subtle' },
-              `${t('deltaTitle')} · #${delta.previousRound ?? '?'} → #${delta.round ?? '?'}：${t('deltaResolved')} ${resolved.length} · ${t('deltaStillOpen')} ${stillOpen.length}`,
+              `${fill(t('deltaBaseline'), { round: String(delta.baselineRound ?? '?') })}：${t('deltaResolved')} ${resolved.length} · ${t('deltaStillOpen')} ${stillOpen.length + undetermined.length}${pending.length > 0 ? ` · ${t('deltaPending')} ${pending.length}` : ''}`,
             ),
             resolved.length === 0
               ? null
@@ -207,7 +209,25 @@ window.__ModuleLoader__.load({
                   'ul',
                   { className: 'prr-delta-list' },
                   stillOpen.map((item, index) =>
-                    h('li', { key: `s-${index}` }, `${t('deltaStillOpen')}：${describe(item)}`),
+                    h('li', { key: `s-${index}` }, `${t('deltaStillOpen')}：${describe(item.previous ?? item)}`),
+                  ),
+                ),
+            undetermined.length === 0
+              ? null
+              : h(
+                  'ul',
+                  { className: 'prr-delta-list' },
+                  undetermined.map((item, index) =>
+                    h('li', { key: `u-${index}` }, `${describe(item)}（${t('deltaUnjudged')}）`),
+                  ),
+                ),
+            pending.length === 0
+              ? null
+              : h(
+                  'ul',
+                  { className: 'prr-delta-list' },
+                  pending.map((item, index) =>
+                    h('li', { key: `p-${index}` }, `${describe(item)}（${t('deltaPending')}）`),
                   ),
                 ),
           ),

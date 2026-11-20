@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
       core, components, conclusion,
     }) {
       const {
-        Btn, FileRow, VerdictPill, isAnalyzing, fill, text, suggestionText, cleanStepTitle,
+        Btn, FileRow, VerdictPill, isAnalyzing, fill, text, cleanStepTitle,
         parseUnifiedDiff, hunkRange, mapWalkthroughToHunks, publishedOfRound, roundsOf,
         staleInfoOf, versionsOf, isRoundVersionPublished, STATUS_KEY, actionsBridge, shortSha,
         phaseStateText, overviewStateText, conclusionBadgeText, conclusionBadgeTone, processBadgeTone, filesBadgeTone,
@@ -42,15 +42,17 @@ window.__ModuleLoader__.load({
         // A batch always reports a positive total; anything else is not usable progress and
         // falls back to the plain file count instead of showing "0/0".
         const analyzing = isAnalyzing(props.analyzing) ? props.analyzing : null;
-        const done = analyzing === null ? 0 : Math.min(Math.max(analyzing.done ?? 0, 0), analyzing.total);
-        const failed = analyzing === null ? 0 : Math.min(Math.max(analyzing.failed ?? 0, 0), analyzing.total);
-        const countLabel = analyzing === null
-          ? `${files.length} ${t('fileUnit')}`
-          : fill(t('analyzingFiles'), { done, total: analyzing.total })
-            + (failed > 0 ? fill(t('analyzingFailed'), { failed }) : '');
         const fileCounts = React.useMemo(() => cleanCountOf(review), [review]);
         const failedFiles = fileCounts.failed;
         const analyzedFiles = fileCounts.done;
+        // Batch progress speaks the global ledger (analyzed / all changed files): the same
+        // two numbers as the completeness line, so the header and the overview can never
+        // disagree about how much is left. The batch object only answers "is a run active"
+        // and how many hard failures it hit — its internal done/total never render.
+        const countLabel = analyzing === null
+          ? `${files.length} ${t('fileUnit')}`
+          : fill(t('analyzingFiles'), { done: analyzedFiles, total: files.length })
+            + (failedFiles > 0 ? fill(t('analyzingFailed'), { failed: failedFiles }) : '');
         const filesTone = filesBadgeTone(analyzing, failedFiles, analyzedFiles, files.length);
         const processing = phase !== null && phase !== undefined
           && (phase.phase === 'reviewing' || phase.phase === 'analyzing');
@@ -156,35 +158,47 @@ window.__ModuleLoader__.load({
 
       /**
        * Flatten the per-file findings into the page's single ordered list: block first, then
-       * suggest, then suggestions; ties break by path and line. This is the one place the
-       * overview speaks about findings — detail pages and the conclusion reference, not repeat.
+       * suggest; ties break by path and line. Each row carries its own suggestion, rendered
+       * inline. This is the one place the overview speaks about findings.
        */
       function findingsOf(groups) {
         const rows = [];
         for (const group of Array.isArray(groups) ? groups : []) {
           if (group === null || typeof group !== 'object') continue;
           const file = typeof group.file === 'string' ? group.file : '';
-          for (const issue of Array.isArray(group.issues) ? group.issues : []) {
-            if (issue === null || typeof issue !== 'object') continue;
-            const point = typeof issue.point === 'string' ? issue.point.trim() : '';
+          for (const finding of Array.isArray(group.findings) ? group.findings : []) {
+            if (finding === null || typeof finding !== 'object') continue;
+            const point = typeof finding.point === 'string' ? finding.point.trim() : '';
             if (point === '') continue;
             rows.push({
-              kind: 'issue',
-              severity: issue.severity === 'block' ? 'block' : 'suggest',
-              file,
-              line: Number.isFinite(issue.line) && issue.line > 0 ? Math.floor(issue.line) : 0,
+              severity: finding.severity === 'block' ? 'block' : 'suggest',
               point,
+              suggestion: typeof finding.suggestion === 'string' ? finding.suggestion : '',
+              file,
+              line: Number.isFinite(finding.line) && finding.line > 0 ? Math.floor(finding.line) : 0,
             });
           }
-          for (const suggestion of Array.isArray(group.suggestions) ? group.suggestions : []) {
-            const point = suggestionText(suggestion).trim();
-            if (point === '') continue;
-            rows.push({ kind: 'suggestion', severity: 'suggestion', file, line: 0, point });
-          }
         }
-        const rank = { block: 0, suggest: 1, suggestion: 2 };
-        rows.sort((a, b) => rank[a.severity] - rank[b.severity] || a.file.localeCompare(b.file) || a.line - b.line);
+        rows.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === 'block' ? -1 : 1)
+          || a.file.localeCompare(b.file)
+          || a.line - b.line);
         return rows;
+      }
+
+      /**
+       * One inline suggestion line (`tag + text`), shared by the FindingList detail and the
+       * FileDetailPanel rows so both keep the exact same block shape. A blank or missing
+       * suggestion renders nothing instead of an empty tag row.
+       */
+      function suggestionBlock(t, suggestion) {
+        return typeof suggestion === 'string' && suggestion !== ''
+          ? h(
+              'div',
+              { className: 'prr-text' },
+              h('span', { className: 'prr-tag' }, t('suggestionTag')),
+              ` ${suggestion}`,
+            )
+          : null;
       }
 
       /** The expandable findings list: one row per finding, detail unfolds in place. */
@@ -197,7 +211,7 @@ window.__ModuleLoader__.load({
           'div',
           { className: 'prr-card' },
           rows.map((row, index) => {
-            const key = `${row.kind}-${row.file}-${row.line}-${index}`;
+            const key = `${row.file}-${row.line}-${index}`;
             const open = openKey === key;
             const label = row.file === '' ? row.point : `${fileLineLabel(row.file, row.line)} — ${row.point}`;
             return h(
@@ -212,9 +226,7 @@ window.__ModuleLoader__.load({
                   title: row.point,
                   onClick: () => setOpenKey(open ? null : key),
                 },
-                row.kind === 'suggestion'
-                  ? h('span', { className: 'prr-tag' }, t('suggestionTag'))
-                  : h(VerdictPill, { verdict: row.severity, t }),
+                h(VerdictPill, { verdict: row.severity, t }),
                 h('span', { className: 'prr-finding-point' }, label),
                 h('span', { className: 'prr-finding-caret', 'aria-hidden': 'true' }, open ? '▾' : '▸'),
               ),
@@ -223,6 +235,7 @@ window.__ModuleLoader__.load({
                     'div',
                     { className: 'prr-finding-detail' },
                     h('div', { className: 'prr-text' }, row.point),
+                    suggestionBlock(t, row.suggestion),
                     row.file === ''
                       ? null
                       : h(
@@ -458,7 +471,7 @@ window.__ModuleLoader__.load({
         );
       }
 
-      /** Per-file review detail: logic, walkthrough, changes, findings, suggestions. */
+      /** Per-file review detail: logic, walkthrough, changes, and the one findings list. */
       function FileDetailPanel(props) {
         const { t, filePath, explanation } = props;
         if (explanation === null || explanation === undefined) {
@@ -503,6 +516,7 @@ window.__ModuleLoader__.load({
                       'div',
                       { className: 'prr-rowmain' },
                       h('div', { className: 'prr-text' }, issue.point),
+                      suggestionBlock(t, issue.suggestion),
                       issue.line > 0
                         ? h('div', { className: 'prr-subtle' }, `${t('severityLine')} ${issue.line}`)
                         : null,
@@ -512,25 +526,6 @@ window.__ModuleLoader__.load({
               ),
             );
         const unverified = h(UnverifiedBlock, { t, items: detail.unverified });
-        const suggestions = (detail.suggestions ?? []).length === 0
-          ? null
-          : h(
-              'div',
-              null,
-              h('div', { className: 'prr-h2' }, t('fileSuggestions')),
-              h(
-                'div',
-                { className: 'prr-card' },
-                detail.suggestions.map((item, index) => {
-                  const text = suggestionText(item);
-                  return text === '' ? null : h(
-                    'div',
-                    { className: 'prr-rowitem', key: index },
-                    h('div', { className: 'prr-rowmain prr-text' }, text),
-                  );
-                }),
-              ),
-            );
         return h(
           'div',
           null,
@@ -538,15 +533,23 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'prr-verdictline' },
             h(VerdictPill, { verdict: detail.verdict, t }),
+            // A pass that still carries findings is the "approve with comments" shape; the
+            // badge explains the combination instead of leaving the reader to guess whether
+            // the pill or the list is stale.
+            (detail.verdict === 'pass' && (detail.issues ?? []).length > 0)
+              ? h('span', { className: 'prr-tag' }, fill(t('suggestionsForReference'), { count: String((detail.issues ?? []).length) }))
+              : null,
             h('span', { className: 'prr-meta2 prr-filetag' }, filePath),
           ),
           h(
             'div',
             { style: { display: 'flex', gap: '6px', marginBottom: '10px' } },
             h(Btn, {
-              label: props.explainBusy ? t('explaining') : t('reExplain'),
+              // Busy belongs to the file it was requested for: switching to another file
+              // mid-analysis must keep that file's button clickable and honestly labeled.
+              label: props.explainBusyPath === filePath ? t('explaining') : t('reExplain'),
               small: true,
-              disabled: props.explainBusy === true,
+              disabled: props.explainBusyPath === filePath,
               onClick: () => props.onExplain(true),
             }),
           ),
@@ -554,7 +557,6 @@ window.__ModuleLoader__.load({
           section(t('changes'), detail.changes),
           issues,
           unverified,
-          suggestions,
         );
       }
 
@@ -667,7 +669,9 @@ window.__ModuleLoader__.load({
         const roundNumber = selectedRound === null ? 1 : selectedRound.round;
         const isCurrent = latestRound === null || selectedRound === null || selectedRound.round === latestRound.round;
         const feedback = isCurrent ? (review.feedback ?? selectedRound?.feedback ?? null) : (selectedRound?.feedback ?? null);
-        const delta = isCurrent ? (review.delta ?? selectedRound?.delta ?? null) : (selectedRound?.delta ?? null);
+        // Workspace-only comparison: the live aggregation rides the current review; a
+        // pinned historical round has no comparison of its own.
+        const delta = isCurrent ? (review.delta ?? null) : null;
         const anyPublished = Array.isArray(review.published) && review.published.length > 0;
 
         // The whole-review footer (conclusion/publish actions plus notices) is rendered above
@@ -702,7 +706,7 @@ window.__ModuleLoader__.load({
         }, []);
 
         // The current round needs a report before anything renders; a historical round keeps
-        // its own feedback/delta even though `record.report` is reset on a new round.
+        // its own feedback even though `record.report` is reset on a new round.
         if ((report === null || report === undefined) && isCurrent) {
           return h('div', { className: 'prr-zero' }, review.status === 'reviewing' ? t('reportPending') : t('noReport'));
         }
@@ -733,7 +737,7 @@ window.__ModuleLoader__.load({
         }
 
         const findingCount = (props.fileFindings ?? []).reduce(
-          (sum, group) => sum + (group.issues?.length ?? 0) + (group.suggestions?.length ?? 0),
+          (sum, group) => sum + (group.findings?.length ?? 0),
           0,
         );
         const clean = cleanCountOf(review);
@@ -790,13 +794,11 @@ window.__ModuleLoader__.load({
        * never leaks section text).
        */
       function ConclusionAppendix(props) {
-        const { sources, delta, coverage, t } = props;
+        const { sources, coverage, t } = props;
         const [open, setOpen] = React.useState(props.defaultOpen === true);
         const risks = Array.isArray(sources?.risks) ? sources.risks : [];
         const order = Array.isArray(sources?.order) ? sources.order : [];
         const rows = findingsOf(Array.isArray(sources?.findings) ? sources.findings : []);
-        const resolved = Array.isArray(delta?.resolved) ? delta.resolved : [];
-        const stillOpen = Array.isArray(delta?.stillOpen) ? delta.stillOpen : [];
         const unanalyzed = Array.isArray(coverage?.unanalyzed) ? coverage.unanalyzed : [];
         const describe = (item) => {
           if (item === null || typeof item !== 'object') return '';
@@ -808,7 +810,7 @@ window.__ModuleLoader__.load({
           return point === '' ? file : `${file} — ${point}`;
         };
         // Severity markers mirror the comment's appendix bullets (llm.js COMMENT_SEVERITY_LABELS):
-        // `[阻塞] `/`[提示] ` for issue severity, `[建议] ` for per-file suggestion rows.
+        // `[阻塞] `/`[提示] ` for the finding, with its suggestion as a `[建议] ` line below.
         const severityPrefix = (severity) => `[${t(severity === 'block' ? 'verdictBlock' : 'severityHint')}] `;
         const line = (label, key) => h('div', { className: 'prr-appendix-line', key }, label);
         const section = (title, body, key) => h(
@@ -831,14 +833,11 @@ window.__ModuleLoader__.load({
           sections.push(section(t('appendixFiles'), h(
             'div',
             null,
-            rows.map((row, index) => {
+            rows.flatMap((row, index) => {
               const base = row.file === '' ? row.point : `${fileLineLabel(row.file, row.line)} — ${row.point}`;
-              return line(
-                row.kind === 'suggestion'
-                  ? `[${t('suggestionTag')}] ${base}`
-                  : `${severityPrefix(row.severity)}${base}`,
-                `f-${index}`,
-              );
+              const main = line(`${severityPrefix(row.severity)}${base}`, `f-${index}`);
+              if (row.suggestion === '') return [main];
+              return [main, line(`[${t('suggestionTag')}] ${row.suggestion}`, `fs-${index}`)];
             }),
           ), 'files'));
         }
@@ -848,15 +847,6 @@ window.__ModuleLoader__.load({
             null,
             order.map((item, index) => line(`${index + 1}. ${describe(item)}`, `o-${index}`)),
           ), 'order'));
-        }
-        if (resolved.length > 0 || stillOpen.length > 0) {
-          sections.push(section(t('appendixDelta'), h(
-            'div',
-            null,
-            line(`${t('deltaResolved')} ${resolved.length} · ${t('deltaStillOpen')} ${stillOpen.length}`, 'd-sum'),
-            resolved.map((item, index) => line(`${t('deltaResolved')}：${describe(item)}`, `d-r-${index}`)),
-            stillOpen.map((item, index) => line(`${t('deltaStillOpen')}：${describe(item)}`, `d-s-${index}`)),
-          ), 'delta'));
         }
         if (unanalyzed.length > 0) {
           sections.push(section(t('appendixUnanalyzed'), h(
@@ -937,12 +927,10 @@ window.__ModuleLoader__.load({
         }, []);
 
         // The published comment's appendix, mirrored: the current round may add the report's
-        // risks / per-file findings / reading order, while every round carries its own delta
-        // and unanalyzed files. A pinned historical round never inherits the CURRENT round's
-        // coverage — only its own version's persisted coverage counts there.
+        // risks / per-file findings / reading order and unanalyzed files. The re-review
+        // comparison is workspace-only (H1) — the conclusion page never renders it.
         const appendix = h(ConclusionAppendix, {
           sources: isCurrent ? (props.appendixSources ?? null) : null,
-          delta: isCurrent ? (review.delta ?? selectedRound?.delta ?? null) : (selectedRound?.delta ?? null),
           coverage: isCurrent
             ? (selectedVersion?.coverage ?? review.coverage ?? null)
             : (selectedVersion?.coverage ?? null),

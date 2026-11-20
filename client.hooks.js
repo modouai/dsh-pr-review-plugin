@@ -765,10 +765,9 @@ window.__ModuleLoader__.load({
           const orderIndex = new Map((review?.report?.order ?? []).map((item, index) => [item.file, index]));
           for (const entry of review?.explanations ?? []) {
             if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-            const issues = entry.explanation.issues ?? [];
-            const suggestions = entry.explanation.suggestions ?? [];
-            if (issues.length === 0 && suggestions.length === 0) continue;
-            groups.push({ file: entry.file, issues, suggestions });
+            const findings = entry.explanation.issues ?? [];
+            if (findings.length === 0) continue;
+            groups.push({ file: entry.file, findings });
           }
           groups.sort(
             (a, b) =>

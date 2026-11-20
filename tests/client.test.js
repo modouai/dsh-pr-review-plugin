@@ -484,6 +484,7 @@ function makeReview(options = {}) {
     published: options.published ?? [],
     publishedItems: [],
     concluding: options.concluding ?? null,
+    analyzing: options.analyzing ?? null,
     concludeError: null,
     publishing: false,
     comment: null,
@@ -1424,52 +1425,13 @@ test('selecting a round follows the latest on the overview or pins history onto 
   });
 });
 
-test('per-file suggestions render as text whether stored as a string or an object', () => {
-  const client = loadClient();
-  const version = makeVersion(1, '结论');
-  const review = makeReview({
-    round: 1,
-    conclusionAt: version.createdAt,
-    conclusion: version.conclusion,
-    roundHistory: [makeRound(1, { conclusions: [version] })],
-  });
-  // Model output stores plain strings; a review_update_analysis write stores { point, line }.
-  // Blank and malformed entries must not render an empty suggestion row.
-  const { textOnly, elements } = renderOverview(client, review, {
-    fileFindings: [
-      {
-        file: 'src/a.js',
-        issues: [],
-        suggestions: [
-          '模型写的建议',
-          { point: '工具写的建议', line: 12 },
-          { text: '只有 text 的建议' },
-          { point: '   ', text: 'point 为空时回退 text' },
-          { point: '   ' },
-          {},
-          null,
-          42,
-        ],
-      },
-    ],
-  });
-
-  assert.match(textOnly, /模型写的建议/);
-  assert.match(textOnly, /工具写的建议/);
-  assert.match(textOnly, /只有 text 的建议/);
-  assert.match(textOnly, /point 为空时回退 text/);
-  assert.doesNotMatch(textOnly, /\[object Object\]/);
-  // The findings list renders one collapsed row per valid suggestion; blank and malformed
-  // entries are dropped by the flattener and render no row at all.
-  const rows = elements.filter((node) => node.props.className === 'prr-finding');
-  assert.equal(rows.length, 4, 'blank and malformed suggestions render no row');
-});
-
-test('the file detail renders suggestion objects written by review_update_analysis', () => {
+test('the file detail renders one findings list where each row may carry a suggestion', () => {
   const client = loadClient();
   const { parts, fake } = client;
+  const t = translator(parts);
+  // 服务端 explanation 永远是合并形状：每条意见自带 suggestion（'' = 无建议），无 suggestions 键。
   const { textOnly, elements } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
-    t: translator(parts),
+    t,
     filePath: 'src/a.js',
     explanation: {
       status: 'done',
@@ -1478,17 +1440,119 @@ test('the file detail renders suggestion objects written by review_update_analys
         summary: '文件摘要',
         logic: '',
         changes: '',
-        issues: [],
-        suggestions: ['纯文本建议', { point: '对象建议', line: 3 }, null, { point: '  ' }],
+        issues: [
+          { severity: 'block', point: '会崩', suggestion: '加判空', line: 3 },
+          { severity: 'suggest', point: '补测试', suggestion: '', line: 0 },
+        ],
       },
     },
     onExplain: () => {},
   }));
 
-  assert.match(textOnly, /纯文本建议/);
-  assert.match(textOnly, /对象建议/);
-  const rows = elements.filter((node) => node.props.className === 'prr-rowmain prr-text');
-  assert.equal(rows.length, 2, 'blank suggestions render no row');
+  // 只有一个意见区块：旧的独立建议键已随合并删除，旧「改进建议」区块不得再出现。
+  const titles = elements.filter((node) => node.props.className === 'prr-h2' && node.children === t('issues'));
+  assert.equal(titles.length, 1, 'the findings section renders exactly once');
+  assert.doesNotMatch(textOnly, /改进建议/);
+  assert.match(textOnly, /会崩/);
+  assert.match(textOnly, /补测试/);
+  // 有建议的意见行内联渲染建议块（suggestionTag 标签 + 建议文本）；无建议行不渲染。
+  const tags = elements.filter((node) => node.props.className === 'prr-tag');
+  assert.equal(tags.length, 1, 'only the row carrying a suggestion renders the suggestion tag');
+  assert.match(textOnly, /加判空/);
+  // 非 pass 判定不需要「供参考」徽标（意见与判定语义一致）。
+  assert.doesNotMatch(textOnly, /供参考/);
+});
+
+test('a pass verdict with findings explains itself as suggestions for reference', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const t = translator(parts);
+  // pass + 意见 = approve with comments：徽标解释这个组合，读者不必猜 pill 与列表哪个过期。
+  const { textOnly, elements } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t,
+    filePath: 'src/a.js',
+    explanation: {
+      status: 'done',
+      explanation: {
+        verdict: 'pass',
+        summary: '文件摘要',
+        logic: '',
+        changes: '',
+        issues: [
+          { severity: 'suggest', point: 'nit：命名可以更短', suggestion: '', line: 0 },
+          { severity: 'suggest', point: '可选：抽公共 helper', suggestion: '抽成函数', line: 0 },
+        ],
+      },
+    },
+    onExplain: () => {},
+  }));
+  assert.match(textOnly, /2 条建议供参考/);
+  // 徽标 prr-tag × 1 + 带建议的意见块 prr-tag × 1。
+  const tags = elements.filter((node) => node.props.className === 'prr-tag');
+  assert.equal(tags.length, 2);
+});
+
+test('the re-analyze busy state belongs to its own file, not the whole panel', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const t = translator(parts);
+  const render = (filePath, explainBusyPath) => fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t,
+    filePath,
+    explainBusyPath,
+    explanation: {
+      status: 'done',
+      explanation: {
+        verdict: 'pass',
+        summary: '文件摘要',
+        logic: '',
+        changes: '',
+        issues: [],
+      },
+    },
+    onExplain: () => {},
+  }));
+
+  // 另一个文件在分析：本文件的按钮仍是可点的「重新分析」，不得显示「正在分析…」。
+  const other = render('src/a.js', 'src/b.js');
+  assert.match(other.textOnly, /重新分析/);
+  assert.doesNotMatch(other.textOnly, /正在分析/);
+  // 本文件自己才是分析中：按钮显示进行中并禁用。
+  const self = render('src/a.js', 'src/a.js');
+  assert.match(self.textOnly, /正在分析/);
+});
+
+test('the file detail renders the merged findings a review_update_analysis write produces', () => {
+  const client = loadClient();
+  const { parts, fake } = client;
+  const t = translator(parts);
+  // 工具写回的合并意见：suggestion 直接跟在各自 point 后渲染，行号随行展示。
+  const { textOnly, elements } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
+    t,
+    filePath: 'src/a.js',
+    explanation: {
+      status: 'done',
+      explanation: {
+        verdict: 'suggest',
+        summary: '文件摘要',
+        logic: '',
+        changes: '',
+        issues: [
+          { severity: 'suggest', point: '提取常量', suggestion: '把魔数移到模块顶部', line: 12 },
+          { severity: 'block', point: '空指针', suggestion: '', line: 7 },
+        ],
+      },
+    },
+    onExplain: () => {},
+  }));
+
+  assert.match(textOnly, /提取常量/);
+  assert.match(textOnly, /把魔数移到模块顶部/);
+  assert.match(textOnly, /空指针/);
+  assert.match(textOnly, /行 12/);
+  assert.match(textOnly, /行 7/);
+  const tags = elements.filter((node) => node.props.className === 'prr-tag');
+  assert.equal(tags.length, 1, 'blank suggestions render no suggestion block');
 });
 
 test('the detail header keeps only the pane title', () => {
@@ -1587,6 +1651,11 @@ test('the file column shows batch progress and the manual analyze-all button', (
     template,
   );
   const files = [{ path: 'src/a.js', order: 1, severity: '', additions: 1, deletions: 0, reason: '' }];
+  // The global ledger the header badge speaks: one analyzed file, one failed entry.
+  const explanations = [
+    { file: 'src/a.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: 'x', issues: [] }, chat: [], updatedAt: 1 },
+    { file: 'src/b.js', status: 'error', error: 'boom', explanation: null, chat: [], updatedAt: 2 },
+  ];
   const hits = [];
   const render = (extra) => fake.render(fake.React.createElement(parts.FilesPane, {
     t,
@@ -1594,7 +1663,7 @@ test('the file column shows batch progress and the manual analyze-all button', (
     onSelectOverview: () => {},
     files,
     filePath: '',
-    review: { files },
+    review: { files, explanations },
     onOpenFile: () => {},
     ...extra,
   }));
@@ -1603,19 +1672,20 @@ test('the file column shows batch progress and the manual analyze-all button', (
   );
 
   // Automatic mode: progress replaces the file count and no button competes with it.
+  // The numbers are the global ledger (analyzed / all changed files), not the batch's own.
   const running = render({ analyzing: { total: 3, done: 1, failed: 0, current: 'src/a.js' } });
-  assert.ok(running.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 3 })));
+  assert.ok(running.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
   assert.equal(running.textOnly.includes(dict.fileUnit), false, 'progress replaces the file count');
   assert.equal(running.textOnly.includes(dict.analyzingFailed.replace('{failed}', '0')), false);
   assert.equal(analyzeAllButton(running), undefined);
 
   const failing = render({ analyzing: { total: 3, done: 2, failed: 1, current: 'src/b.js' } });
-  assert.ok(failing.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 3 })));
+  assert.ok(failing.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
   assert.ok(failing.textOnly.includes(fill(dict.analyzingFailed, { failed: 1 })));
 
   const allFailed = render({ analyzing: { total: 2, done: 2, failed: 2 } });
-  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 2 })));
-  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFailed, { failed: 2 })));
+  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
+  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFailed, { failed: 1 })));
 
   // Progress without a usable total is not a batch: keep the plain count.
   const degenerate = render({ analyzing: { total: 0, done: 0, failed: 0 } });
@@ -1624,14 +1694,15 @@ test('the file column shows batch progress and the manual analyze-all button', (
   const noTotal = render({ analyzing: { done: 1, failed: 0 } });
   assert.ok(noTotal.textOnly.includes(dict.fileUnit));
 
-  // Counts are clamped to the total: a bad payload never renders "5/3".
+  // The global ledger is what shows: a batch claiming more than the ledger has still
+  // renders the ledger numbers ("5/3" cannot happen).
   const clamped = render({ analyzing: { total: 2, done: 5, failed: 9 } });
-  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 2 })));
-  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFailed, { failed: 2 })));
+  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
+  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFailed, { failed: 1 })));
 
   // The last file of a batch still reports progress until the host clears `analyzing`.
   const finishing = render({ analyzing: { total: 2, done: 2, failed: 0, current: '' } });
-  assert.ok(finishing.textOnly.includes(fill(dict.analyzingFiles, { done: 2, total: 2 })));
+  assert.ok(finishing.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
 
   // Automatic mode with no batch: the plain count returns and no button appears.
   const idle = render({});
@@ -1649,7 +1720,7 @@ test('the file column shows batch progress and the manual analyze-all button', (
   // A batch already running wins over the button, whatever the mode says.
   const manualRunning = render({ manual: true, analyzing: { total: 2, done: 1, failed: 0, current: 'src/a.js' } });
   assert.equal(analyzeAllButton(manualRunning), undefined);
-  assert.ok(manualRunning.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 2 })));
+  assert.ok(manualRunning.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
 
   // While the request is in flight the button reports the work and cannot be clicked twice.
   const busy = render({ manual: true, analyzeAllBusy: true, onAnalyzeAll: () => hits.push('again') });
@@ -1922,8 +1993,9 @@ test('feedback can be read before this round is published', () => {
   assert.doesNotMatch(textOnly, /上一轮还没有发布审查评论/);
 });
 
-test('historical round 2 pins feedback before the comparison', () => {
+test('a historical round keeps its feedback but never renders the workspace comparison', () => {
   const client = loadClient();
+  // H1：复审对比只属于审核工作面——即使轮次历史里残留旧的 delta 数据，历史轮也不渲染。
   const delta = {
     round: 2,
     previousRound: 1,
@@ -1946,7 +2018,7 @@ test('historical round 2 pins feedback before the comparison', () => {
   const feedbackIndex = textOnly.indexOf('实现者反馈');
   const deltaIndex = textOnly.indexOf('复审对比');
   assert.ok(feedbackIndex >= 0, 'historical feedback missing');
-  assert.ok(deltaIndex > feedbackIndex, 'historical feedback must render before the comparison');
+  assert.equal(deltaIndex, -1, 'a historical round never renders the workspace comparison');
   // No action buttons on a historical round.
   assert.doesNotMatch(textOnly, /检查实现者反馈/);
 });
@@ -2715,7 +2787,6 @@ test('the file detail breaks unverified points out of the findings', () => {
         changes: '',
         issues: [{ severity: 'suggest', point: '已确认问题', line: 1 }],
         unverified: [{ point: '可疑调用方', missing: '缺少 callers 证据' }],
-        suggestions: [],
       },
     },
     onExplain: () => {},
@@ -2737,7 +2808,7 @@ test('no unverified notes means no unverified section', () => {
     filePath: 'src/a.js',
     explanation: {
       status: 'done',
-      explanation: { verdict: 'pass', summary: '文件摘要', logic: '', changes: '', issues: [], suggestions: [] },
+      explanation: { verdict: 'pass', summary: '文件摘要', logic: '', changes: '', issues: [] },
     },
     onExplain: () => {},
   }));
@@ -2782,7 +2853,6 @@ test('malformed unverified entries are dropped instead of leaking into the panel
         changes: '',
         issues: [],
         unverified: [null, {}, { point: '   ' }, { point: '有效疑点', missing: null }],
-        suggestions: [],
       },
     },
     onExplain: () => {},
@@ -2802,19 +2872,35 @@ test('derivePhase folds host state into one phase', () => {
     'concluding',
   );
 
-  const analyzing = { ...base, status: 'done', analyzing: { done: 12, total: 30, failed: 1, current: 'src/a.js' } };
+  // Batch progress is restated in the global ledger: done = analyzed files, total = all
+  // changed files — the same two numbers the completeness line shows, so the header badge
+  // and the overview can never disagree about how much is left.
+  const analyzing = makeReview({
+    status: 'done',
+    files: [
+      { path: 'src/a.js', status: 'modified', additions: 1, deletions: 0 },
+      { path: 'src/b.js', status: 'modified', additions: 1, deletions: 0 },
+      { path: 'src/c.js', status: 'modified', additions: 1, deletions: 0 },
+    ],
+    explanations: [
+      { file: 'src/a.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: 'x', issues: [] }, chat: [], updatedAt: 1 },
+      { file: 'src/b.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: 'y', issues: [] }, chat: [], updatedAt: 2 },
+      { file: 'src/c.js', status: 'error', error: 'boom', explanation: null, chat: [], updatedAt: 3 },
+    ],
+    analyzing: { done: 12, total: 30, failed: 1, current: 'src/c.js' },
+  });
   const phase = parts.derivePhase(analyzing, null);
   assert.equal(phase.phase, 'analyzing');
-  assert.deepEqual(plain(phase.progress), { done: 12, total: 30, failed: 1 });
+  assert.deepEqual(plain(phase.progress), { done: 2, total: 3, failed: 1 });
   assert.equal(phase.nextAction, null);
   assert.equal(parts.derivePhase(analyzing, null, { manual: true }).nextAction, 'analyzeAll');
 
-  // Progress is clamped into [0, total]; a negative failed count folds to 0.
+  // A negative failed count folds to 0; a record without files falls back to the batch total.
   const clamped = parts.derivePhase(
     { ...base, status: 'done', analyzing: { done: 99, total: 30, failed: -1, current: 'x' } },
     null,
   );
-  assert.deepEqual(plain(clamped.progress), { done: 30, total: 30, failed: 0 });
+  assert.deepEqual(plain(clamped.progress), { done: 0, total: 1, failed: 0 });
 
   assert.equal(parts.derivePhase({ ...base, conclusion: null, conclusionAt: 0 }, null).phase, 'ready');
   assert.equal(parts.derivePhase({ ...base, conclusion: null, conclusionAt: 0 }, null).nextAction, 'conclude');
@@ -3043,34 +3129,130 @@ test('PhaseBar renders the round and the phase text', () => {
 
 test('findingsOf flattens and orders file findings', () => {
   const { parts } = loadClient();
+  // 合并形状：每条意见四键，suggestion '' 表示无建议。
   const groups = [
-    { file: 'src/b.js', issues: [{ severity: 'suggest', point: 'b 问题', line: 3 }], suggestions: ['b 建议'] },
-    { file: 'src/a.js', issues: [{ severity: 'block', point: 'a 阻塞', line: 8 }, { severity: 'suggest', point: 'a 问题', line: 2 }], suggestions: [] },
+    {
+      file: 'src/b.js',
+      findings: [
+        { severity: 'suggest', point: 'b 问题', suggestion: 'b 这样改', line: 3 },
+        { severity: 'suggest', point: 'b 提示', suggestion: '', line: 0 },
+      ],
+    },
+    {
+      file: 'src/a.js',
+      findings: [
+        { severity: 'block', point: 'a 阻塞', suggestion: 'a 先修这个', line: 8 },
+        { severity: 'suggest', point: 'a 问题', suggestion: '', line: 2 },
+      ],
+    },
   ];
   const rows = parts.findingsOf(groups);
   assert.deepEqual(plain(rows.map((row) => [row.severity, row.file])), [
     ['block', 'src/a.js'],
     ['suggest', 'src/a.js'],
     ['suggest', 'src/b.js'],
-    ['suggestion', 'src/b.js'],
+    ['suggest', 'src/b.js'],
   ]);
   assert.equal(rows[0].line, 8);
+  assert.equal(rows[0].suggestion, 'a 先修这个');
+  assert.equal(rows[1].suggestion, '');
   assert.equal(parts.findingsOf([]).length, 0);
 });
 
-test('FindingList renders rows and the empty state', () => {
+test('fileFindings derives one merged group per analyzed file from the review', () => {
+  const { parts, fake } = loadClient();
+  // 真实 review 形状：explanations[].explanation.issues 四键，没有 suggestions 键。
+  const review = makeReview({
+    round: 1,
+    report: {
+      verdict: 'suggest',
+      summary: '总',
+      risks: [],
+      order: [{ file: 'src/a.js', reason: '入口' }, { file: 'src/b.js', reason: '工具类' }],
+    },
+    explanations: [
+      {
+        file: 'src/b.js',
+        status: 'done',
+        explanation: {
+          verdict: 'suggest', summary: '', logic: '', changes: '',
+          issues: [{ severity: 'block', point: 'b 会崩', suggestion: 'b 加判空', line: 3 }],
+        },
+      },
+      {
+        file: 'src/a.js',
+        status: 'done',
+        explanation: {
+          verdict: 'pass', summary: '', logic: '', changes: '',
+          issues: [{ severity: 'suggest', point: 'a 提示', suggestion: '', line: 2 }],
+        },
+      },
+      { file: 'src/c.js', status: 'error', explanation: null },
+    ],
+  });
+  function Probe() {
+    const { fileFindings } = parts.useWorkspaceDerived(review, '');
+    return fake.React.createElement('div', null, JSON.stringify(fileFindings));
+  }
+  const { textOnly } = fake.render(fake.React.createElement(Probe));
+  // 每个分析过的文件一组，组内只有一份 findings，按阅读顺序排列；未完成/空分析不产生组。
+  assert.deepEqual(JSON.parse(textOnly), [
+    { file: 'src/a.js', findings: [{ severity: 'suggest', point: 'a 提示', suggestion: '', line: 2 }] },
+    { file: 'src/b.js', findings: [{ severity: 'block', point: 'b 会崩', suggestion: 'b 加判空', line: 3 }] },
+  ]);
+});
+
+test('FindingList renders rows, block first, with the suggestion block in the detail', () => {
   const { parts, fake } = loadClient();
   const t = translator(parts);
+  // 真实四键形状：带建议与空建议混装。
+  const groups = [{
+    file: 'src/a.js',
+    findings: [
+      { severity: 'suggest', point: 'a 提示', suggestion: '', line: 2 },
+      { severity: 'block', point: 'a 阻塞', suggestion: 'a 加判空', line: 8 },
+    ],
+  }];
   const empty = fake.render(fake.React.createElement(parts.FindingList, { groups: [], t, onOpenFile: () => {} }));
   assert.ok(empty.textOnly.includes('未发现问题'));
 
-  const view = fake.render(fake.React.createElement(parts.FindingList, {
-    groups: [{ file: 'src/a.js', issues: [{ severity: 'block', point: 'a 阻塞', line: 8 }], suggestions: [] }],
-    t,
-    onOpenFile: () => {},
-  }));
-  assert.ok(view.textOnly.includes('src/a.js:8'));
-  assert.ok(view.textOnly.includes('a 阻塞'));
+  const view = fake.render(fake.React.createElement(parts.FindingList, { groups, t, onOpenFile: () => {} }));
+  // block 行排在前；头部 pill 一律走 VerdictPill，收起态不再有建议 tag 分支。
+  const heads = view.elements.filter((node) => node.props.className === 'prr-finding-head');
+  assert.equal(heads.length, 2);
+  assert.match(heads[0].props.title, /a 阻塞/);
+  assert.equal(
+    view.elements.some((node) => node.props.className === 'prr-tag'),
+    false,
+    'collapsed heads carry verdict pills only',
+  );
+
+  // fake React 的 setState 是 noop，展开态靠临时接管 useState 渲染（渲染完立即还原）：
+  // 只替换第一次调用（openKey），后续调用回落到原始 useState——未来加第二个 hook 不会静默错乱。
+  const originalUseState = fake.React.useState;
+  const openWith = (key) => {
+    let n = 0;
+    fake.React.useState = (...args) => (n++ === 0 ? [key, () => {}] : originalUseState(...args));
+    try {
+      return fake.render(fake.React.createElement(parts.FindingList, { groups, t, onOpenFile: () => {} }));
+    } finally {
+      fake.React.useState = originalUseState;
+    }
+  };
+  // 展开 block 行（key = file-line-index）：detail 里有建议块。
+  const opened = openWith('src/a.js-8-0');
+  const detail = opened.elements.find((node) => node.props.className === 'prr-finding-detail');
+  assert.ok(detail, 'the opened row renders its detail');
+  assert.match(fake.textOf(detail), /a 阻塞/);
+  assert.match(fake.textOf(detail), /a 加判空/);
+  const openTags = opened.elements.filter((node) => node.props.className === 'prr-tag');
+  assert.equal(openTags.length, 1, 'only the suggestion-carrying row renders the suggestion block');
+  // 展开无建议行：detail 里没有建议块。
+  const openedPlain = openWith('src/a.js-2-1');
+  assert.ok(
+    openedPlain.elements.every((node) => node.props.className !== 'prr-tag'),
+    'a row without a suggestion renders no suggestion block',
+  );
 });
 
 test('cleanCountOf counts finished analyses without issues', () => {
@@ -3137,7 +3319,13 @@ test('OverviewPage shows digest, findings and completeness — no initial risks,
     onOpenFile: () => {},
     explainedCount: 1,
     totalFiles: 1,
-    fileFindings: [{ file: 'src/a.js', issues: [{ severity: 'block', point: 'a 阻塞', line: 8 }], suggestions: [] }],
+    fileFindings: [{
+      file: 'src/a.js',
+      findings: [
+        { severity: 'block', point: 'a 阻塞', suggestion: 'a 加判空', line: 8 },
+        { severity: 'suggest', point: 'a 提示', suggestion: '', line: 2 },
+      ],
+    }],
     feedbackBusy: false,
     onCheckFeedback: () => {},
   }));
@@ -3146,6 +3334,8 @@ test('OverviewPage shows digest, findings and completeness — no initial risks,
   assert.ok(!text.includes('总体初筛风险'));
   assert.ok(!text.includes('初筛风险点'));
   assert.ok(text.includes('审查发现'));
+  // 合并后每组只有一份 findings，总览计数即意见条数（不再叠加建议）。
+  assert.ok(text.includes('审查发现 · 2'));
   assert.ok(text.includes('src/a.js:8'));
   assert.ok(text.includes('审查完备性'));
   assert.ok(text.includes('1/1'));
@@ -3320,7 +3510,7 @@ test('ConclusionPage mirrors the published comment structure', () => {
     onCheckFeedback: () => {},
     appendixSources: {
       risks: [{ severity: 'block', file: 'src/a.js', point: '初筛风险' }],
-      findings: [{ file: 'src/a.js', issues: [{ severity: 'block', point: '文件发现', line: 8 }], suggestions: [] }],
+      findings: [{ file: 'src/a.js', findings: [{ severity: 'block', point: '文件发现', suggestion: '', line: 8 }] }],
       order: [{ file: 'src/a.js', reason: '入口改动' }],
     },
   }));
@@ -3402,22 +3592,16 @@ test('ConclusionAppendix collapses by default, opens with defaultOpen and skips 
     risks: [{ severity: 'block', file: 'src/a.js', point: '初筛风险' }],
     findings: [{
       file: 'src/a.js',
-      issues: [
-        { severity: 'block', point: '文件发现', line: 8 },
-        { severity: 'suggest', point: '提示发现', line: 9 },
+      // 合并行：每条意见四键自带 suggestion，没有 kind 字段。
+      findings: [
+        { severity: 'block', point: '文件发现', suggestion: '文件这样改', line: 8 },
+        { severity: 'suggest', point: '提示发现', suggestion: '', line: 9 },
       ],
-      suggestions: ['文件建议'],
     }],
     order: [{ file: 'src/a.js', reason: '入口改动' }],
   };
-  const delta = {
-    previousRound: 1,
-    round: 2,
-    resolved: [{ file: 'a.js', point: '已修复点' }],
-    stillOpen: [{ file: 'b.js', point: '仍未解决点' }],
-  };
   const coverage = { analyzed: 1, total: 2, unanalyzed: ['src/b.js'] };
-  const collapsed = fake.render(fake.React.createElement(parts.ConclusionAppendix, { sources, delta, coverage, t }));
+  const collapsed = fake.render(fake.React.createElement(parts.ConclusionAppendix, { sources, coverage, t }));
   assert.ok(collapsed.textOnly.includes('审查附录'));
   assert.ok(!collapsed.textOnly.includes('总体初筛风险'));
   assert.ok(!collapsed.textOnly.includes('复审对比'));
@@ -3434,31 +3618,32 @@ test('ConclusionAppendix collapses by default, opens with defaultOpen and skips 
   assert.ok(prevented, 'summary click must preventDefault the native toggle');
 
   const open = fake.render(fake.React.createElement(parts.ConclusionAppendix, {
-    sources, delta, coverage, t, defaultOpen: true,
+    sources, coverage, t, defaultOpen: true,
   }));
   const text = open.textOnly;
   // The forced-open state really opens the details element.
   assert.ok(open.html.includes(' open="true"'));
-  // Severity markers mirror the comment's appendix bullets ([阻塞]/[提示] issues, [建议] rows).
+  // Severity markers mirror the comment's appendix bullets ([阻塞]/[提示] findings, [建议] lines).
   assert.ok(text.includes('[阻塞] src/a.js — 初筛风险'));
   assert.ok(text.includes('[阻塞] src/a.js:8 — 文件发现'));
   assert.ok(text.includes('[提示] src/a.js:9 — 提示发现'));
-  assert.ok(text.includes('[建议] src/a.js — 文件建议'));
+  // 建议渲染为意见下的独立行，只带 [建议] 标签，不再带文件前缀。
+  assert.ok(text.includes('[建议] 文件这样改'));
+  assert.ok(!text.includes('[建议] src/a.js'));
   assert.ok(text.includes('总体初筛风险'));
   assert.ok(text.includes('初筛风险'));
   assert.ok(text.includes('逐文件审查发现'));
   assert.ok(text.includes('src/a.js:8'));
   assert.ok(text.includes('审查顺序'));
   assert.ok(text.includes('src/a.js — 入口改动'));
-  assert.ok(text.includes('复审对比'));
-  assert.ok(text.includes('已修复 1'));
-  assert.ok(text.includes('仍未解决 1'));
-  assert.ok(text.includes('已修复：a.js — 已修复点'));
+  // H1：结论页附录不渲染复审对比。
+  assert.ok(!text.includes('复审对比'));
+  assert.ok(!text.includes('已修复：a.js'));
   assert.ok(text.includes('未分析文件'));
   assert.ok(text.includes('src/b.js'));
 
   const empty = fake.render(fake.React.createElement(parts.ConclusionAppendix, {
-    sources: { risks: [], findings: [], order: [] }, delta: null, coverage: null, t, defaultOpen: true,
+    sources: { risks: [], findings: [], order: [] }, coverage: null, t, defaultOpen: true,
   }));
   assert.equal(empty.textOnly, '');
 });

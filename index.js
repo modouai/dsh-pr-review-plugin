@@ -33,7 +33,6 @@ import {
   buildFeedbackPrompt,
   calibrateVerdict,
   commentItems,
-  compareComments,
   conclusionCoverage,
   ensureConclusionIds,
   parseChatReply,
@@ -44,16 +43,17 @@ import {
   buildReportVerifyPrompt,
   callModel,
   extractJson,
+  findingsOf,
   itemId,
   mergeConclusion,
   normalizeConcerns,
   normalizeConclusion,
   normalizeEvidenceNeeds,
   normalizeExplanation,
+  normalizePreviousVerdicts,
   normalizeReport,
   normalizeReportDraft,
   normalizeVerdict,
-  partitionSuggestions,
   partitionVerdicts,
 } from './llm.js';
 
@@ -214,6 +214,7 @@ function serializeReview(record) {
       explanation: entry.explanation,
       chat: entry.chat,
       updatedAt: entry.updatedAt ?? 0,
+      baselineVerdicts: Array.isArray(entry.baselineVerdicts) ? entry.baselineVerdicts : null,
     })),
     pullChat: record.pullChat,
     reportUpdatedAt: record.reportUpdatedAt ?? 0,
@@ -230,7 +231,7 @@ function serializeReview(record) {
     published: record.published ?? [],
     publishedItems: record.publishedItems ?? [],
     feedback: record.feedback ?? null,
-    delta: reviewDeltaOf(record),
+    delta: findingsDeltaOf(record),
     conclusionAt: record.conclusionAt ?? 0,
     conclusion: record.conclusion,
     comment: record.comment ?? null,
@@ -240,62 +241,128 @@ function serializeReview(record) {
 }
 
 /**
- * Live resolved-vs-still-open preview from the finished per-file findings, for the
- * window before a conclusion exists. Honesty boundary: an early「已修复」only means
- * 「本轮未再发现」— analyses that have not finished cannot clear a previous item, so
- * the preview sharpens as analyses complete. Completeness rule: once every file is
- * analysed, zero findings honestly means 全部已修复 and every previous item shows as
- * resolved; while analyses are still incomplete and nothing has been found yet the
- * preview stays hidden (不可知, not 已修复). The result is ephemeral (never written
- * to the record, the cache, or the round history); the persisted conclusion delta
- * that conclude writes always wins over it (see reviewDeltaOf).
+ * Freeze the round's finished per-file findings as the next round's comparison baseline
+ * (review-delta spec v7): flattened through findingsOf and globally numbered, frozen in
+ * full — per-file ordering is block first, then line ascending, original order otherwise.
+ * Truncation happens only when the prompt is built (10 per file, declared there), so a
+ * frozen finding never silently disappears from the comparison.
  */
-function previewDeltaOf(record) {
-  const previousItems = Array.isArray(record.previousRound?.items) ? record.previousRound.items : [];
-  if (previousItems.length === 0) return null;
-  // Live records hold a Map keyed by file; serialized shapes may be entry lists.
-  const entries = record.explanations instanceof Map
-    ? Array.from(record.explanations, ([filePath, entry]) => ({ ...entry, file: filePath }))
-    : (Array.isArray(record.explanations) ? record.explanations : []);
-  const totalFiles = Array.isArray(record.files) ? record.files.length : 0;
-  const current = [];
-  let analyzedFiles = 0;
-  for (const entry of entries) {
-    if (entry === null || typeof entry !== 'object' || entry.status !== 'done') continue;
-    // Counting parity with startAnalysisBatch: a `done` entry without an explanation body
-    // is an empty analysis that the batch requeues — counting it as analysed would let
-    // analysesComplete go true while the file is still waiting for a real result.
-    if (entry.explanation === null || entry.explanation === undefined) continue;
-    analyzedFiles += 1;
-    const file = typeof entry.file === 'string' ? entry.file : '';
-    for (const issue of Array.isArray(entry.explanation.issues) ? entry.explanation.issues : []) {
-      if (issue === null || typeof issue !== 'object' || typeof issue.point !== 'string' || issue.point.trim() === '') continue;
-      current.push({
-        kind: issue.severity === 'block' ? 'blocker' : 'suggestion',
-        file,
-        point: issue.point,
-      });
-    }
+function findingsSnapshotOf(record) {
+  const byFile = [];
+  for (const [filePath, entry] of record.explanations) {
+    if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
+    const group = findingsOf(entry.explanation).map((finding) => ({ ...finding, file: filePath }));
+    group.sort((left, right) => (left.severity === right.severity ? 0 : left.severity === 'block' ? -1 : 1) || left.line - right.line);
+    // 全量冻结，不丢条目：prompt 下发时再按文件截断（并声明截断），未下发的条目在
+    // 对比里落「未判定」，绝不静默消失。
+    byFile.push(...group.map((finding) => ({
+      index: 0,
+      file: finding.file,
+      severity: finding.severity,
+      point: finding.point,
+      line: finding.line,
+      suggestion: finding.suggestion,
+    })));
   }
-  // An all-clean round is only honest once nothing is left un-analysed.
-  const analysesComplete = totalFiles > 0 && analyzedFiles >= totalFiles;
-  if (current.length === 0 && !analysesComplete) return null;
-  const compared = compareComments(previousItems, current);
-  return {
-    round: record.round ?? 1,
-    previousRound: record.previousRound?.round ?? (record.round ?? 1) - 1,
-    resolved: compared.resolved.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
-    stillOpen: compared.stillOpen.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
-    comparedAt: Date.now(),
-    preview: true,
-  };
+  return byFile.map((finding, index) => ({ ...finding, index: index + 1 }));
 }
 
-/** The delta the panel should show: the persisted one after conclude, a live preview before. */
-function reviewDeltaOf(record) {
-  if (record === null || record === undefined) return null;
-  if (record.delta !== null && record.delta !== undefined) return record.delta;
-  return previewDeltaOf(record);
+/**
+ * The baseline round for the re-review comparison: the newest earlier round that
+ * produced a conclusion (published or not) and thus froze a findings snapshot.
+ * Rounds without a conclusion are skipped — their analysis never completed the
+ * step that makes its findings a trustworthy baseline.
+ */
+function baselineRoundOf(record) {
+  const history = roundHistoryOf(record);
+  const current = currentRoundEntry(record);
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (entry === current) continue;
+    // 基准 = 最近一个「生成过结论」的轮次（无论快照是否为空）：空快照意味着上一轮干净，
+    // findingsDeltaOf 会因无条目而返回 null——绝不再向前回溯到更早的轮次。
+    if ((entry.conclusions?.length ?? 0) > 0) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+/**
+ * The re-review comparison over the audit workspace (review-delta spec v7): the baseline
+ * round's frozen findings versus this round's re-judgement. Every baseline finding gets a
+ * status from the *persisted* baselineVerdicts the analysis wrote: resolved only when the
+ * model explicitly judged it fixed (the single source of「已修复」), still-open when it
+ * carried it over, undetermined when the model never judged it (missed or truncated),
+ * pending while its file has not been re-analyzed. Reading the persisted verdicts (not
+ * the current issues) makes later issue rewrites — chat findingOps, review_update_analysis,
+ * clearFindings — unable to manufacture a fake resolved state.
+ * Derived on read, never persisted; it never touches the conclusion layer (H1).
+ */
+function findingsDeltaOf(record) {
+  const baseline = baselineRoundOf(record);
+  if (baseline === null || !Array.isArray(baseline.findings) || baseline.findings.length === 0) return null;
+  const entries = record.explanations instanceof Map
+    ? record.explanations
+    : new Map((Array.isArray(record.explanations) ? record.explanations : []).map((entry) => [entry.file, entry]));
+  const analyzed = (filePath) => {
+    const entry = entries.get(filePath);
+    return entry !== undefined && entry.status === 'done'
+      && entry.explanation !== null && entry.explanation !== undefined;
+  };
+  // Claims: baseline index → this round's carry-over entry (for the「仍未解决」row body —
+  // the model's updated wording plus its suggestion). Display only: the status itself
+  // comes from the persisted verdicts below.
+  const claimOf = new Map();
+  for (const [filePath, entry] of entries) {
+    if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
+    for (const finding of findingsOf(entry.explanation)) {
+      if (finding.roundItem === undefined) continue;
+      const previous = claimOf.get(finding.roundItem);
+      const updatedAt = entry.updatedAt ?? 0;
+      if (previous === undefined || updatedAt >= previous.updatedAt) {
+        claimOf.set(finding.roundItem, { finding: { ...finding, file: filePath }, fromFile: filePath, updatedAt });
+      }
+    }
+  }
+  const resolved = [];
+  const stillOpen = [];
+  const undetermined = [];
+  const pending = [];
+  for (const finding of baseline.findings) {
+    const entry = entries.get(finding.file);
+    const fileAnalyzed = analyzed(finding.file);
+    const verdicts = entry !== undefined && Array.isArray(entry.baselineVerdicts) ? entry.baselineVerdicts : null;
+    if (fileAnalyzed) {
+      // 已完成分析：状态只认持久化的 baselineVerdicts——没有判定（旧缓存、工具新建
+      // 的 entry、零判定折叠、漏判、截断）一律「未判定」，绝不因「无认领」判已修复。
+      const verdict = verdicts === null ? undefined : verdicts.find((item) => item.index === finding.index);
+      if (verdict === undefined) {
+        undetermined.push(finding);
+        continue;
+      }
+      if (verdict.status === 'fixed') {
+        resolved.push(finding);
+        continue;
+      }
+      stillOpen.push({ previous: finding, current: claimOf.get(finding.index)?.finding });
+      continue;
+    }
+    // 归属文件本轮未分析：跨文件认领（重命名场景）算「仍未解决」；否则保持待分析。
+    const claim = claimOf.get(finding.index);
+    if (claim !== undefined && claim.fromFile !== finding.file) {
+      stillOpen.push({ previous: finding, current: claim.finding });
+    } else {
+      pending.push(finding);
+    }
+  }
+  return {
+    baselineRound: baseline.round,
+    resolved,
+    stillOpen,
+    undetermined,
+    pending,
+  };
 }
 
 /** A quick status row for the pull list; the final conclusion wins over the initial report. */
@@ -313,6 +380,7 @@ function reviewSummary(record) {
  * Apply the conversation's mutations directly to the overview's existing content:
  * the report's initial risks and the final conclusion's blockers/suggestions/nextSteps.
  * Same 1-based validation as the file list; unknown or missing targets are ignored.
+ * Ops arrive pre-normalized (normalizeFindingOps already mapped legacy `text` to `point`).
  * A conclusion edit appends a `human` version, locks the touched item ids, and marks
  * the conclusion as edited; touching the report calls `onReportTouched`.
  */
@@ -353,23 +421,23 @@ function applyOverviewOps(record, ops, onReportTouched) {
     } else if (op.op === 'update') {
       if (index < 0 || index >= list.length) continue;
       if (isStep) {
-        list[index] = op.text;
+        list[index] = op.point;
       } else if (target === 'risk') {
         const before = list[index];
         list[index] = {
           severity: op.severity ?? before.severity ?? 'suggest',
           file: op.file ?? before.file ?? '',
-          point: op.text,
+          point: op.point,
         };
       } else {
         const before = list[index];
         const file = op.file ?? before?.file ?? '';
         const id = typeof before?.id === 'string' && before.id !== ''
           ? before.id
-          : itemId(kind, file, op.text);
+          : itemId(kind, file, op.point);
         // Keep the line only when the edit stays on the same file; new items carry line 0.
         const line = file === (before?.file ?? '') && Number.isInteger(before?.line) && before.line > 0 ? before.line : 0;
-        list[index] = { id, file, point: op.text, line };
+        list[index] = { id, file, point: op.point, line };
         touchedIds.add(id);
       }
       applied.push({ op: 'update', target, index: index + 1 });
@@ -377,17 +445,17 @@ function applyOverviewOps(record, ops, onReportTouched) {
       else touchedConclusion = true;
     } else if (op.op === 'add') {
       if (isStep) {
-        list.push(op.text);
+        list.push(op.point);
       } else if (target === 'risk') {
         list.push({
           severity: op.severity === 'block' ? 'block' : 'suggest',
           file: typeof op.file === 'string' ? op.file : '',
-          point: op.text,
+          point: op.point,
         });
       } else {
         const file = typeof op.file === 'string' ? op.file : '';
-        const id = itemId(kind, file, op.text);
-        list.push({ id, file, point: op.text, line: 0 });
+        const id = itemId(kind, file, op.point);
+        list.push({ id, file, point: op.point, line: 0 });
         touchedIds.add(id);
       }
       applied.push({ op: 'add', target });
@@ -411,27 +479,39 @@ function applyOverviewOps(record, ops, onReportTouched) {
 }
 
 /**
- * Apply the discussion's suggestion mutations to one file's suggestion list.
+ * Apply the discussion's finding mutations to one file's merged findings list.
  * Indices are 1-based and validated against the current list, so an out-of-range
- * op from the model is ignored instead of corrupting the data.
+ * op from the model is ignored instead of corrupting the data. Update keeps the
+ * fields the op does not mention, so a model can rewrite only the suggestion.
  */
-function applySuggestionOps(existing, ops) {
-  const list = Array.isArray(existing) ? [...existing] : [];
+function applyFindingOps(existing, ops) {
+  const list = findingsOf(existing).map((item) => ({ ...item }));
   const applied = [];
   for (const op of Array.isArray(ops) ? ops : []) {
     const index = typeof op.index === 'number' ? op.index - 1 : -1;
     if (op.op === 'remove') {
       if (index < 0 || index >= list.length) continue;
-      const [removed] = list.splice(index, 1);
-      applied.push({ op: 'remove', index: index + 1, text: removed });
+      list.splice(index, 1);
+      applied.push({ op: 'remove', index: index + 1 });
     } else if (op.op === 'update') {
       if (index < 0 || index >= list.length) continue;
       const before = list[index];
-      list[index] = op.text;
-      applied.push({ op: 'update', index: index + 1, before, text: op.text });
+      list[index] = {
+        severity: op.severity === 'block' || op.severity === 'suggest' ? op.severity : before.severity,
+        point: typeof op.point === 'string' && op.point !== '' ? op.point : before.point,
+        suggestion: typeof op.suggestion === 'string' ? op.suggestion : before.suggestion,
+        line: Number.isInteger(op.line) && op.line > 0 ? op.line : before.line,
+      };
+      applied.push({ op: 'update', index: index + 1 });
     } else if (op.op === 'add') {
-      list.push(op.text);
-      applied.push({ op: 'add', text: op.text });
+      if (typeof op.point !== 'string' || op.point === '') continue;
+      list.push({
+        severity: op.severity === 'block' ? 'block' : 'suggest',
+        point: op.point,
+        suggestion: typeof op.suggestion === 'string' ? op.suggestion : '',
+        line: Number.isInteger(op.line) && op.line > 0 ? op.line : 0,
+      });
+      applied.push({ op: 'add' });
     }
   }
   return { list, applied };
@@ -466,7 +546,7 @@ function makeRoundEntry(round, headSha, startedAt) {
     startedAt: startedAt ?? Date.now(),
     finishedAt: 0,
     conclusions: [],
-    delta: null,
+    findings: null,
     feedback: null,
     publishedIds: [],
   };
@@ -489,7 +569,6 @@ function roundHistoryOf(record) {
         conclusion,
         coverage: record.coverage ?? null,
       }],
-      delta: record.delta ?? null,
       feedback: record.feedback ?? null,
       publishedIds: (Array.isArray(record.published) ? record.published : [])
         .filter((entry) => (entry.round ?? round) === round && typeof entry.id === 'number')
@@ -515,7 +594,6 @@ function latestConclusionVersionOf(record) {
 function syncTopLevelFromHistory(record) {
   const round = currentRoundEntry(record);
   record.round = round.round;
-  record.delta = round.delta ?? null;
   record.feedback = round.feedback ?? null;
   const version = round.conclusions.length === 0 ? null : round.conclusions[round.conclusions.length - 1];
   record.conclusion = version === null ? null : version.conclusion;
@@ -562,8 +640,8 @@ function sanitizeRoundEntry(entry, index) {
     startedAt: Number.isFinite(entry?.startedAt) ? entry.startedAt : 0,
     finishedAt: Number.isFinite(entry?.finishedAt) ? entry.finishedAt : 0,
     conclusions,
-    delta: entry?.delta ?? null,
     feedback: entry?.feedback ?? null,
+    findings: Array.isArray(entry?.findings) && entry.findings.length > 0 ? entry.findings : null,
     publishedIds: Array.isArray(entry?.publishedIds) ? entry.publishedIds.filter((id) => typeof id === 'number') : [],
   };
 }
@@ -799,6 +877,7 @@ export function apply(ctx, config) {
           explanation: entry.explanation,
           chat: entry.chat,
           updatedAt: entry.updatedAt,
+          baselineVerdicts: Array.isArray(entry.baselineVerdicts) ? entry.baselineVerdicts : null,
         })),
         pullChat: record.pullChat,
         reportUpdatedAt: record.reportUpdatedAt ?? 0,
@@ -811,7 +890,6 @@ export function apply(ctx, config) {
         published: record.published ?? [],
         publishedItems: record.publishedItems ?? [],
         feedback: record.feedback ?? null,
-        delta: record.delta ?? null,
         previousRound: record.previousRound ?? null,
         conclusionAt: record.conclusionAt ?? 0,
         conclusion: record.conclusion,
@@ -896,9 +974,23 @@ export function apply(ctx, config) {
       explanations.set(entry.file, {
         status: entry.status ?? 'done',
         error: entry.error ?? null,
-        explanation: entry.explanation ?? null,
+        // Normalize on restore: legacy caches carry a separate `suggestions` list, which
+        // normalizeExplanation folds into `issues` (severity 'suggest') in place.
+        explanation: entry.explanation === null || entry.explanation === undefined
+          ? null
+          : normalizeExplanation(entry.explanation),
         chat: Array.isArray(entry.chat) ? entry.chat : [],
         updatedAt: entry.updatedAt ?? 0,
+        // The persisted per-item verdicts drive the re-review comparison; a legacy
+        // cache without them lands every baseline finding in「未判定」(undetermined) —
+        // conservative: no data never means resolved.
+        baselineVerdicts: Array.isArray(entry.baselineVerdicts)
+          ? entry.baselineVerdicts
+            .filter((item) => item !== null && typeof item === 'object'
+              && Number.isInteger(item.index) && item.index >= 1
+              && (item.status === 'fixed' || item.status === 'still-open'))
+            .map((item) => ({ ...item, status: item.status }))
+          : null,
       });
     }
     const number = Number(saved.number ?? key);
@@ -926,7 +1018,6 @@ export function apply(ctx, config) {
       })),
       publishedItems: Array.isArray(saved.publishedItems) ? saved.publishedItems : [],
       feedback: saved.feedback ?? null,
-      delta: saved.delta ?? null,
       previousRound: saved.previousRound ?? null,
       conclusionAt: saved.conclusionAt ?? 0,
       conclusion: saved.conclusion ?? null,
@@ -966,7 +1057,6 @@ export function apply(ctx, config) {
               conclusion: record.conclusion,
               coverage: record.coverage ?? null,
             }],
-        delta: record.delta ?? null,
         feedback: record.feedback ?? null,
         publishedIds: record.published
           .filter((entry) => (entry.round ?? legacyRound) === legacyRound && typeof entry.id === 'number')
@@ -1417,8 +1507,6 @@ export function apply(ctx, config) {
       published: [],
       publishedItems: [],
       feedback: null,
-      delta: null,
-      previousRound: null,
       humanItemIds: [],
       coverage: null,
       roundHistory: [],
@@ -1438,8 +1526,8 @@ export function apply(ctx, config) {
   }
 
   /**
-   * Start a new round on an existing record: remember the previous conclusion for
-   * the resolved-vs-still-open comparison, then clear every per-round field.
+   * Start a new round on an existing record: keep the previous conclusion (and its items)
+   * available for the implementer-feedback flow, then clear every per-round field.
    */
   function rollNewRound(record, now) {
     const history = roundHistoryOf(record);
@@ -1471,7 +1559,6 @@ export function apply(ctx, config) {
     record.comment = null;
     record.publishedItems = [];
     record.feedback = null;
-    record.delta = null;
     record.humanItemIds = [];
     record.coverage = null;
     record.concludeError = null;
@@ -1700,6 +1787,9 @@ export function apply(ctx, config) {
       console.warn('[pr-review] 读取文件完整内容失败，讲解退化为仅 diff：', error);
     }
     const pull = record.pull ?? { number, title: '', repo: provider.repo, platform: provider.platform };
+    // The baseline snapshot (the newest concluded round's findings) rides along with the
+    // analysis prompt: the model re-judges every baseline finding for this file.
+    const baselineFindings = baselineRoundOf(record)?.findings ?? [];
     const prompt = buildExplainPrompt(
       pull,
       file,
@@ -1707,7 +1797,7 @@ export function apply(ctx, config) {
       record.report,
       focus,
       fileContent,
-      { language: commentLanguage() },
+      { language: commentLanguage(), baselineFindings },
     );
     if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
@@ -1720,18 +1810,53 @@ export function apply(ctx, config) {
       throw new Error(`模型没有返回完整的分析 JSON。原始输出：${answer.raw.slice(0, 400)}`);
     }
     const concerns = normalizeConcerns(parsed.concerns);
-    // Same filter the verify prompt applies, so suggestion indices line up.
-    const rawSuggestions = Array.isArray(parsed.suggestions)
-      ? parsed.suggestions.filter((item) => typeof item === 'string' && item.trim() !== '')
-      : [];
+    // Baseline re-judgement (review-delta spec v7): every baseline finding must come out
+    // of the analysis with a status. "fixed" drops it (the model's explicit resolved
+    // verdict); "still-open" re-enters this round's findings as a carry-over that skips
+    // verification (the baseline round already confirmed it). A baseline finding the
+    // model never judged falls back conservatively to still-open (marked unjudged) when
+    // its file was analyzed here, and stays pending when the file wasn't.
+    const baselineVerdicts = normalizePreviousVerdicts(parsed.previousVerdicts, baselineFindings.length);
+    const verdictByIndex = new Map(baselineVerdicts.map((item) => [item.index, item]));
+    const carried = [];
+    for (const item of baselineFindings) {
+      const verdict = verdictByIndex.get(item.index);
+      if (verdict === undefined) {
+        if (item.file === filePath) {
+          carried.push({
+            severity: item.severity,
+            point: item.point,
+            suggestion: item.suggestion,
+            line: item.line,
+            roundItem: item.index,
+            unjudged: true,
+          });
+        }
+        continue;
+      }
+      if (verdict.status === 'still-open') {
+        // 归属文件在本轮会被分析：该条目的判定与展示归它（其最新分析是权威），认领只在
+        // 归属文件缺席时落库——重命名场景（旧文件已不在变更列表，新文件认领延续）。
+        const owningListed = item.file !== filePath
+          && (Array.isArray(record.files) ? record.files : []).some((file) => file.path === item.file);
+        if (owningListed) continue;
+        carried.push({
+          severity: verdict.severity ?? item.severity,
+          point: verdict.point ?? item.point,
+          suggestion: verdict.suggestion ?? item.suggestion,
+          line: verdict.line ?? item.line,
+          roundItem: item.index,
+        });
+      }
+    }
+    // One concern carries one suggestion; the verifier's suggestion rewrites win, the
+    // candidate's are the fallback. Legacy model output that still carries a separate
+    // `suggestions` array is folded into issues by normalizeExplanation (findingsOf).
     let issues = [];
     let unverified = [];
-    let suggestions = rawSuggestions;
-    // Suggestions go through the verifier too: a suggestion the diff already implements is
-    // noise, and the triage pass cannot tell on its own.
-    if (concerns.length > 0 || rawSuggestions.length > 0) {
+    if (concerns.length > 0) {
       if (settings.evidenceVerify === false) {
-        issues = concerns.map(({ severity, point, line }) => ({ severity, point, line }));
+        issues = concerns.map(({ severity, point, suggestion, line }) => ({ severity, point, suggestion, line }));
       } else {
         const verdicts = await verifyConcerns(
           record,
@@ -1739,30 +1864,41 @@ export function apply(ctx, config) {
           parsed.evidenceNeeds,
           (evidence, missing) => buildExplainVerifyPrompt(pull, file, concerns, evidence, missing, {
             language: commentLanguage(),
-            suggestions: rawSuggestions,
             diffText,
           }),
           epoch,
           signal,
         );
         if (verdicts.discarded) return { explanation: null, cached: false, discarded: true };
-        issues = verdicts.issues.map(({ severity, point, line }) => ({ severity, point, line }));
+        // partitionVerdicts products still carry a `file` key; normalizeExplanation
+        // (findingsOf) drops it, so the stored shape stays the uniform four keys.
+        issues = verdicts.issues;
         unverified = verdicts.unverified;
-        if (verdicts.raw !== null) {
-          suggestions = partitionSuggestions(verdicts.raw, rawSuggestions).kept;
-        }
       }
     }
-    // A confirmed blocker must not sit under a "pass" pill; mirror the report's reconciliation.
-    const baseVerdict = parsed.verdict ?? 'suggest';
+    // 同文去重：模型有时把已判 still-open 的问题又作为一条新发现写进 issues（完全同文）。
+    // 延续条目优先，同文的无 roundItem 条目丢弃——不做语义猜测，只认归一后的完全相等。
+    const comparablePoint = (value) => String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const carriedPoints = new Set(carried.map((item) => comparablePoint(item.point)));
+    issues = issues.filter((item) => !carriedPoints.has(comparablePoint(item.point)));
+    // Carried-over baseline findings lead the list: they were confirmed in the baseline
+    // round and only re-checked for survival this round.
+    issues = [...carried, ...issues];
+    // Verdict reconciliation (semantic contract):
+    // - any confirmed blocker -> block: never "pass" a file with confirmed blockers;
+    // - no confirmed findings -> pass: an all-dropped triage is a pass, since a "suggest"
+    //   verdict without a surviving finding is an unanchored judgment (the dropped
+    //   candidates and unverified notes stay visible in their own sections);
+    // - only suggest findings -> the model's verdict stands, except a bare "block"
+    //   (a blocked call with no confirmed blocker degrades to suggest).
+    const rawVerdict = ['block', 'suggest', 'pass'].includes(parsed.verdict) ? parsed.verdict : 'suggest';
     const verdict = issues.some((item) => item.severity === 'block')
       ? 'block'
-      : (issues.length > 0 && baseVerdict === 'pass' ? 'suggest' : baseVerdict);
+      : (issues.length === 0 ? 'pass' : (rawVerdict === 'block' ? 'suggest' : rawVerdict));
     const explanation = normalizeExplanation({
       ...parsed,
       issues,
       unverified,
-      suggestions,
       verdict,
     });
     // Repeat the check at the write point: an await added between parse and store must
@@ -1774,6 +1910,11 @@ export function apply(ctx, config) {
       explanation,
       chat: cached?.chat ?? [],
       updatedAt: Date.now(),
+      // The baseline re-judgement is persisted with the entry (review-delta spec v7):
+      // findingsDeltaOf reads explicit verdicts instead of inferring "no claim = fixed",
+      // so later issue rewrites (chat findOps, review_update_analysis, clearFindings)
+      // can never manufacture a fake resolved state.
+      baselineVerdicts: baselineVerdicts.length === 0 ? null : baselineVerdicts,
     });
     scheduleSave();
     maybeAutoConclude(record);
@@ -1928,9 +2069,13 @@ export function apply(ctx, config) {
       entry.chat.push({ role: 'user', text: question }, { role: 'assistant', text: answer });
       entry.updatedAt = Date.now();
       if (entry.explanation !== null && entry.explanation !== undefined && ops.length > 0) {
-        const result = applySuggestionOps(entry.explanation.suggestions ?? [], ops);
+        const result = applyFindingOps(entry.explanation, ops);
         if (result.applied.length > 0) {
-          entry.explanation = { ...entry.explanation, suggestions: result.list };
+          // No in-tree write path produces the legacy `suggestions` key any more, but the
+          // write-back still drops it: a stale out-of-tree cache must not fold straight back
+          // on the next read and double every number the chat prompt shows.
+          const { suggestions: _legacy, ...explanation } = entry.explanation;
+          entry.explanation = { ...explanation, issues: result.list };
           applied = result.applied;
         }
       }
@@ -1959,35 +2104,17 @@ export function apply(ctx, config) {
     const files = Array.isArray(record.files) ? record.files : [];
     // Only finished explanations feed the conclusion and the coverage number.
     const done = new Map();
-    const fileSeverities = [];
     for (const [filePath, entry] of record.explanations) {
       if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
       done.set(filePath, entry.explanation);
-      for (const issue of Array.isArray(entry.explanation.issues) ? entry.explanation.issues : []) {
-        fileSeverities.push({ file: filePath, severity: issue?.severity === 'block' ? 'block' : 'suggest' });
-      }
     }
-    return { files, done, fileSeverities, coverage: conclusionCoverage(record.explanations, files) };
-  }
-
-  /** Resolved-vs-still-open delta against the previous round's items. */
-  function concludeDeltaOf(record) {
-    const previousItems = Array.isArray(record.previousRound?.items) ? record.previousRound.items : [];
-    if (previousItems.length === 0) return null;
-    const compared = compareComments(previousItems, commentItems(record.conclusion));
-    return {
-      round: record.round ?? 1,
-      previousRound: record.previousRound?.round ?? (record.round ?? 1) - 1,
-      resolved: compared.resolved.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
-      stillOpen: compared.stillOpen.map((item) => ({ kind: item.kind, file: item.file, point: item.point })),
-      comparedAt: Date.now(),
-    };
+    return { files, done, coverage: conclusionCoverage(record.explanations, files) };
   }
 
   async function runConclude(record, abort) {
     const stillCurrent = () => record.concludingAbort === abort;
     try {
-      const { files, done, fileSeverities, coverage } = concludeInputsOf(record);
+      const { files, done, coverage } = concludeInputsOf(record);
       const previousVersion = latestConclusionVersionOf(record);
       const previousConclusion = previousVersion === null ? null : previousVersion.conclusion;
       const humanEdited = (record.conclusionEditedAt ?? 0) > 0
@@ -2017,18 +2144,21 @@ export function apply(ctx, config) {
       const merged = mergeConclusion(previousConclusion, generated, {
         lockedItemIds: Array.isArray(record.humanItemIds) ? record.humanItemIds : [],
       });
-      const calibrated = calibrateVerdict(merged, { humanEdited, fileSeverities });
+      // The conclusion model reviewed every per-file analysis; its blocker judgment
+      // (including dismissing per-file blocks) is authoritative.
+      const calibrated = calibrateVerdict(merged, { humanEdited });
       if (abort.signal.aborted) throw new Error('已取消');
       if (record.concluding !== null) record.concluding.stage = 'write';
       const version = pushConclusionVersion(record, 'model', calibrated, coverage);
       if (version === null) throw new Error('模型返回了空结论。');
+      // Freeze the round's findings as the next round's comparison baseline (review-delta
+      // spec v7): the conclusion is the marker of a completed round, so its snapshot is
+      // what a later round compares against — skipping any conclusion-less rounds between.
+      currentRoundEntry(record).findings = findingsSnapshotOf(record);
       record.conclusionEditedAt = 0;
       record.reportUpdatedAt = 0;
       record.error = null;
       record.concludeError = null;
-      const delta = concludeDeltaOf(record);
-      currentRoundEntry(record).delta = delta;
-      record.delta = delta;
       scheduleSave();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -2383,18 +2513,9 @@ export function apply(ctx, config) {
     for (const file of Array.isArray(record.files) ? record.files : []) {
       const entry = record.explanations.get(file.path);
       if (entry === undefined || entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-      const explanation = entry.explanation;
-      const issues = (Array.isArray(explanation.issues) ? explanation.issues : [])
-        .map((item) => ({
-          severity: severityOf(item?.severity),
-          point: pointOf(item),
-          line: Number.isFinite(item?.line) && item.line > 0 ? Math.floor(item.line) : 0,
-        }))
-        .filter((item) => item.point !== '');
-      const suggestions = (Array.isArray(explanation.suggestions) ? explanation.suggestions : [])
-        .filter((item) => typeof item === 'string' && item !== '');
-      if (issues.length === 0 && suggestions.length === 0) continue;
-      files.push({ file: file.path, issues, suggestions });
+      const findings = findingsOf(entry.explanation);
+      if (findings.length === 0) continue;
+      files.push({ file: file.path, findings });
     }
     const order = (Array.isArray(report.order) ? report.order : [])
       .map((item) => ({
@@ -2402,10 +2523,6 @@ export function apply(ctx, config) {
         reason: typeof item?.reason === 'string' ? item.reason : '',
       }))
       .filter((item) => item.file !== '');
-    const deltaItems = (list) => (Array.isArray(list) ? list : [])
-      .map((item) => ({ file: typeof item?.file === 'string' ? item.file : '', point: pointOf(item) }))
-      .filter((item) => item.point !== '');
-    const delta = record.delta ?? null;
     const coverage = record.coverage ?? null;
     const unanalyzed = Array.isArray(coverage?.unanalyzed)
       ? coverage.unanalyzed.filter((file) => typeof file === 'string' && file !== '')
@@ -2414,9 +2531,6 @@ export function apply(ctx, config) {
       risks,
       files,
       order,
-      delta: delta === null
-        ? null
-        : { resolved: deltaItems(delta.resolved), stillOpen: deltaItems(delta.stillOpen) },
       unanalyzed,
     };
   }
@@ -2770,20 +2884,13 @@ export function apply(ctx, config) {
     if (typeof explanation.logic === 'string' && explanation.logic !== '') {
       lines.push(`代码逻辑：${explanation.logic}`);
     }
-    const issues = Array.isArray(explanation.issues) ? explanation.issues : [];
-    if (issues.length > 0) {
+    const findings = findingsOf(explanation);
+    if (findings.length > 0) {
       lines.push('审查意见：');
-      for (const issue of issues) {
-        const where = issue.line === undefined || issue.line === null ? '' : `（行 ${issue.line}）`;
-        lines.push(`- [${issue.severity ?? '?'}] ${issue.point ?? ''}${where}`);
-      }
-    }
-    const suggestions = Array.isArray(explanation.suggestions) ? explanation.suggestions : [];
-    if (suggestions.length > 0) {
-      lines.push('改进建议：');
-      for (const suggestion of suggestions) {
-        const where = suggestion.line === undefined || suggestion.line === null ? '' : `（行 ${suggestion.line}）`;
-        lines.push(`- ${suggestion.point ?? suggestion.text ?? ''}${where}`);
+      for (const item of findings) {
+        const where = item.line > 0 ? `（行 ${item.line}）` : '';
+        const advice = item.suggestion !== '' ? `—— 建议：${item.suggestion}` : '';
+        lines.push(`- [${item.severity}] ${item.point}${where}${advice === '' ? '' : ` ${advice}`}`);
       }
     }
     return toolText(lines);
@@ -2802,11 +2909,6 @@ export function apply(ctx, config) {
       for (const [id, state] of entries) {
         lines.push(`- ${id}：${state?.status ?? '?'}${state?.reason ? `（${state.reason}）` : ''}`);
       }
-    }
-    const delta = entry.delta ?? null;
-    if (delta !== null && typeof delta === 'object') {
-      if (Array.isArray(delta.resolved) && delta.resolved.length > 0) lines.push(`已修复：${delta.resolved.length} 项`);
-      if (Array.isArray(delta.stillOpen) && delta.stillOpen.length > 0) lines.push(`仍未解决：${delta.stillOpen.length} 项`);
     }
     return toolText(lines);
   }
@@ -2887,7 +2989,7 @@ export function apply(ctx, config) {
       const analysis = entry === undefined
         ? '未分析'
         : entry.status === 'done'
-          ? `已分析（${(entry.explanation?.issues ?? []).length} 条意见 / ${(entry.explanation?.suggestions ?? []).length} 条建议）`
+          ? `已分析（${(entry.explanation?.issues ?? []).length} 条意见）`
           : entry.status === 'error' ? '分析失败' : '分析中';
       lines.push(`当前查看：文件 ${focus.path}（${analysis}${focus.pane === 'analysis' ? '，分析面板' : '，代码变更面板'}）`);
     } else {
@@ -2958,49 +3060,45 @@ export function apply(ctx, config) {
     return output;
   }
 
-  /** Totals the overview shows: initial risks, per-file issues, per-file suggestions. */
+  /** Totals the overview shows: initial risks and per-file findings (suggestions included). */
   function overviewCounts(record) {
     const risks = Array.isArray(record.report?.risks) ? record.report.risks.length : 0;
     let issues = 0;
-    let suggestions = 0;
     for (const entry of record.explanations.values()) {
       if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-      issues += Array.isArray(entry.explanation.issues) ? entry.explanation.issues.length : 0;
-      suggestions += Array.isArray(entry.explanation.suggestions) ? entry.explanation.suggestions.length : 0;
+      issues += findingsOf(entry.explanation).length;
     }
-    return { risks, issues, suggestions };
+    return { risks, issues };
   }
 
   /**
    * Clear the findings the overview renders, at the scope the caller names:
-   * - `suggestions`: every per-file suggestion plus suggest-severity initial risks;
-   * - `suggest`: the above plus suggest-severity per-file issues;
-   * - `all`: every per-file issue/suggestion and every initial risk.
-   * Block-severity items survive the two narrower scopes so a real blocker is not silenced.
+   * - `suggest`: every suggest-severity finding plus suggest-severity initial risks;
+   * - `all`: every finding and every initial risk.
+   * `suggestions` is the deprecated pre-merge alias and behaves like `suggest`.
+   * Block-severity items always survive unless the scope is `all`.
    * `at` stamps the edits: callers writing a conclusion pass the same instant they used
    * for it, so a cleared finding can never look newer than the conclusion it belongs to.
    */
   function clearOverviewFindings(record, scope, at = Date.now()) {
-    const cleared = { suggestions: 0, issues: 0, risks: 0 };
-    if (scope !== 'suggestions' && scope !== 'suggest' && scope !== 'all') return cleared;
-    const keepBlockRisks = scope === 'suggestions' || scope === 'suggest';
+    const cleared = { issues: 0, risks: 0 };
+    const effective = scope === 'suggestions' ? 'suggest' : scope;
+    if (effective !== 'suggest' && effective !== 'all') return cleared;
     for (const entry of record.explanations.values()) {
       if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-      const explanation = entry.explanation;
-      const suggestions = Array.isArray(explanation.suggestions) ? explanation.suggestions : [];
-      const issues = Array.isArray(explanation.issues) ? explanation.issues : [];
-      const nextSuggestions = [];
-      const nextIssues = scope === 'suggestions'
-        ? issues
-        : (scope === 'suggest' ? issues.filter((item) => item?.severity === 'block') : []);
-      cleared.suggestions += suggestions.length;
-      cleared.issues += issues.length - nextIssues.length;
-      if (nextSuggestions.length === suggestions.length && nextIssues.length === issues.length) continue;
-      entry.explanation = { ...explanation, issues: nextIssues, suggestions: nextSuggestions };
+      const findings = findingsOf(entry.explanation);
+      const nextFindings = effective === 'all' ? [] : findings.filter((item) => item.severity === 'block');
+      cleared.issues += findings.length - nextFindings.length;
+      if (nextFindings.length === findings.length) continue;
+      // No in-tree write path produces the legacy `suggestions` key any more, but clearing
+      // still drops it when rewriting: a stale out-of-tree cache must not fold straight back
+      // on every later read while the count claimed the findings cleared.
+      const { suggestions: _legacy, ...explanation } = entry.explanation;
+      entry.explanation = { ...explanation, issues: nextFindings };
       entry.updatedAt = at;
     }
     const risks = Array.isArray(record.report?.risks) ? record.report.risks : [];
-    const nextRisks = keepBlockRisks ? risks.filter((item) => item?.severity === 'block') : [];
+    const nextRisks = effective === 'all' ? [] : risks.filter((item) => item?.severity === 'block');
     cleared.risks = risks.length - nextRisks.length;
     if (cleared.risks > 0) record.report = { ...record.report, risks: nextRisks };
     return cleared;
@@ -3052,7 +3150,7 @@ export function apply(ctx, config) {
             `覆盖率：已分析 ${coverage.analyzed ?? 0}/${coverage.total ?? (record.files ?? []).length} 个文件`,
             `过期：${isStale(record) ? '结论之后有新的报告/分析改动，可重新生成结论' : '无'}`,
             `变更文件：${(record.files ?? []).length} 个 · 已发布评论：${(record.published ?? []).length} 条`,
-            `总览：初筛风险 ${overviewCounts(record).risks} · 逐文件意见 ${overviewCounts(record).issues} / 建议 ${overviewCounts(record).suggestions}（review_update_overview 可一次改总览）`,
+            `总览：初筛风险 ${overviewCounts(record).risks} · 逐文件审查意见 ${overviewCounts(record).issues} 条（review_update_overview 可一次改总览）`,
             `revision：${record.revision ?? 0}（写入工具必须带回这个值）`,
           ]);
         },
@@ -3068,7 +3166,7 @@ export function apply(ctx, config) {
       },
       {
         name: 'review_list_files',
-        description: '列出变更文件及逐文件分析状态（未分析/分析中/已分析、意见与建议数量），按审查顺序排列。',
+        description: '列出变更文件及逐文件分析状态（未分析/分析中/已分析、审查意见数量），按审查顺序排列。',
         parameters: { type: 'object', additionalProperties: false, properties: { number: numberProperty } },
         output: textOutput,
         async execute(args, exec) {
@@ -3086,7 +3184,7 @@ export function apply(ctx, config) {
             const progress = entry === undefined
               ? '未分析'
               : entry.status === 'done'
-                ? `已分析（${(entry.explanation?.issues ?? []).length} 条意见 / ${(entry.explanation?.suggestions ?? []).length} 条建议）`
+                ? `已分析（${(entry.explanation?.issues ?? []).length} 条意见）`
                 : entry.status === 'error'
                   ? '分析失败'
                   : '分析中';
@@ -3097,7 +3195,7 @@ export function apply(ctx, config) {
       },
       {
         name: 'review_get_analysis',
-        description: '读取单个变更文件的逐文件分析：结论、代码逻辑、审查意见（含行号）与改进建议。',
+        description: '读取单个变更文件的逐文件分析：结论、代码逻辑与审查意见（含建议与行号）。',
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -3167,7 +3265,7 @@ export function apply(ctx, config) {
       },
       {
         name: 'review_list_rounds',
-        description: '列出审查轮次：每轮 head、结论版本数、是否发布、实现者反馈与复审对比摘要。',
+        description: '列出审查轮次：每轮 head、结论版本数、是否发布与实现者反馈。',
         parameters: { type: 'object', additionalProperties: false, properties: { number: numberProperty } },
         output: textOutput,
         async execute(args, exec) {
@@ -3186,7 +3284,7 @@ export function apply(ctx, config) {
       },
       {
         name: 'review_get_round',
-        description: '读取指定轮次的结论、实现者反馈状态与复审对比（已修复/仍未解决）。',
+        description: '读取指定轮次的结论与实现者反馈状态。',
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -3228,7 +3326,7 @@ export function apply(ctx, config) {
     return [
       {
         name: 'review_update_analysis',
-        description: '更新单个变更文件的逐文件分析（结论/摘要/代码逻辑/审查意见/改进建议），改写审查数据，右栏面板随后可见。必须带 review_get 返回的 revision 做乐观锁。',
+        description: '更新单个变更文件的逐文件分析（结论/摘要/代码逻辑/审查意见），改写审查数据，右栏面板随后可见。必须带 review_get 返回的 revision 做乐观锁。',
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -3241,12 +3339,7 @@ export function apply(ctx, config) {
             issues: {
               type: 'array',
               items: { type: 'object', additionalProperties: true },
-              description: '审查意见列表（传入即整体替换）；每条 { point, line?, severity? }，point ≤ 500 字。',
-            },
-            suggestions: {
-              type: 'array',
-              items: { type: 'object', additionalProperties: true },
-              description: '改进建议列表（传入即整体替换）；每条 { point, line? }，point ≤ 500 字。',
+              description: '审查意见列表（传入即整体替换）；每条 { point, suggestion?, line?, severity? }，point 写问题与影响（≤ 500 字），suggestion 写具体修法，一条最多一条。',
             },
             number: numberProperty,
           },
@@ -3262,9 +3355,6 @@ export function apply(ctx, config) {
           const issues = args.issues === undefined
             ? undefined
             : args.issues.map((item) => sanitizeToolItem(item, 'issue'));
-          const suggestions = args.suggestions === undefined
-            ? undefined
-            : args.suggestions.map((item) => sanitizeToolItem(item, 'suggestion'));
           const entry = record.explanations.get(args.path) ?? {
             file: args.path,
             status: 'done',
@@ -3274,16 +3364,20 @@ export function apply(ctx, config) {
             updatedAt: 0,
           };
           const before = entry.explanation ?? null;
-          const next = {
-            verdict: normalizeVerdict(args.verdict, before?.verdict ?? 'suggest'),
-            summary: args.summary ?? before?.summary ?? '',
-            logic: args.logic ?? before?.logic ?? '',
-            walkthrough: Array.isArray(before?.walkthrough) ? before.walkthrough : [],
-            issues: issues ?? (Array.isArray(before?.issues) ? before.issues : []),
-            suggestions: suggestions ?? (Array.isArray(before?.suggestions) ? before.suggestions : []),
-          };
+          // Normalize the merged explanation through the single shape point: issues become
+          // four-key findings (suggestion inlined), any legacy `suggestions` key is dropped,
+          // and fields the call omits (walkthrough/changes/unverified) survive the edit.
+          const next = normalizeExplanation({
+            verdict: args.verdict ?? before?.verdict,
+            summary: args.summary ?? before?.summary,
+            logic: args.logic ?? before?.logic,
+            walkthrough: before?.walkthrough,
+            changes: before?.changes,
+            issues: issues ?? before?.issues,
+            unverified: before?.unverified,
+          });
           if (JSON.stringify(next).length > 12_000) {
-            throw toolError(TOOL_ERROR.limitExceeded, '该文件分析超过 12000 字符，请精简 issues/suggestions 后重试。');
+            throw toolError(TOOL_ERROR.limitExceeded, '该文件分析超过 12000 字符，请精简 issues 后重试。');
           }
           entry.explanation = next;
           entry.status = 'done';
@@ -3295,7 +3389,7 @@ export function apply(ctx, config) {
           return toolText([
             `已更新分析：${args.path}（revision ${record.revision}）`,
             `结论：${next.verdict} · ${next.summary}`,
-            `意见 ${next.issues.length} 条 / 建议 ${next.suggestions.length} 条`,
+            `意见 ${next.issues.length} 条`,
             '需要继续修改请重新 review_get 取 revision。',
           ]);
         },
@@ -3523,7 +3617,7 @@ export function apply(ctx, config) {
       },
       {
         name: 'review_update_overview',
-        description: '一次更新「总览」：总体评价/摘要、总体初筛风险、审查顺序、审查重点，以及当前轮结论（阻塞项/修改建议/下一步），可选清理逐文件意见与建议（clearFindings）。会刷新结论时间戳（清除 stale），并让面板、发布评论与后续重新生成看到同一份总览；用户说“结论通过 / 去掉所有建议 / 清理意见”时优先用它，不要逐个文件改。必须带 revision。',
+        description: '一次更新「总览」：总体评价/摘要、总体初筛风险、审查顺序、审查重点，以及当前轮结论（阻塞项/修改建议/下一步），可选清理逐文件审查意见（clearFindings）。会刷新结论时间戳（清除 stale），并让面板、发布评论与后续重新生成看到同一份总览；用户说“结论通过 / 清理意见”时优先用它，不要逐个文件改。必须带 revision。',
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -3559,8 +3653,8 @@ export function apply(ctx, config) {
             },
             clearFindings: {
               type: 'string',
-              enum: ['none', 'suggestions', 'suggest', 'all'],
-              description: '清理逐文件/风险层面的 findings：suggestions=清所有建议与 suggest 级风险（保留阻塞项）；suggest=再清 suggest 级审查意见（保留阻塞）；all=清空全部意见/建议/风险。默认 none。',
+              enum: ['none', 'suggest', 'all'],
+              description: '清理逐文件/风险层面的 findings：suggest=清 suggest 级审查意见与 suggest 级初筛风险（保留阻塞项）；all=清空全部意见与风险；suggestions 为弃用别名，等同 suggest。默认 none。',
             },
             number: numberProperty,
           },
@@ -3643,14 +3737,14 @@ export function apply(ctx, config) {
             record,
             exec,
             'review_update_overview',
-            `风险 ${beforeCounts.risks}→${afterCounts.risks} · 意见 ${beforeCounts.issues}→${afterCounts.issues} · 建议 ${beforeCounts.suggestions}→${afterCounts.suggestions} · 结论 ${normalized.verdict}`,
+            `风险 ${beforeCounts.risks}→${afterCounts.risks} · 审查意见 ${beforeCounts.issues}→${afterCounts.issues} · 结论 ${normalized.verdict}`,
           );
           scheduleSave();
           return toolText([
             `已更新总览（revision ${record.revision}）：结论 ${normalized.verdict} · ${normalized.summary.slice(0, 160)}`,
             `阻塞项 ${normalized.blockers.length} 条 / 修改建议 ${normalized.suggestions.length} 条 / 下一步 ${normalized.nextSteps.length} 条`,
-            `初筛风险 ${afterCounts.risks} 条 · 逐文件意见 ${afterCounts.issues} 条 / 建议 ${afterCounts.suggestions} 条`,
-            cleared.suggestions + cleared.issues + cleared.risks === 0 ? '' : `已清理：建议 ${cleared.suggestions} 条、意见 ${cleared.issues} 条、风险 ${cleared.risks} 条`,
+            `初筛风险 ${afterCounts.risks} 条 · 逐文件审查意见 ${afterCounts.issues} 条`,
+            cleared.issues + cleared.risks === 0 ? '' : `已清理：意见 ${cleared.issues} 条、风险 ${cleared.risks} 条`,
             '结论时间戳已刷新（stale 清除）；下一份发布评论、面板总览与重新生成看到的是同一份数据。',
           ]);
         },
@@ -3716,7 +3810,7 @@ export function apply(ctx, config) {
       systemPrompt.section({
         name: 'pr-review: review-data',
         order: 60,
-        text: 'PR 审查插件：审查数据（总体报告、逐文件分析、当前轮结论）保存在本地，代码平台上的审查评论只是这份数据的渲染结果。要调整下一次发布的审查意见，用 review_update_overview 一次改总览（结论 + 总体评价/风险/顺序，可选 clearFindings 清理逐文件意见与建议）；只有单文件/单轮细节才用 review_update_conclusion / review_update_analysis / review_update_report（先 review_get 取 revision）；不要直接编辑平台上已发布的评论。用户要求「重新生成结论 / 发布 / 查看评论 / 在代码平台打开」时，分别用 review_conclude / review_publish / review_get_links 触发；发布是真实写操作，只在用户明确要求时调用。对话里出现 <review-context> 时，用户说「这个文件/这条/这里」默认指快照的「当前查看」范围：直接按它操作（例如标记该文件通过就 review_update_analysis + verdict），不要反问是哪个文件；只有没有快照时才问。需要确认时主动用 ask_user_question 问、不要猜：发布范围不唯一（哪些条目）、同一轮同一版本已发布过是否追加、要改哪一轮/哪个文件但快照缺失、或用户一句话里出现多个候选对象。',
+        text: 'PR 审查插件：审查数据（总体报告、逐文件分析、当前轮结论）保存在本地，代码平台上的审查评论只是这份数据的渲染结果。要调整下一次发布的审查意见，用 review_update_overview 一次改总览（结论 + 总体评价/风险/顺序，可选 clearFindings 清理逐文件审查意见）；只有单文件/单轮细节才用 review_update_conclusion / review_update_analysis / review_update_report（先 review_get 取 revision）；不要直接编辑平台上已发布的评论。用户要求「重新生成结论 / 发布 / 查看评论 / 在代码平台打开」时，分别用 review_conclude / review_publish / review_get_links 触发；发布是真实写操作，只在用户明确要求时调用。对话里出现 <review-context> 时，用户说「这个文件/这条/这里」默认指快照的「当前查看」范围：直接按它操作（例如标记该文件通过就 review_update_analysis + verdict），不要反问是哪个文件；只有没有快照时才问。需要确认时主动用 ask_user_question 问、不要猜：发布范围不唯一（哪些条目）、同一轮同一版本已发布过是否追加、要改哪一轮/哪个文件但快照缺失、或用户一句话里出现多个候选对象。',
       });
     } catch (error) {
       console.warn('[pr-review] 注册提示词段落失败', error);

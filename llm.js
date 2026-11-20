@@ -286,6 +286,44 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
   const reportLine = report === null || report === undefined
     ? ''
     : `\nPR 总体结论：${report.verdict ?? ''}；${report.summary ?? ''}`;
+  // Baseline findings (review-delta spec v7): the previous concluded round's findings are
+  // re-judged one by one — "fixed" leaves the issue list, "still-open" re-enters it with
+  // a roundItem reference. The full globally-numbered snapshot goes in so the model can
+  // carry a finding across a renamed file.
+  const baseline = Array.isArray(options.baselineFindings) ? options.baselineFindings : [];
+  // 快照全量冻结，但下发按文件截断到 10 条（block 优先、行号升序）：截断部分不下发、
+  // 不要求判定，并显式声明——这些条目在对比里落「未判定」，绝不静默消失。
+  const baselineByFile = new Map();
+  for (const item of baseline) {
+    if (!baselineByFile.has(item.file)) baselineByFile.set(item.file, []);
+    baselineByFile.get(item.file).push(item);
+  }
+  const baselineShown = [];
+  let baselineTruncated = 0;
+  for (const group of baselineByFile.values()) {
+    const sorted = [...group].sort((left, right) => (
+      (left.severity === right.severity ? 0 : left.severity === 'block' ? -1 : 1) || left.line - right.line
+    ));
+    baselineShown.push(...sorted.slice(0, 10));
+    baselineTruncated += Math.max(0, sorted.length - 10);
+  }
+  baselineShown.sort((left, right) => left.index - right.index);
+  const baselineSection = baselineShown.length === 0 ? [] : [
+    '## 基准轮审查意见（本轮必须逐条判定修复状态）',
+    ...baselineShown.map((item) => {
+      const where = item.line > 0 ? `（行 ${item.line}）` : '';
+      const advice = typeof item.suggestion === 'string' && item.suggestion !== '' ? ` —— 建议：${item.suggestion}` : '';
+      return `${item.index}. [${item.severity}] ${item.file === '' ? '' : `${item.file} `}${item.point}${where}${advice}`;
+    }),
+    ...(baselineTruncated > 0
+      ? [`（上一轮意见已截断：另有 ${baselineTruncated} 条未列出，未列出的条目不需要判定。）`]
+      : []),
+    '对上面每一条意见，结合当前代码逐条判定：该问题在本次改动后是否仍存在。',
+    '- 仍存在 → 在 previousVerdicts 输出 "status": "still-open"，并把该问题作为一条审查意见写入 issues（severity/point/line 按当前代码重写），同时带 "roundItem": <上面的序号>；',
+    '- 已修复 / 不再存在 → 在 previousVerdicts 输出 "status": "fixed"，不要把它写入 issues；',
+    `- previousVerdicts 必须恰好包含 ${baselineShown.length} 条判定，一条都不能少。`,
+    '- 本轮新发现的问题照常写入 issues（不带 roundItem）——不要重复报告：已在 previousVerdicts 中判定 still-open 的问题只写一次，不要同时作为新发现再写一条。',
+  ];
   const user = [
     `平台：${platformLabel(pull.platform)}；仓库：${pull.repo}`,
     `PR #${pull.number}：${pull.title}（${pull.headRef} → ${pull.baseRef}）`,
@@ -299,6 +337,7 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
       ? `## 该文件的完整内容（PR head，行号格式为「行号<TAB>代码」，可能被截断）\n${numberLines(fileContent, 3000)}`
       : '## 该文件的完整内容不可用（只有 diff；分析时不要臆测未出现的代码）',
     '',
+    ...baselineSection,
     '分析要求：结合完整文件说明相关函数/类的职责、被谁调用、与周边代码的关系；不要只描述 diff 片段。',
     '请输出严格 JSON。分析要详细、可读、面向要理解这次改动的人：',
     '{',
@@ -306,16 +345,20 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
     '  "logic": "整体逻辑分析（只写全局）：这个文件原来做什么 → 现在整体变成怎样 → 函数/模块的上下游调用关系 → 数据与状态怎么流动 → 关键边界条件与错误路径。不要复述 walkthrough 中各段落的具体改动细节。篇幅随改动规模自适应：大改动 400-800 字，小改动 200-400 字即可，不要为凑字数填充。",',
     '  "walkthrough": [{ "title": "段落/函数名 + 一句话作用（如「cleanupInterruptedMacInstall：启动时清理中断残留」），不要写 hunk 编号", "detail": "用人话讲清：这段做了什么、为什么需要它、影响谁、有什么风险；2-5 句；不要复述 logic 的整体链路，不要把审查意见写进来", "hunk": 1, "context": { "label": "所属函数/类名", "startLine": 230, "endLine": 275 } }],',
     '  "changes": "逐类说明具体变化：新增了什么、删除了什么、重命名/移动了什么",',
-    '  "concerns": [{ "severity": "block | suggest", "point": "问题 + 影响 + 修法（一条只写一个核心问题）", "line": 0 }],',
+    ...(baseline.length > 0
+      ? ['  "previousVerdicts": [{ "index": 1, "status": "fixed | still-open", "point": "still-open 时：当前代码的表述（可省略沿用原文）", "line": 0, "severity": "block | suggest", "suggestion": "可省略沿用原建议" }],']
+      : []),
+    '  "concerns": [{ "severity": "block | suggest", "point": "问题 + 影响（一条只写一个核心问题）", "suggestion": "具体修法（可选；没有明确修法就省略，不要把修法写进 point）", "line": 0 }],',
     '  "evidenceNeeds": [{ "concern": 1, "kind": "callers | definition | callee | schema | test | file", "path": "文件路径", "symbol": "符号名", "reason": "为什么需要它" }],',
-    '  "suggestions": ["可执行的修改建议"],',
     '  "verdict": "block | suggest | pass"',
     '}',
-    'logic 只写全局、walkthrough 只写局部，两者不得互相复述；walkthrough 按 diff 规模 1-3 条（改动很小时 1 条即可）、按 diff 的 hunk 顺序覆盖主要改动；hunk 是该条分析对应的 diff hunk 序号（从 1 开始，按 @@ 出现顺序计数），不确定写 0；title 禁止出现「hunk」「第 N 段」这类编号；detail 面向第一次读这段代码的人，术语首次出现要顺带解释，问题与建议写到 concerns/suggestions，不要写进 walkthrough；',
+    'logic 只写全局、walkthrough 只写局部，两者不得互相复述；walkthrough 按 diff 规模 1-3 条（改动很小时 1 条即可）、按 diff 的 hunk 顺序覆盖主要改动；hunk 是该条分析对应的 diff hunk 序号（从 1 开始，按 @@ 出现顺序计数），不确定写 0；title 禁止出现「hunk」「第 N 段」这类编号；detail 面向第一次读这段代码的人，术语首次出现要顺带解释，问题与建议写到 concerns，不要写进 walkthrough；',
     'context 用于在 diff 里展开这段改动所属的完整函数/类：label 写函数/类名，startLine/endLine 是它在上面「完整内容」里的起止行号（用给出的行号，1-based，跨语言通用）；该段改动不在任何函数/类内（如 Markdown、配置文件）或你不确定时，context 写 null。',
     '同时看测试：这次改动需要补充或更新哪些测试；如果只给了实现、没有相关测试，在 summary 里点明这个测试空白。',
-    '如果这次改动引入重复分支、兼容回退或单次使用的包装层，用 suggest 指出可化简之处。',
-    'concerns 为空数组表示没有发现问题；line 用 diff 中的新文件行号，不确定写 0。',
+    '如果这次改动引入重复分支、兼容回退或单次使用的包装层，在 concerns 里用 suggest 指出可化简之处；纯改进点（补测试、抽公共 helper 等没有具体缺陷的）也必须作为 severity 为 suggest 的 concern 输出，修法写进 suggestion。',
+    '纯改进点（不阻碍合并）的 point 以「可选：」或「nit：」开头，与真正的非阻塞缺陷区分开。',
+    'verdict 语义：block=存在应先修复的缺陷，不可合并；suggest=可合并但有保留意见或非阻塞问题；pass=可按原样合并（concerns 均为可选改进时用 pass）。',
+    'concerns 为空数组表示没有发现问题；point 只写问题与影响，不要把修法混进 point；line 用 diff 中的新文件行号，不确定写 0。',
     'evidenceNeeds 必须覆盖每个 concern（concern 是 1-based 序号）：kind=file 指向本文件也算取证；无法核实的由复审放进未验证项，不要写进 point。',
   ].join('\n');
   return { system: reviewerSystem(language), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 12000, timeoutMs: 600_000 };
@@ -339,15 +382,15 @@ function verifierSystem(language) {
 function verifyPromptBody(header, concerns, evidence, missing, language, extra = {}) {
   const list = Array.isArray(concerns) ? concerns : [];
   const missingList = Array.isArray(missing) ? missing : [];
-  const suggestions = Array.isArray(extra.suggestions)
-    ? extra.suggestions.filter((item) => typeof item === 'string' && item.trim() !== '')
-    : [];
   const diffText = typeof extra.diffText === 'string' ? extra.diffText.trim() : '';
   const candidateLines = list.length === 0
     ? ['（无候选问题）']
     : list.map((item, index) => {
         const where = item.file === '' ? '' : ` [${item.file}${item.line > 0 ? `:${item.line}` : ''}]`;
-        return `${index + 1}. [${item.severity}]${where} ${item.point}`;
+        const advice = typeof item.suggestion === 'string' && item.suggestion !== ''
+          ? `\n   —— ${language === 'en' ? 'Suggestion: ' : '建议：'}${item.suggestion}`
+          : '';
+        return `${index + 1}. [${item.severity}]${where} ${item.point}${advice}`;
       });
   const missingLines = missingList.length === 0 ? ['（无）'] : missingList.map((item) => `- ${item}`);
   const lines = [
@@ -363,10 +406,7 @@ function verifyPromptBody(header, concerns, evidence, missing, language, extra =
     ...missingLines,
   ];
   if (diffText !== '') {
-    lines.push('', '## 该文件的 diff（用来判断建议是否已经实现）', diffText);
-  }
-  if (suggestions.length > 0) {
-    lines.push('', '## 候选改进建议（index 从 1 开始）', ...suggestions.map((item, index) => `${index + 1}. ${item}`));
+    lines.push('', '## 该文件的 diff（用来判断候选是否已经实现）', diffText);
   }
   lines.push(
     '',
@@ -383,19 +423,11 @@ function verifyPromptBody(header, concerns, evidence, missing, language, extra =
     '只看候选与证据，不要引用第一轮的推理，也不要重新审查整个文件。',
     '如果证据里发现了新的、可确认的问题，写进 extraIssues，带上 confidence 并确保能引用证据中的代码；否则不要输出。',
     '规范类问题必须引用规范原文（如「CLAUDE.md 要求……」），没有原文就按未验证处理。',
+    '候选（含纯 suggest 改进点）已经由本次 diff 或现有代码实现、或只是复述现状的，confidence 打 24 以下直接丢弃；不要因为「有价值」而保留已实现的条目。',
   );
-  if (suggestions.length > 0) {
-    lines.push(
-      '对每条候选改进建议给出 keep：如果该建议已经由本次 diff 或现有代码实现，keep 为 false 并写明 reason；仍存在缺口才为 true。',
-      '不要因为建议「有价值」而保留已经实现的条目。每条建议都必须返回一条 suggestionResult（index 从 1 开始）。',
-    );
-  }
   lines.push('', '请输出严格 JSON（不要输出 JSON 以外的解释）：', '{');
-  lines.push('  "results": [{ "index": 1, "confidence": 85, "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0, "missing": "" }],');
-  lines.push('  "extraIssues": [{ "confidence": 90, "severity": "block | suggest", "point": "问题 + 影响 + 修法", "line": 0 }]' + (suggestions.length > 0 ? ',' : ''));
-  if (suggestions.length > 0) {
-    lines.push('  "suggestionResults": [{ "index": 1, "keep": true, "reason": "" }]');
-  }
+  lines.push('  "results": [{ "index": 1, "confidence": 85, "severity": "block | suggest", "point": "问题 + 影响", "suggestion": "具体修法（可选；沿用候选的修法或按证据修正）", "line": 0, "missing": "" }],');
+  lines.push('  "extraIssues": [{ "confidence": 90, "severity": "block | suggest", "point": "问题 + 影响", "suggestion": "具体修法（可选）", "line": 0 }]');
   lines.push('}', language === 'en' ? 'Write the human-readable fields in English.' : '');
   return lines.filter((line) => line !== '').join('\n');
 }
@@ -438,7 +470,7 @@ export function buildExplainVerifyPrompt(pull, file, concerns, evidence, missing
           evidence,
           missing,
           language,
-          { suggestions: options.suggestions, diffText: options.diffText },
+          { diffText: options.diffText },
         ),
       }],
     }],
@@ -463,7 +495,7 @@ export function buildChatPrompt(pull, file, explanation, report, history, questi
     .map((turn) => `${turn.role === 'assistant' ? '助手' : '用户'}：${String(turn.text).slice(0, 3000)}`)
     .join('\n');
   const isFileScope = file !== null && file !== undefined;
-  const currentSuggestions = Array.isArray(explanation?.suggestions) ? explanation.suggestions : [];
+  const currentFindings = findingsOf(explanation);
 
   const numbered = (items, mapper) => (items.length === 0 ? '（无）' : items.map(mapper).join('\n'));
   const overviewLines = () => {
@@ -490,17 +522,17 @@ export function buildChatPrompt(pull, file, explanation, report, history, questi
   };
 
   const scopeSection = isFileScope
-    ? `## 该文件当前的改进建议（编号从 1 开始，用于这次讨论的增删改）\n${numbered(currentSuggestions, (item, i) => `${i + 1}. ${item}`)}`
+    ? `## 该文件当前的审查意见（编号从 1 开始，用于这次讨论的增删改）\n${numbered(currentFindings, (item, i) => `${i + 1}. [${item.severity}] ${item.point}${item.line > 0 ? `（行 ${item.line}）` : ''}${item.suggestion === '' ? '' : `\n   —— 建议：${item.suggestion}`}`)}`
     : overviewLines();
 
   const outputLines = isFileScope
     ? [
-        '"suggestionOps": [',
+        '"findingOps": [',
         '  { "op": "remove", "index": 1 },',
-        '  { "op": "update", "index": 2, "text": "改写后的建议内容" },',
-        '  { "op": "add", "text": "新增的建议内容" }',
+        '  { "op": "update", "index": 2, "point": "改写后的问题与影响", "suggestion": "改写后的具体修法（可选）", "severity": "block | suggest", "line": 12 },',
+        '  { "op": "add", "point": "新意见的问题与影响", "suggestion": "可选：具体修法", "severity": "suggest", "line": 0 }',
         ']',
-        'suggestionOps 只用于按这次讨论修改「该文件当前的改进建议」：某条不成立就 remove 对应编号；要改进/调整就 update；讨论出新点就 add。没有要改的就输出空数组。不要通过 answer 代替操作。',
+        'findingOps 只用于按这次讨论修改「该文件当前的审查意见」：某条不成立就 remove 对应编号；要改写就 update（只给要改的字段：point 写问题与影响，suggestion 写具体做法，severity/line 可一并改）；讨论出新意见就 add。没有要改的就输出空数组。不要通过 answer 代替操作。',
       ]
     : [
         '"suggestionOps": [',
@@ -564,7 +596,6 @@ export function buildConcludePrompt(pull, report, explanations, currentConclusio
     verdict: explanation.verdict ?? '',
     summary: explanation.summary ?? '',
     issues: explanation.issues ?? [],
-    suggestions: explanation.suggestions ?? [],
   }));
   const coverage = options.coverage === null || options.coverage === undefined ? null : options.coverage;
   const previousItems = Array.isArray(options.previousItems) ? options.previousItems : [];
@@ -644,6 +675,38 @@ export function buildConcludePrompt(pull, report, explanations, currentConclusio
   return { system: reviewerSystem(languageOf(options)), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 8000, timeoutMs: 300_000 };
 }
 
+/**
+ * Normalize the per-item verdicts the model produces for the baseline findings
+ * (review-delta spec v7): one valid verdict per baseline index, duplicates keep
+ * the first, everything malformed is dropped — a dropped verdict falls back to
+ * the conservative "still-open" at the call site, never to "fixed".
+ */
+export function normalizePreviousVerdicts(raw, baselineCount) {
+  if (!Array.isArray(raw) || !Number.isInteger(baselineCount) || baselineCount <= 0) return [];
+  const seen = new Set();
+  const verdicts = [];
+  for (const item of Array.isArray(raw) ? raw : []) {
+    if (item === null || typeof item !== 'object') continue;
+    const index = Number.isInteger(item.index) && item.index >= 1 && item.index <= baselineCount ? item.index : 0;
+    if (index === 0 || seen.has(index)) continue;
+    if (item.status !== 'fixed' && item.status !== 'still-open') continue;
+    seen.add(index);
+    if (item.status === 'fixed') {
+      verdicts.push({ index, status: 'fixed' });
+      continue;
+    }
+    verdicts.push({
+      index,
+      status: 'still-open',
+      ...(typeof item.point === 'string' && item.point.trim() !== '' ? { point: item.point.trim() } : {}),
+      ...(Number.isInteger(item.line) && item.line > 0 ? { line: Math.floor(item.line) } : {}),
+      ...(item.severity === 'block' || item.severity === 'suggest' ? { severity: item.severity } : {}),
+      ...(typeof item.suggestion === 'string' && item.suggestion.trim() !== '' ? { suggestion: item.suggestion.trim() } : {}),
+    });
+  }
+  return verdicts;
+}
+
 /** Candidate problems from the triage pass; none of them is a finding until the verifier scores it. */
 export function normalizeConcerns(raw) {
   return (Array.isArray(raw) ? raw : [])
@@ -652,7 +715,9 @@ export function normalizeConcerns(raw) {
       severity: item.severity === 'block' ? 'block' : 'suggest',
       file: typeof item.file === 'string' ? item.file : '',
       point: typeof item.point === 'string' ? item.point.trim() : '',
-      line: typeof item.line === 'number' && Number.isFinite(item.line) ? Math.floor(item.line) : 0,
+      suggestion: typeof item.suggestion === 'string' ? item.suggestion.trim() : '',
+      // Same hardening as findingsOf: only positive finite line numbers survive.
+      line: typeof item.line === 'number' && Number.isFinite(item.line) && item.line > 0 ? Math.floor(item.line) : 0,
     }))
     .filter((item) => item.point !== '');
 }
@@ -725,9 +790,14 @@ export function partitionVerdicts(raw, concerns) {
       : (fallback?.point ?? '');
     if (point === '' || seen.has(point)) return;
     seen.add(point);
+    // One suggestion per finding: the verifier's rewrite wins, else the candidate's own.
+    const modelSuggestion = typeof item?.suggestion === 'string' ? item.suggestion.trim() : '';
+    const fallbackSuggestion = typeof fallback?.suggestion === 'string' ? fallback.suggestion.trim() : '';
+    const suggestion = modelSuggestion !== '' ? modelSuggestion : fallbackSuggestion;
     issues.push({
       severity: severityOf(item, fallback),
       point,
+      suggestion,
       line: typeof item?.line === 'number' && Number.isFinite(item.line)
         ? Math.floor(item.line)
         : (fallback?.line ?? 0),
@@ -808,28 +878,6 @@ export function partitionVerdicts(raw, concerns) {
   return { issues, unverified, dropped };
 }
 
-/**
- * Suggestions are reviewed too: the verifier marks ones the diff already implements.
- * A suggestion without a verdict is kept (the verifier may have skipped it); only an
- * explicit `keep: false` removes it.
- */
-export function partitionSuggestions(raw, suggestions) {
-  const list = Array.isArray(suggestions) ? suggestions : [];
-  const byIndex = new Map();
-  for (const item of Array.isArray(raw?.suggestionResults) ? raw.suggestionResults : []) {
-    if (item === null || typeof item !== 'object') continue;
-    if (Number.isInteger(item.index) && item.index >= 1) byIndex.set(item.index, item);
-  }
-  const kept = [];
-  let dropped = 0;
-  list.forEach((suggestion, index) => {
-    const verdict = byIndex.get(index + 1);
-    if (verdict !== undefined && verdict.keep === false) dropped += 1;
-    else kept.push(suggestion);
-  });
-  return { kept, dropped };
-}
-
 /** The triage pass output: display fields plus candidate problems, before any verification. */
 export function normalizeReportDraft(raw, fallbackOrder) {
   const verdict = ['block', 'suggest', 'pass'].includes(raw?.verdict) ? raw.verdict : 'suggest';
@@ -893,15 +941,49 @@ export function normalizeReport(raw, fallbackOrder) {
   };
 }
 
+/**
+ * The merged findings of one file explanation: every finding carries its own suggestion.
+ * Legacy caches kept suggestions as a second list (plain strings or `{ point|text, line }`
+ * objects); they fold in here as `suggest` findings so no reader ever branches on the old
+ * shape. This is the single normalization point — normalizeExplanation and every backend
+ * reader go through it.
+ */
+export function findingsOf(explanation) {
+  const issues = (Array.isArray(explanation?.issues) ? explanation.issues : [])
+    .filter((item) => item !== null && typeof item === 'object')
+    .map((item) => ({
+      severity: item.severity === 'block' ? 'block' : 'suggest',
+      point: typeof item.point === 'string' ? item.point.trim() : '',
+      suggestion: typeof item.suggestion === 'string' ? item.suggestion.trim() : '',
+      line: typeof item.line === 'number' && Number.isFinite(item.line) && item.line > 0 ? Math.floor(item.line) : 0,
+      // Re-review lineage (spec v7): roundItem references the baseline snapshot entry this
+      // finding carries over; unjudged marks entries the model never explicitly judged
+      // (they fall back to still-open instead of "fixed"). Absent on fresh findings.
+      ...(Number.isInteger(item.roundItem) && item.roundItem > 0 ? { roundItem: Math.floor(item.roundItem) } : {}),
+      ...(item.unjudged === true ? { unjudged: true } : {}),
+    }))
+    .filter((item) => item.point !== '');
+  const legacy = (Array.isArray(explanation?.suggestions) ? explanation.suggestions : [])
+    .map((item) => {
+      if (typeof item === 'string') return { severity: 'suggest', point: item.trim(), suggestion: '', line: 0 };
+      if (item === null || typeof item !== 'object') return null;
+      const point = typeof item.point === 'string' && item.point.trim() !== ''
+        ? item.point.trim()
+        : (typeof item.text === 'string' ? item.text.trim() : '');
+      if (point === '') return null;
+      return {
+        severity: 'suggest',
+        point,
+        suggestion: '',
+        line: typeof item.line === 'number' && Number.isFinite(item.line) && item.line > 0 ? Math.floor(item.line) : 0,
+      };
+    })
+    .filter((item) => item !== null && item.point !== '');
+  return [...issues, ...legacy];
+}
+
 /** Normalize one file explanation (walkthrough included). */
 export function normalizeExplanation(raw) {
-  const issues = Array.isArray(raw?.issues)
-    ? raw.issues.filter((issue) => issue !== null && typeof issue === 'object').map((issue) => ({
-        severity: issue.severity === 'block' ? 'block' : 'suggest',
-        point: typeof issue.point === 'string' ? issue.point : '',
-        line: typeof issue.line === 'number' ? issue.line : 0,
-      }))
-    : [];
   const walkthrough = Array.isArray(raw?.walkthrough)
     ? raw.walkthrough.filter((step) => step !== null && typeof step === 'object').map((step) => ({
         title: typeof step.title === 'string' ? step.title : '',
@@ -923,9 +1005,8 @@ export function normalizeExplanation(raw) {
     logic: typeof raw?.logic === 'string' ? raw.logic : '',
     walkthrough,
     changes: typeof raw?.changes === 'string' ? raw.changes : '',
-    issues,
+    issues: findingsOf(raw),
     unverified: normalizeUnverified(raw?.unverified),
-    suggestions: Array.isArray(raw?.suggestions) ? raw.suggestions.filter((item) => typeof item === 'string') : [],
   };
 }
 
@@ -1043,37 +1124,50 @@ export function parseFeedbackReply(raw) {
   };
 }
 
-/** Normalize the suggestion mutations a discussion turn asks for. */
-export function normalizeSuggestionOps(raw) {
+/**
+ * Normalize the mutations a discussion turn asks for. Overview ops carry a `target`
+ * (risk/blocker/suggestion/nextStep) and must bring a non-empty point; file-scope ops
+ * act on the merged findings list and may change only severity/suggestion/line. `text`
+ * is the legacy field name (overview prompts and older models) and means `point`.
+ */
+export function normalizeFindingOps(raw) {
   if (!Array.isArray(raw)) return [];
   const ops = [];
   for (const item of raw) {
     if (item === null || typeof item !== 'object') continue;
     const index = typeof item.index === 'number' ? Math.floor(item.index) : 0;
-    const text = typeof item.text === 'string' ? item.text.trim() : '';
     const file = typeof item.file === 'string' ? item.file.trim() : '';
     const severity = item.severity === 'block' ? 'block' : item.severity === 'suggest' ? 'suggest' : '';
+    const line = Number.isInteger(item.line) && item.line > 0 ? Math.floor(item.line) : 0;
+    const suggestion = typeof item.suggestion === 'string' && item.suggestion.trim() !== '' ? item.suggestion.trim() : '';
+    const point = (typeof item.point === 'string' ? item.point : (typeof item.text === 'string' ? item.text : '')).trim();
     const target = ['risk', 'blocker', 'suggestion', 'nextStep'].includes(item.target) ? item.target : '';
     const targetField = target === '' ? {} : { target };
+    const scoped = { ...(suggestion === '' ? {} : { suggestion }), ...(line > 0 ? { line } : {}) };
+    const severityField = severity === '' ? {} : { severity };
+    const fileField = file === '' ? {} : { file };
     if (item.op === 'remove' && index > 0) {
       ops.push({ op: 'remove', index, ...targetField });
-    } else if (item.op === 'update' && index > 0 && text !== '') {
-      ops.push({ op: 'update', index, text, ...targetField, ...(file === '' ? {} : { file }), ...(severity === '' ? {} : { severity }) });
-    } else if (item.op === 'add' && text !== '') {
-      ops.push({ op: 'add', text, ...targetField, ...(file === '' ? {} : { file }), ...(severity === '' ? {} : { severity }) });
+    } else if (item.op === 'update' && index > 0) {
+      // Overview edits rewrite the text; file-scope edits may touch any subset of fields.
+      if (target !== '' && point === '') continue;
+      if (point === '' && suggestion === '' && severity === '' && line === 0) continue;
+      ops.push({ op: 'update', index, ...(point === '' ? {} : { point }), ...scoped, ...targetField, ...fileField, ...severityField });
+    } else if (item.op === 'add' && point !== '') {
+      ops.push({ op: 'add', point, ...scoped, ...targetField, ...fileField, ...severityField });
     }
   }
   return ops;
 }
 
-/** Split one chat reply into its answer text and the suggestion mutations it asks for. */
+/** Split one chat reply into its answer text and the mutations it asks for. */
 export function parseChatReply(raw) {
   const fallback = String(raw ?? '').trim();
   const parsed = extractJson(raw);
   if (parsed === null || typeof parsed.answer !== 'string') {
     return { answer: fallback, ops: [] };
   }
-  return { answer: parsed.answer.trim(), ops: normalizeSuggestionOps(parsed.suggestionOps) };
+  return { answer: parsed.answer.trim(), ops: normalizeFindingOps(parsed.findingOps ?? parsed.suggestionOps) };
 }
 
 // ---------- stable item ids, similarity, structured merge, comment rendering ----------
@@ -1214,9 +1308,11 @@ export function normalizeConclusion(raw, options = {}) {
  * Deterministic verdict calibration (P0).
  * A human-edited conclusion is returned untouched; otherwise blockers or an explicit
  * block severity win, and a "pass" that still carries suggestions becomes "suggest".
- * Block severity on conclusion items is honored when present (the exported contract);
- * the internal pipeline strips it in normalizeConclusion and passes per-file
- * severities through `fileSeverities` instead.
+ * The conclusion model holds the final say on blockers: its prompt carries every
+ * per-file analysis, so a per-file block it explicitly dismissed ("复核均不成立") must
+ * not be re-imposed here. `fileSeverities` used to force a "block" verdict regardless
+ * of that review — it produced a「阻塞」结论 with an empty blocker list (PR #32 round 7),
+ * so it no longer participates.
  */
 export function calibrateVerdict(conclusion, options = {}) {
   if (conclusion === null || conclusion === undefined) return conclusion;
@@ -1224,11 +1320,9 @@ export function calibrateVerdict(conclusion, options = {}) {
   const verdict = normalizeVerdict(conclusion.verdict);
   const blockers = Array.isArray(conclusion.blockers) ? conclusion.blockers : [];
   const suggestions = Array.isArray(conclusion.suggestions) ? conclusion.suggestions : [];
-  const fileSeverities = Array.isArray(options.fileSeverities) ? options.fileSeverities : [];
   const blocked = blockers.length > 0
     || blockers.some((item) => item?.severity === 'block')
-    || suggestions.some((item) => item?.severity === 'block')
-    || fileSeverities.some((item) => item?.severity === 'block');
+    || suggestions.some((item) => item?.severity === 'block');
   if (blocked) return { ...conclusion, verdict: 'block' };
   if (verdict === 'pass' && suggestions.length > 0) return { ...conclusion, verdict: 'suggest' };
   return conclusion.verdict === verdict ? conclusion : { ...conclusion, verdict };
@@ -1348,7 +1442,7 @@ const COMMENT_VERDICT_LABELS = {
 
 /**
  * Severity tags used inside the comment appendix. `suggest` reads as "提示" so it never shares
- * the word "建议" with the real suggestion bullets (`- 建议：…`): an issue/risk at suggestion
+ * the word "建议" with the real suggestion sub-lines (`  - 建议：…`): an issue/risk at suggestion
  * severity is a note, not a change request.
  */
 const COMMENT_SEVERITY_LABELS = {
@@ -1363,14 +1457,11 @@ const COMMENT_FOOTER = {
 
 const COMMENT_APPENDIX = {
   zh: {
-    summary: '审查附录：总体初筛风险 / 逐文件意见 / 审查顺序 / 复审对比',
+    summary: '审查附录：总体初筛风险 / 逐文件审查发现 / 审查顺序',
     risks: '总体初筛风险',
     files: '逐文件审查发现',
     order: '审查顺序',
-    delta: '复审对比',
     unanalyzed: '未分析文件',
-    resolved: '已修复',
-    stillOpen: '仍未解决',
     suggestion: '建议',
     line: '行',
     more: '…另有 {count} 条',
@@ -1378,14 +1469,11 @@ const COMMENT_APPENDIX = {
     truncated: '> 评论过长已截断，完整内容见审查面板。',
   },
   en: {
-    summary: 'Review appendix: initial risks / per-file findings / reading order / re-review comparison',
+    summary: 'Review appendix: initial risks / per-file findings / reading order',
     risks: 'Initial risks',
     files: 'Per-file findings',
     order: 'Reading order',
-    delta: 'Re-review comparison',
     unanalyzed: 'Files not analyzed',
-    resolved: 'Resolved',
-    stillOpen: 'Still open',
     suggestion: 'Suggestion',
     line: 'line',
     more: '…and {count} more',
@@ -1420,7 +1508,7 @@ function appendixBullet(item, zh) {
 
 /**
  * Markdown appendix for the PR comment: the review content that is too long for the main
- * body (initial risks, per-file findings, reading order, re-review comparison, unanalyzed
+ * body (initial risks, per-file findings, reading order, unanalyzed
  * files). Compact mode keeps only the first few entries per section.
  */
 export function buildCommentAppendix(appendix, language = 'zh', compact = false) {
@@ -1428,8 +1516,8 @@ export function buildCommentAppendix(appendix, language = 'zh', compact = false)
   const zh = language !== 'en';
   const labels = zh ? COMMENT_APPENDIX.zh : COMMENT_APPENDIX.en;
   const caps = compact
-    ? { risks: 8, files: 6, perFile: 2, order: 8, delta: 4, unanalyzed: 8 }
-    : { risks: 40, files: 40, perFile: 5, order: 40, delta: 40, unanalyzed: 100 };
+    ? { risks: 8, files: 6, perFile: 2, order: 8, unanalyzed: 8 }
+    : { risks: 40, files: 40, perFile: 5, order: 40, unanalyzed: 100 };
   const sections = [];
   const more = (count) => (count > 0 ? appendixCount(labels.more, count) : '');
   const risks = Array.isArray(appendix.risks) ? appendix.risks : [];
@@ -1444,11 +1532,15 @@ export function buildCommentAppendix(appendix, language = 'zh', compact = false)
     const blocks = [];
     for (const entry of files.slice(0, caps.files)) {
       const lines = [`**${entry.file}**`];
-      for (const issue of (Array.isArray(entry.issues) ? entry.issues : []).slice(0, caps.perFile)) {
-        lines.push(appendixBullet(issue, zh));
-      }
-      for (const suggestion of (Array.isArray(entry.suggestions) ? entry.suggestions : []).slice(0, caps.perFile)) {
-        lines.push(`- ${labels.suggestion}：${suggestion}`);
+      // One merged findings list per file: each finding is a bullet, its inline suggestion
+      // (if any) an indented sub-line so advice stays attached to the finding it fixes.
+      for (const finding of (Array.isArray(entry.findings) ? entry.findings : []).slice(0, caps.perFile)) {
+        lines.push(appendixBullet(finding, zh));
+        const advice = typeof finding?.suggestion === 'string' ? finding.suggestion.trim() : '';
+        if (advice !== '') {
+          const suggestionLabel = zh ? `${labels.suggestion}：` : `${labels.suggestion}: `;
+          lines.push(`  - ${suggestionLabel}${advice}`);
+        }
       }
       blocks.push(lines.join('\n'));
     }
@@ -1463,18 +1555,6 @@ export function buildCommentAppendix(appendix, language = 'zh', compact = false)
     ));
     if (order.length > shown.length) lines.push(more(order.length - shown.length));
     sections.push([`#### ${labels.order}`, ...lines].join('\n'));
-  }
-  const delta = appendix.delta ?? null;
-  const resolved = Array.isArray(delta?.resolved) ? delta.resolved : [];
-  const stillOpen = Array.isArray(delta?.stillOpen) ? delta.stillOpen : [];
-  if (resolved.length > 0 || stillOpen.length > 0) {
-    const lines = [];
-    const label = (kind, item) => (
-      `- ${kind}：${item.file === '' || item.file === undefined ? item.point : `\`${item.file}\` — ${item.point}`}`
-    );
-    for (const item of resolved.slice(0, caps.delta)) lines.push(label(labels.resolved, item));
-    for (const item of stillOpen.slice(0, caps.delta)) lines.push(label(labels.stillOpen, item));
-    sections.push([`#### ${labels.delta}`, ...lines].join('\n'));
   }
   const unanalyzed = Array.isArray(appendix.unanalyzed) ? appendix.unanalyzed : [];
   if (unanalyzed.length > 0) {

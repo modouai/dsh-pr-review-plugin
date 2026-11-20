@@ -66,20 +66,6 @@ window.__ModuleLoader__.load({
       return output;
     }
 
-    /**
-     * Text of one per-file suggestion. Model output stores plain strings, while a
-     * `review_update_analysis` write stores `{ point, line }`; rendering the object itself is
-     * a React child error, so every suggestion goes through here. A blank `point` falls back to
-     * `text`, and an item with neither returns '' so the caller can drop the empty row.
-     */
-    function suggestionText(item) {
-      if (typeof item === 'string') return item;
-      if (item === null || typeof item !== 'object') return '';
-      if (typeof item.point === 'string' && item.point.trim() !== '') return item.point;
-      if (typeof item.text === 'string' && item.text.trim() !== '') return item.text;
-      return '';
-    }
-
     /** Starter text the review panel inserts into the main composer ("ask in conversation"). */
     function reviewAskContext(t, number, round, filePath) {
       const values = {
@@ -124,7 +110,7 @@ window.__ModuleLoader__.load({
     /**
      * State transition for picking a round: the latest one keeps following (null) and lands on
      * the overview; a pinned historical round lands on the conclusion page — history persists
-     * conclusions/delta/feedback/published, so the conclusion is its main artifact.
+     * conclusions/feedback/published, so the conclusion is its main artifact.
      */
     function applyRoundSelection(round, latestRoundNumber) {
       const historical = round !== latestRoundNumber;
@@ -260,12 +246,23 @@ window.__ModuleLoader__.load({
       const version = versions.length > 0 ? versions[versions.length - 1].version : 0;
       if (data.status === 'error') return { phase: 'error', progress: null, nextAction: null, version };
       const analyzing = isAnalyzing(data.analyzing) ? data.analyzing : null;
+      // Batch progress is restated in the global ledger (analyzed / all changed files), the
+      // same numbers the completeness line shows — a header badge of "3/9" next to an
+      // overview "6/12" used to read as two disagreeing facts. The batch object only
+      // answers "is a run active" and how many hard failures it hit.
+      const files = Array.isArray(data.files) ? data.files : [];
+      const explanations = Array.isArray(data.explanations) ? data.explanations : [];
+      const analyzedCount = explanations.filter((entry) => (
+        entry !== null && typeof entry === 'object' && entry.status === 'done' && entry.explanation !== null && entry.explanation !== undefined
+      )).length;
       const progress = analyzing === null
         ? null
         : {
-            done: Math.min(Math.max(analyzing.done ?? 0, 0), analyzing.total),
-            total: analyzing.total,
-            failed: Math.min(Math.max(analyzing.failed ?? 0, 0), analyzing.total),
+            done: analyzedCount,
+            // Files is the honest total; a record without them falls back to the batch
+            // total (isAnalyzing guarantees it is positive).
+            total: files.length > 0 ? files.length : analyzing.total,
+            failed: Math.min(Math.max(analyzing.failed ?? 0, 0), analyzing.total ?? 0),
           };
       const hasConclusion = versions.length > 0;
       const stale = staleInfo !== null && staleInfo !== undefined;
@@ -847,8 +844,8 @@ window.__ModuleLoader__.load({
 .prr-btn:hover:not([disabled]){background:var(--dsw-alias-interactive-bg-hover)}
 .prr-btn[disabled]{opacity:.5;cursor:default}
 .prr-btn-sm{height:24px;padding:0 8px;font-size:12px;border-radius:7px}
-.prr-btn-primary{background:var(--dsw-alias-brand-primary);border-color:transparent;color:#fff;font-weight:600}
-.prr-btn-primary:hover:not([disabled]){background:color-mix(in srgb,var(--dsw-alias-brand-primary) 86%,#000)}
+.prr-btn-primary{background:var(--dsw-alias-brand-primary);border-color:transparent;color:var(--dsw-alias-bg-base);font-weight:600}
+.prr-btn-primary:hover:not([disabled]){background:color-mix(in srgb,var(--dsw-alias-brand-primary) 86%,var(--dsw-alias-bg-base))}
 .prr-btn-icon{width:28px;padding:0;display:inline-flex;align-items:center;justify-content:center}
 .prr-icon{width:14px;height:14px;display:block}
 .prr-btn[data-busy="true"] .prr-icon{animation:prr-rotate .8s linear infinite}
@@ -961,7 +958,7 @@ window.__ModuleLoader__.load({
 .prr-hero-entry{display:inline-flex;align-items:center;gap:6px;height:26px;padding:0 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:12px/1 inherit;cursor:pointer;white-space:nowrap}
 .prr-hero-entry:hover{border-color:var(--dsw-alias-brand-primary);background:var(--dsw-alias-interactive-bg-hover)}
 .prr-hero-entry-title{font-size:12px;font-weight:500}
-.prr-hero-count{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary-contrast,#fff);font-size:10.5px;font-weight:600;line-height:1}
+.prr-hero-count{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-bg-base);font-size:10.5px;font-weight:600;line-height:1}
 .prr-drawer-footer{flex:0 0 auto;display:flex;flex-direction:column;background:var(--dsw-alias-bg-base)}
 .prr-drawer-footer .prr-dock{padding:8px 0 0}
 .prr-drawer-composer{flex:0 0 auto;display:flex;gap:8px;align-items:center;padding:9px 14px;border-top:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1)}
@@ -1239,7 +1236,7 @@ window.__ModuleLoader__.load({
     }
 
     return {
-        api, postJson, formatClock, formatStamp, fill, suggestionText, reviewAskContext,
+        api, postJson, formatClock, formatStamp, fill, reviewAskContext,
         shortSha, roundsOf, applyRoundSelection, versionsOf, publishedOfRound, staleInfoOf,
         roundStripStateOf, scrollRoundStrip, revealActiveRound, shouldShowReviewButton,
         isRoundVersionPublished, previewConflictOf, roundPillOf, panelSizing, clampColumnWidth,
