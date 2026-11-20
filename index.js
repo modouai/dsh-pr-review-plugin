@@ -1489,8 +1489,8 @@ export function apply(ctx, config) {
   }
 
   /**
-   * Start a new round on an existing record: remember the previous conclusion for
-   * the resolved-vs-still-open comparison, then clear every per-round field.
+   * Start a new round on an existing record: keep the previous conclusion (and its items)
+   * available for the implementer-feedback flow, then clear every per-round field.
    */
   function rollNewRound(record, now) {
     const history = roundHistoryOf(record);
