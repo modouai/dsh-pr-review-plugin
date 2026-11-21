@@ -1252,7 +1252,7 @@ import { loadPrompt } from '../prompts.js';
 
 ```js
 test('the review-data system prompt section comes from prompts/review-data.md', async () => {
-  const plugin = await setup({ skipLoadedCheck: true });
+  const plugin = await setup();
   try {
     const section = plugin.promptSections.find((entry) => entry.name === 'pr-review: review-data');
     assert.ok(section !== undefined, 'review-data section is registered');
