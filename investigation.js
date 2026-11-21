@@ -111,3 +111,95 @@ export function normalizeQueries(raw, max = 4) {
   }
   return { accepted, rejected };
 }
+
+/** Merge one step's claims into the ledger; an existing id keeps its statement. */
+export function normalizeClaims(raw, previous = [], max = 12) {
+  const next = new Map();
+  for (const claim of Array.isArray(previous) ? previous : []) next.set(claim.id, claim);
+  for (const item of Array.isArray(raw) ? raw : []) {
+    if (item === null || typeof item !== 'object') continue;
+    const id = text(item.id);
+    if (id === '') continue;
+    const existing = next.get(id);
+    const statement = text(item.statement) !== ''
+      ? text(item.statement).slice(0, 300)
+      : (existing?.statement ?? '');
+    if (statement === '') continue;
+    const status = CLAIM_STATUSES.has(item.status) ? item.status : (existing?.status ?? 'investigating');
+    const reason = typeof item.reason === 'string'
+      ? item.reason.trim().slice(0, 500)
+      : (existing?.reason ?? '');
+    const evidence = Array.isArray(item.evidence)
+      ? item.evidence.filter((value) => typeof value === 'string' && /^E\d+$/.test(value)).slice(0, 8)
+      : (existing?.evidence ?? []);
+    next.set(id, { id, statement, status, reason, evidence });
+  }
+  return { claims: [...next.values()].slice(0, max), overflow: next.size > max };
+}
+
+/**
+ * Validate the terminal answer. Every claim must be closed; every confirmed claim must
+ * cite real evidence and produce exactly one finding. Baseline carry-overs (roundItem)
+ * are exempt because they were confirmed in an earlier round.
+ */
+export function validateFinal(final, claims, evidenceIds, mode = 'file') {
+  if (final === null || typeof final !== 'object') return { ok: false, error: 'final 必须是对象' };
+  const open = claims.filter((claim) => claim.status === 'investigating');
+  if (open.length > 0) return { ok: false, error: `仍有未闭合 claim：${open.map((claim) => claim.id).join('、')}` };
+  const known = evidenceIds instanceof Set ? evidenceIds : new Set(Array.isArray(evidenceIds) ? evidenceIds : []);
+  const refuted = [];
+  const confirmed = new Map();
+  const settled = claims.map((claim) => {
+    if (claim.status !== 'confirmed') {
+      refuted.push({ point: claim.statement, reason: claim.reason || '已证伪' });
+      return claim;
+    }
+    const evidence = claim.evidence.filter((id) => known.has(id));
+    if (evidence.length === 0) {
+      refuted.push({ point: claim.statement, reason: claim.reason || '确认缺少证据引用' });
+      return { ...claim, status: 'refuted', evidence: [] };
+    }
+    const closed = { ...claim, evidence };
+    confirmed.set(claim.id, closed);
+    return closed;
+  });
+  const listKey = mode === 'report' ? 'risks' : 'issues';
+  const list = Array.isArray(final[listKey]) ? final[listKey] : null;
+  if (list === null) return { ok: false, error: `final.${listKey} 必须是数组` };
+  const used = new Set();
+  const items = [];
+  for (const rawItem of list) {
+    if (rawItem === null || typeof rawItem !== 'object') {
+      return { ok: false, error: `final.${listKey} 的条目必须是对象` };
+    }
+    const point = text(rawItem.point);
+    if (point === '') return { ok: false, error: '终稿条目缺少 point' };
+    const carried = Number.isInteger(rawItem.roundItem) && rawItem.roundItem > 0;
+    const claim = text(rawItem.claim);
+    if (!carried) {
+      if (claim === '' || !confirmed.has(claim)) {
+        return { ok: false, error: `终稿条目未对应已确认 claim：${point}` };
+      }
+      if (used.has(claim)) return { ok: false, error: `claim ${claim} 产生了多条审查意见` };
+      used.add(claim);
+    }
+    items.push({
+      severity: rawItem.severity === 'block' ? 'block' : 'suggest',
+      point,
+      suggestion: text(rawItem.suggestion),
+      line: positive(rawItem.line),
+      ...(mode === 'report' ? { file: text(rawItem.file) } : {}),
+      ...(claim === '' ? {} : { claim }),
+      ...(carried ? { roundItem: Math.floor(rawItem.roundItem) } : {}),
+      ...(rawItem.unjudged === true ? { unjudged: true } : {}),
+    });
+  }
+  for (const id of confirmed.keys()) {
+    if (!used.has(id)) return { ok: false, error: `已确认 claim ${id} 没有对应的审查意见` };
+  }
+  const summary = text(final.summary);
+  if (summary === '' && items.length === 0) {
+    return { ok: false, error: '终稿既没有 summary 也没有审查意见' };
+  }
+  return { ok: true, claims: settled, issues: items, refuted, summary };
+}

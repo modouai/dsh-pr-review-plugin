@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { isSafeGlob, isSafePath, normalizeQueries, normalizeQuery, queryKey } from '../investigation.js';
+import {
+  isSafeGlob, isSafePath, normalizeClaims, normalizeQueries, normalizeQuery, queryKey, validateFinal,
+} from '../investigation.js';
 
 test('normalizeQuery accepts the five ops and normalizes defaults', () => {
   assert.deepEqual(normalizeQuery({ op: 'read', path: 'src/a.js' }), {
@@ -100,4 +102,93 @@ test('normalizeQueries tolerates undefined input and entries', () => {
   const circular = {};
   circular.self = circular;
   assert.doesNotThrow(() => normalizeQueries([circular]));
+});
+
+test('normalizeClaims merges by id, keeps prior state, and caps new claims', () => {
+  const previous = [{ id: 'C1', statement: '旧断言', status: 'investigating', reason: '', evidence: [] }];
+  const { claims, overflow } = normalizeClaims([
+    { id: 'C1', status: 'confirmed', reason: '读到证据', evidence: ['E1', 'bogus'] },
+    { id: 'C2', statement: '  新断言  ', status: 'refuted', reason: '无此调用' },
+  ], previous);
+  assert.equal(overflow, false);
+  assert.deepEqual(claims, [
+    { id: 'C1', statement: '旧断言', status: 'confirmed', reason: '读到证据', evidence: ['E1'] },
+    { id: 'C2', statement: '新断言', status: 'refuted', reason: '无此调用', evidence: [] },
+  ]);
+  const capped = normalizeClaims(
+    Array.from({ length: 3 }, (_, i) => ({ id: `C${i + 1}`, statement: `s${i}`, status: 'investigating' })),
+    [],
+    2,
+  );
+  assert.equal(capped.claims.length, 2);
+  assert.equal(capped.overflow, true);
+});
+
+test('validateFinal rejects a final while a claim is still investigating', () => {
+  const result = validateFinal({ summary: 's', issues: [] }, [
+    { id: 'C1', statement: 'x', status: 'investigating', reason: '', evidence: [] },
+  ], new Set(), 'file');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /C1/);
+});
+
+test('validateFinal rejects an issue attached to a claim with no real evidence', () => {
+  const result = validateFinal({
+    summary: 's',
+    issues: [{ severity: 'block', point: '悬空确认', claim: 'C1' }],
+  }, [
+    { id: 'C1', statement: '悬空确认', status: 'confirmed', reason: '模型说确认', evidence: ['E9'] },
+  ], new Set(['E1']), 'file');
+  assert.equal(result.ok, false, 'confirmed claim without a real issue cannot satisfy the tree');
+  assert.match(result.error, /未对应已确认 claim/);
+});
+
+test('validateFinal accepts confirmed claims that cite real evidence exactly once', () => {
+  const result = validateFinal({
+    summary: '讲解',
+    issues: [{ severity: 'block', point: '空指针', suggestion: '先判空', line: 2, claim: 'C1' }],
+  }, [
+    { id: 'C1', statement: '空指针', status: 'confirmed', reason: '第 2 行未判空', evidence: ['E1'] },
+  ], new Set(['E1']), 'file');
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.issues, [
+    { severity: 'block', point: '空指针', suggestion: '先判空', line: 2, claim: 'C1' },
+  ]);
+  assert.deepEqual(result.refuted, []);
+});
+
+test('validateFinal rejects an issue that points at a refuted claim', () => {
+  const result = validateFinal({
+    summary: 's',
+    issues: [{ severity: 'suggest', point: 'x', claim: 'C1' }],
+  }, [
+    { id: 'C1', statement: 'x', status: 'refuted', reason: '证伪', evidence: [] },
+  ], new Set(), 'file');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /未对应已确认 claim/);
+});
+
+test('validateFinal rejects a confirmed claim with no issue', () => {
+  const result = validateFinal({ summary: 's', issues: [] }, [
+    { id: 'C1', statement: 'x', status: 'confirmed', reason: 'r', evidence: ['E1'] },
+  ], new Set(['E1']), 'file');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /没有对应的审查意见/);
+});
+
+test('validateFinal exempts baseline carry-over items and validates report risks', () => {
+  const fileResult = validateFinal({
+    summary: 's',
+    issues: [{ severity: 'suggest', point: '旧问题', roundItem: 2 }],
+  }, [], new Set(), 'file');
+  assert.equal(fileResult.ok, true);
+
+  const reportResult = validateFinal({
+    summary: '报告',
+    risks: [{ severity: 'block', file: 'src/a.js', point: '并发写入', claim: 'C1' }],
+  }, [
+    { id: 'C1', statement: '并发写入', status: 'confirmed', reason: '读写同 Map', evidence: ['E2'] },
+  ], new Set(['E2']), 'report');
+  assert.equal(reportResult.ok, true);
+  assert.equal(reportResult.issues[0].file, 'src/a.js');
 });
