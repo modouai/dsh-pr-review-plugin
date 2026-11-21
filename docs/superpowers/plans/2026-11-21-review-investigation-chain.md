@@ -1671,8 +1671,10 @@ async function runInvestigation(record, options, signal) {
     const answer = await callModelJson(prompt, signal, isInvestigationAnswer);
     if (answer.parsed === null) throw new Error(`调查第 ${step} 步没有返回可解析的 JSON。`);
     const normalized = normalizeClaims(answer.parsed.claims, claims);
-    if (normalized.overflow) throw new Error(`claims 超过 ${MAX_CLAIMS} 条上限，调查无法收敛。`);
     claims = normalized.claims;
+    if (normalized.overflow) {
+      trace.push({ step, note: `claims 超过 ${MAX_CLAIMS} 条上限，超出部分已忽略；请用已有 claim 收口。` });
+    }
     if (answer.parsed.final !== undefined) {
       const validated = validateFinal(answer.parsed.final, claims, executor.evidenceIds(), mode, {
         allowedRoundItems: options.allowedRoundItems,
