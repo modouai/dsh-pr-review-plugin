@@ -37,6 +37,26 @@ function within(promise, ms) {
 
 const CACHE_SLUG = 'forgejo-acme__demo.json';
 
+/**
+ * Poll the persisted cache until `pick` accepts review 1, then return it. Writes are
+ * debounced, so reading straight after an HTTP call can still see the previous bytes.
+ */
+async function readPersistedReview(home, pick, timeout = 5000) {
+  const cacheFile = path.join(home, '.dsh', 'pr-review', CACHE_SLUG);
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    await delay(50);
+    try {
+      const payload = JSON.parse(await readFile(cacheFile, 'utf8'));
+      const review = payload.reviews?.['1'];
+      if (review !== undefined && pick(review)) return review;
+    } catch {
+      // Save not landed yet (or mid-rename); keep polling.
+    }
+  }
+  throw new Error('timed out waiting for the persisted review');
+}
+
 function textResponse(status, body) {
   return {
     ok: status >= 200 && status < 300,
@@ -1631,6 +1651,12 @@ test('review_update_analysis writes with an optimistic lock and records audit', 
     assert.ok(!('suggestions' in explanation), 'no legacy suggestions key is written');
     // The refuted audit is internal: a human edit keeps it, but the browser payload omits it.
     assert.equal('refuted' in explanation, false);
+    const persisted = await readPersistedReview(plugin.home, (saved) => (
+      saved.explanations?.[0]?.explanation?.summary === '改写后的结论'
+    ));
+    assert.deepEqual(persisted.explanations[0].explanation.refuted, [
+      { point: '未能核实的说法', reason: '缺少证据' },
+    ]);
     assert.equal(stored.audit.length, 1);
     assert.equal(stored.audit[0].tool, 'review_update_analysis');
     assert.match(stored.audit[0].summary, /src\/a\.js/);
@@ -1838,6 +1864,12 @@ test('review_update_analysis writes with an optimistic lock and records audit', 
     assert.ok(!('suggestions' in explanation), 'no legacy suggestions key is written');
     // The refuted audit is internal: a human edit keeps it, but the browser payload omits it.
     assert.equal('refuted' in explanation, false);
+    const persisted = await readPersistedReview(plugin.home, (saved) => (
+      saved.explanations?.[0]?.explanation?.summary === '改写后的结论'
+    ));
+    assert.deepEqual(persisted.explanations[0].explanation.refuted, [
+      { point: '未能核实的说法', reason: '缺少证据' },
+    ]);
     assert.equal(stored.audit.length, 1);
     assert.equal(stored.audit[0].tool, 'review_update_analysis');
     assert.match(stored.audit[0].summary, /src\/a\.js/);
@@ -3360,7 +3392,7 @@ test('an investigation query is executed and only confirmed claims become findin
     assert.deepEqual(result.json.explanation.issues, [
       { severity: 'block', point: '空指针风险', suggestion: '先判空再取值', line: 2 },
     ]);
-    assert.deepEqual(result.json.explanation.refuted, []);
+    assert.equal('refuted' in result.json.explanation, false, 'the audit stays out of the explain payload');
     assert.equal(prompts.length, 2, 'claim step + final step');
     assert.match(prompts[0], /## 调查记录/);
     assert.match(prompts[1], /## E1 · read/);
@@ -3490,7 +3522,12 @@ test('the refuter drops a confirmed blocker when its counter-evidence wins', asy
     const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
     assert.equal(result.status, 200);
     assert.deepEqual(result.json.explanation.issues, []);
-    assert.deepEqual(result.json.explanation.refuted, [
+    assert.equal('refuted' in result.json.explanation, false, 'the audit stays out of the explain payload');
+    const persisted = await readPersistedReview(plugin.home, (saved) => (
+      Array.isArray(saved.explanations?.[0]?.explanation?.refuted)
+        && saved.explanations[0].explanation.refuted.length > 0
+    ));
+    assert.deepEqual(persisted.explanations[0].explanation.refuted, [
       { point: '空指针风险', reason: '调用方已保证非空' },
     ]);
     assert.equal(result.json.explanation.verdict, 'pass');
@@ -3532,7 +3569,7 @@ test('the refuter can request one query before deciding', async () => {
     assert.deepEqual(result.json.explanation.issues, [
       { severity: 'block', point: '空指针风险', suggestion: '', line: 0 },
     ]);
-    assert.deepEqual(result.json.explanation.refuted, []);
+    assert.equal('refuted' in result.json.explanation, false, 'the audit stays out of the explain payload');
   } finally {
     await plugin.dispose();
   }
@@ -3597,7 +3634,7 @@ test('block refutation leaves suggest findings untouched', async () => {
     assert.deepEqual(result.json.explanation.issues, [
       { severity: 'suggest', point: '空指针风险', suggestion: '', line: 0 },
     ]);
-    assert.deepEqual(result.json.explanation.refuted, []);
+    assert.equal('refuted' in result.json.explanation, false, 'the audit stays out of the explain payload');
   } finally {
     await plugin.dispose();
   }
@@ -3630,7 +3667,12 @@ test('all refutation also drops confirmed suggestions', async () => {
     const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
     assert.equal(result.status, 200);
     assert.deepEqual(result.json.explanation.issues, []);
-    assert.deepEqual(result.json.explanation.refuted, [
+    assert.equal('refuted' in result.json.explanation, false, 'the audit stays out of the explain payload');
+    const persisted = await readPersistedReview(plugin.home, (saved) => (
+      Array.isArray(saved.explanations?.[0]?.explanation?.refuted)
+        && saved.explanations[0].explanation.refuted.length > 0
+    ));
+    assert.deepEqual(persisted.explanations[0].explanation.refuted, [
       { point: '空指针风险', reason: '不成立' },
     ]);
     assert.equal(result.json.explanation.verdict, 'pass');
@@ -4775,6 +4817,10 @@ test('a report risk dropped by the refuter leaves a pass and keeps the audit int
     assert.equal(review.report.verdict, 'pass');
     assert.equal(review.report.summary, '报告');
     assert.equal('refuted' in review.report, false, 'the internal audit stays out of the browser payload');
+    const persisted = await readPersistedReview(plugin.home, (saved) => (
+      Array.isArray(saved.report?.refuted) && saved.report.refuted.length > 0
+    ));
+    assert.deepEqual(persisted.report.refuted, [{ point: '并发写入', reason: '实际有锁' }]);
   } finally {
     await plugin.dispose();
   }

@@ -2343,7 +2343,13 @@ export function apply(ctx, config) {
         return;
       }
       const result = await explainFile(number, filePath, body?.force === true);
-      sendJson(res, 200, { ok: true, ...result });
+      sendJson(res, 200, {
+        ok: true,
+        ...result,
+        explanation: result.explanation === null || result.explanation === undefined
+          ? null
+          : withoutRefuted(result.explanation),
+      });
     },
   });
 

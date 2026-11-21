@@ -34,6 +34,7 @@ import {
   normalizeExplanation,
   normalizeFindingOps,
   normalizePreviousVerdicts,
+  normalizeRefuted,
   normalizeReport,
   normalizeVerdict,
   parseChatReply,
@@ -865,7 +866,20 @@ test('the conclusion prompt omits the internal refuted audit', () => {
   );
   const text = prompt.messages[0].content[0].text;
   assert.ok(text.includes('风险'));
+  assert.ok(text.includes('"verdict":"suggest"'));
+  assert.ok(text.includes('"summary":"s"'));
   assert.ok(!text.includes('审计项'));
+});
+
+test('normalizeRefuted caps each reason at 300 chars and the list at 20 entries', () => {
+  const items = Array.from({ length: 25 }, (_, index) => ({
+    point: `p${index + 1}`,
+    reason: 'r'.repeat(400),
+  }));
+  const refuted = normalizeRefuted(items);
+  assert.equal(refuted.length, 20);
+  assert.equal(refuted[0].reason.length, 300);
+  assert.deepEqual(refuted.map((item) => item.point), items.slice(0, 20).map((item) => item.point));
 });
 
 test('the review framework states the exclusion list and the call-chain rule', () => {
@@ -938,6 +952,31 @@ test('buildChatPrompt file scope lists findings and asks for findingOps', () => 
   assert.match(text, /—— 建议：加判空/);
   assert.ok(text.includes('"findingOps"'));
   assert.ok(!text.includes('"suggestionOps"'));
+});
+
+test('buildChatPrompt keeps the walkthrough and omits the refuted audit', () => {
+  const prompt = buildChatPrompt(
+    { platform: 'github', repo: 'o/r', number: 1, title: 't' },
+    null,
+    {
+      verdict: 'suggest',
+      summary: 's',
+      logic: 'l',
+      walkthrough: [{ title: '入口', detail: '先读缓存', hunk: 1, context: null }],
+      changes: 'c',
+      issues: [],
+      refuted: [{ point: '审计项', reason: '已证伪' }],
+    },
+    null,
+    [],
+    'q',
+    null,
+    {},
+  );
+  const text = prompt.messages[0].content[0].text;
+  assert.ok(text.includes('已有文件分析'));
+  assert.ok(text.includes('入口'), 'the structured walkthrough survives in the chat context');
+  assert.ok(!text.includes('审计项'), 'the internal refuted audit never reaches the chat prompt');
 });
 
 test('normalizeFindingOps maps legacy text to point and accepts field-scoped updates', () => {

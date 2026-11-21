@@ -414,6 +414,7 @@ export function buildChatPrompt(pull, file, explanation, report, history, questi
     verdict: explanation.verdict,
     summary: explanation.summary,
     logic: explanation.logic,
+    walkthrough: explanation.walkthrough,
     changes: explanation.changes,
     issues: explanation.issues,
   };
@@ -618,7 +619,7 @@ export function normalizeRefuted(raw) {
     .slice(0, 20);
 }
 
-/** The triage pass output: display fields, before any investigation. */
+/** The report final's display fields: verdict, summary, reading order and focus. */
 export function normalizeReportDraft(raw, fallbackOrder) {
   const verdict = ['block', 'suggest', 'pass'].includes(raw?.verdict) ? raw.verdict : 'suggest';
   const seen = new Set();
@@ -652,9 +653,9 @@ export function normalizeReportDraft(raw, fallbackOrder) {
 }
 
 /**
- * Normalize a final report for the browser half. `risks` is read from the input because the
- * two-pass flow passes the verifier's confirmed risks in; the raw `risks` field is also what
- * older cached records carry, so this stays the single restore path.
+ * Normalize the report produced by the investigation final step for the browser half.
+ * `risks` is read from the input because that final already carries the confirmed risks;
+ * the same field is what older cached records carry, so this stays the single restore path.
  */
 export function normalizeReport(raw, fallbackOrder) {
   const draft = normalizeReportDraft(raw, fallbackOrder);
