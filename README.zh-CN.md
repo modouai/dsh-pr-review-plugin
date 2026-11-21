@@ -354,7 +354,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
 ## 说明
 
 - **升级到 0.4.0**：`evidenceVerify`、`evidenceMaxFiles`、`evidenceMaxChars` 已移除，由调查预算取代；旧键会被静默忽略。
-- 升级插件：浏览器侧（`client.js` 及其 `client.<area>.js` 区域 chunk）热加载；host 侧（`index.js` / `providers.js` / `llm.js`）需重启 Harness 生效。改动 chunk 后先运行 `pnpm stamp` 再测试（见[开发](#开发)）。
+- 升级插件：浏览器侧（`client.js` 及其 `client.<area>.js` 区域 chunk）热加载；host 侧（`index.js` / `providers.js` / `llm.js` / `investigation.js` / `evidence.js`）需重启 Harness 生效。改动 chunk 后先运行 `pnpm stamp` 再测试（见[开发](#开发)）。
 - PR 列表只显示最近更新的 20 个 open PR；更早的存在时面板会明确提示。
 - 缓存采用「临时文件 + 改名」原子写入。缓存读取失败时，插件把原文件另存为 `<文件名>.corrupt-<时间戳>` 而不是覆盖，并在面板提示。
 - 发布的评论带插件署名行，语言跟随 `commentLanguage`；模型写出的正文同样跟随。

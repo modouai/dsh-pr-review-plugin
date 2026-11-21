@@ -1025,7 +1025,11 @@ export function apply(ctx, config) {
       pull: saved.pull ?? null,
       files: Array.isArray(saved.files) ? saved.files : [],
       filesTruncated: saved.filesTruncated === true,
-      report: saved.report ?? null,
+      // Normalize on restore: 0.3.0 caches carry `unverified`/`raised`/`discarded`, which
+      // normalizeReport drops — otherwise they leak to the browser and are re-persisted.
+      report: saved.report === null || saved.report === undefined
+        ? null
+        : normalizeReport(saved.report, []),
       explanations,
       pullChat: Array.isArray(saved.pullChat) ? saved.pullChat : [],
       reportUpdatedAt: saved.reportUpdatedAt ?? 0,
@@ -1717,8 +1721,12 @@ export function apply(ctx, config) {
         break;
       }
       if (closing) throw new Error('反驳复核在收口阶段没有给出 results。');
-      const { accepted } = normalizeQueries(answer.parsed.queries, remaining);
-      if (accepted.length === 0) { remaining = 0; continue; }
+      const { accepted, rejected } = normalizeQueries(answer.parsed.queries, remaining);
+      if (accepted.length === 0) {
+        trace.push({ step: trace.length + 1, note: `没有可执行的反驳查询：${rejected.join('；') || '模型未给出 queries'}` });
+        remaining = 0;
+        continue;
+      }
       for (const query of accepted) trace.push({ step: trace.length + 1, queries: [query], results: [await executor.execute(query)] });
       remaining -= accepted.length;
     }

@@ -354,7 +354,7 @@ Review results are cached per repository under `~/.dsh/pr-review/<platform>-<rep
 ## Notes
 
 - **Upgrading to 0.4.0**: `evidenceVerify`, `evidenceMaxFiles`, and `evidenceMaxChars` were removed; the investigation budgets replace them. Old keys are ignored silently.
-- Upgrading the plugin: the browser side (`client.js` and its `client.<area>.js` chunks) hot-reloads; the host side (`index.js` / `providers.js` / `llm.js`) requires restarting Harness. After editing a chunk, run `pnpm stamp` before testing (see [Development](#development)).
+- Upgrading the plugin: the browser side (`client.js` and its `client.<area>.js` chunks) hot-reloads; the host side (`index.js` / `providers.js` / `llm.js` / `investigation.js` / `evidence.js`) requires restarting Harness. After editing a chunk, run `pnpm stamp` before testing (see [Development](#development)).
 - The pull request list shows the 20 most recently updated open pull requests; the panel says so when older ones exist.
 - Cache writes are atomic (temp file + rename). If the cache cannot be read, the plugin moves it aside as `<name>.corrupt-<timestamp>` instead of overwriting it, and shows a warning in the panel.
 - Published comments carry a footer identifying the plugin; the language follows `commentLanguage`, as does the model-written text.

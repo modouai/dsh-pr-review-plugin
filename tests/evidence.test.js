@@ -32,7 +32,7 @@ test('read returns a numbered evidence block and slices around a symbol', async 
   assert.match(result.block, /^## E1 · read/);
   assert.match(result.block, /<<<EVIDENCE E1 START>>>/);
   assert.match(result.block, /<<<EVIDENCE E1 END>>>/);
-  assert.match(result.block, /diff-only|workspace/);
+  assert.match(result.block, /provider-head/);
   assert.match(result.block, /writeCache/);
   assert.match(result.block, /第 1–6 行（共 6 行）/);
 });
@@ -62,6 +62,7 @@ test('a repeated query reuses the same evidence id', async () => {
   const first = await evidence.execute(query);
   const second = await evidence.execute(query);
   assert.equal(first.id, 'E1');
+  assert.match(first.block, /· diff/);
   assert.equal(second.id, 'E1');
   assert.equal(second.cached, true);
   assert.deepEqual(evidence.evidenceIds(), ['E1']);

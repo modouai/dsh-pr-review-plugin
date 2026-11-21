@@ -204,7 +204,7 @@ export function buildReportOpening(pull, files, diffFiles, config) {
     .slice(0, FILE_LIST_LIMIT)
     .map((file) => `- ${file.path} | ${file.status} | +${file.additions} / -${file.deletions}`)
     .join('\n');
-  const excerpts = diffExcerpts(diffFiles, order, reportChars, 120_000);
+  const excerpts = diffExcerpts(diffFiles, order, reportChars, 40_000);
   const text = renderPrompt('report', {
     platform: platformLabel(pull.platform),
     repo: pull.repo,
@@ -229,6 +229,9 @@ export function buildReportPrompt(pull, files, diffFiles, config) {
   return { system: opening.system, messages: [{ role: 'user', content: [{ type: 'text', text: opening.text }] }], maxTokens: 16000, timeoutMs: 600_000 };
 }
 
+
+/** Max characters of file text embedded in one explain opening (re-sent every step). */
+const FILE_OPENING_CHARS = 30_000;
 
 /** Full-file text with 1-based line numbers, capped so the prompt stays bounded. */
 function numberLines(content, maxLines) {
@@ -284,8 +287,13 @@ export function buildExplainOpening(pull, file, diffText, report, focusPoint, fi
     `- previousVerdicts 必须恰好包含 ${baselineShown.length} 条判定，一条都不能少。`,
     '- 本轮新发现的问题照常作为 claim 调查，确认后写入 issues（不带 roundItem）。',
   ].join('\n');
+  // The opening is re-sent on every step/refute call, so cap the file text by characters
+  // before numbering: a provider can return a few hundred thousand characters.
+  const fileText = typeof fileContent === 'string' && fileContent.length > FILE_OPENING_CHARS
+    ? `${fileContent.slice(0, FILE_OPENING_CHARS)}\n……（文件内容过长，已截断，剩余 ${fileContent.length - FILE_OPENING_CHARS} 字符未提供）`
+    : fileContent;
   const fileContentSection = typeof fileContent === 'string' && fileContent.trim() !== ''
-    ? `## 该文件的完整内容（PR head，行号格式为「行号<TAB>代码」，可能被截断）\n${numberLines(fileContent, 3000)}`
+    ? `## 该文件的完整内容（PR head，行号格式为「行号<TAB>代码」，可能被截断）\n${numberLines(fileText, 3000)}`
     : '## 该文件的完整内容不可用（只有 diff；分析时不要臆测未出现的代码）';
   const text = renderPrompt('explain', {
     platform: platformLabel(pull.platform),
@@ -607,7 +615,7 @@ export function normalizePreviousVerdicts(raw, baselineCount) {
   return verdicts;
 }
 
-/** Confirmed-then-dropped claims: internal audit only, never rendered. */
+/** Claims that did not survive (model-refuted, or confirmed without real evidence): internal audit only, never rendered. */
 export function normalizeRefuted(raw) {
   return (Array.isArray(raw) ? raw : [])
     .filter((item) => item !== null && typeof item === 'object')

@@ -419,6 +419,48 @@ test('migrates a legacy cache into roundHistory and serializes the new fields', 
   }
 });
 
+test('restoring a 0.3.0 report drops legacy unverified/raised/discarded fields', async () => {
+  const plugin = await setup({
+    reviews: {
+      1: legacyReview({
+        report: {
+          verdict: 'suggest',
+          summary: '旧报告',
+          risks: [],
+          order: [],
+          focus: {},
+          unverified: [{ point: '旧未验证项', missing: '旧证据' }],
+          raised: 3,
+          discarded: 1,
+        },
+      }),
+    },
+  });
+  try {
+    const review = await plugin.review();
+    assert.equal(review.report.summary, '旧报告');
+    assert.deepEqual(review.report.risks, []);
+    assert.equal('unverified' in review.report, false);
+    assert.equal('raised' in review.report, false);
+    assert.equal('discarded' in review.report, false);
+    // `refuted` is the internal audit and is deliberately stripped from the browser payload.
+    assert.equal('refuted' in review.report, false);
+
+    // A save re-serializes the normalized report, so the legacy fields never come back.
+    await plugin.runTool('review_update_analysis', { path: 'src/a.js', revision: 0, summary: '保存归一化报告' });
+    const persisted = await readPersistedReview(plugin.home, (saved) => saved.revision === 1);
+    assert.deepEqual(persisted.report.refuted, []);
+    assert.equal('unverified' in persisted.report, false);
+    assert.equal('raised' in persisted.report, false);
+    assert.equal('discarded' in persisted.report, false);
+    const raw = await readFile(path.join(plugin.home, '.dsh', 'pr-review', CACHE_SLUG), 'utf8');
+    assert.ok(!raw.includes('unverified'), 'the legacy field never returns to the cache');
+    assert.ok(!raw.includes('旧未验证项'));
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 test('force review opens round 2: previousRound, cleared state, and a frozen baseline on conclude', async () => {
   const diffText = 'diff --git a/src/a.js b/src/a.js\n@@ -1 +1 @@\n-a\n+b\n';
   const fetchHandler = async (url) => {
@@ -3312,6 +3354,30 @@ test('Config schema fills defaults and rejects invalid values', async () => {
   assert.throws(() => Config({ platform: 'bitbucket' }), /platform/);
   assert.throws(() => Config({ pollSeconds: 5 }), /pollSeconds/);
   assert.throws(() => Config({ reasoningEffort: 'ultra' }), /reasoningEffort/);
+});
+
+test('investigation and refute config fills defaults and rejects out-of-range values', async () => {
+  const { Config } = await import('../index.js');
+  const filled = Config({ platform: 'github' });
+  assert.equal(filled.investigationMaxSteps, 8);
+  assert.equal(filled.investigationMaxFiles, 12);
+  assert.equal(filled.investigationMaxChars, 4000);
+  assert.equal(filled.investigationMaxTotalChars, 24000);
+  assert.equal(filled.investigationTimeoutMs, 600000);
+  assert.equal(filled.refuteLevel, 'block');
+  assert.equal(filled.refuteMaxQueries, 3);
+  const invalid = {
+    investigationMaxSteps: 1,
+    investigationMaxFiles: 31,
+    investigationMaxChars: 499,
+    investigationMaxTotalChars: 1999,
+    investigationTimeoutMs: 59999,
+    refuteLevel: 'bogus',
+    refuteMaxQueries: 11,
+  };
+  for (const [key, value] of Object.entries(invalid)) {
+    assert.throws(() => Config({ [key]: value }), new RegExp(key));
+  }
 });
 
 test('tool failures carry stable HarnessError codes', async () => {

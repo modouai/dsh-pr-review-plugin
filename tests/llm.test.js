@@ -1072,6 +1072,19 @@ test('the investigation step prompt carries the opening, claims and protocol', (
   assert.ok(prompt.maxTokens >= 8000);
 });
 
+test('the explain opening bounds oversized file content', () => {
+  const pull = { platform: 'github', repo: 'acme/demo', number: 1, title: 't', headRef: 'f', baseRef: 'm' };
+  const file = { path: 'src/big.js', status: 'modified', additions: 1, deletions: 0 };
+  const opening = buildExplainOpening(pull, file, '', null, '', 'x'.repeat(100_000), { language: 'zh' });
+  assert.ok(opening.text.length < 45_000, `opening length ${opening.text.length}`);
+  assert.match(opening.text, /文件内容过长，已截断/);
+  assert.match(opening.text, /剩余 70000 字符未提供/);
+
+  const small = buildExplainOpening(pull, file, '', null, '', 'const a = 1;\n', { language: 'zh' });
+  assert.match(small.text, /const a = 1;/);
+  assert.doesNotMatch(small.text, /文件内容过长/);
+});
+
 test('the file opening keeps the diff, full file and baseline sections', () => {
   const pull = { platform: 'github', repo: 'acme/demo', number: 1, title: 't', headRef: 'f', baseRef: 'm' };
   const file = { path: 'src/a.js', status: 'modified', additions: 1, deletions: 0 };

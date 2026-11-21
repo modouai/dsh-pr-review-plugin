@@ -220,12 +220,13 @@ export function createEvidenceExecutor(options = {}) {
     if (query.op === 'diff') {
       const diff = diffFiles.get(query.path);
       if (diff?.text === undefined) return { text: `该文件不在本次 diff 中：${query.path}`, substantive: false };
-      return { text: diff.text, note: '完整 diff' };
+      return { text: diff.text, note: '完整 diff', source: 'diff' };
     }
     if (query.op === 'read') {
       try {
         const content = await readFile(query.path);
-        return sliceText(String(content ?? ''), query);
+        // Read bodies come from the provider's PR head, not the (possibly stale) workspace.
+        return { ...sliceText(String(content ?? ''), query), source: 'provider-head' };
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         return { text: `无法读取 ${query.path}：${reason}`, substantive: false };
