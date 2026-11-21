@@ -14,6 +14,8 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { loadPrompt } from '../prompts.js';
+
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Resolve with the promise, or a sentinel value after `ms` (clears its timer either way). */
@@ -204,6 +206,7 @@ async function setup(options = {}) {
   const cleanups = [];
   const toolRegistry = new Map();
   const promptContexts = [];
+  const promptSections = [];
   const ctx = {
     tools: {
       register(definition) {
@@ -221,7 +224,8 @@ async function setup(options = {}) {
       return undefined;
     },
     systemPrompt: {
-      section() {
+      section(definition) {
+        promptSections.push(definition);
         return () => {};
       },
       context(definition) {
@@ -300,6 +304,7 @@ async function setup(options = {}) {
     review,
     tools: toolRegistry,
     promptContexts,
+    promptSections,
     /** Snapshot text the registered runtime-context provider returns for one session. */
     promptContext(sessionId = 'session-a', name = 'pr-review: focus') {
       const provider = promptContexts.find((entry) => entry.name === name);
@@ -1754,6 +1759,18 @@ test('a rejected runtime-context registration leaves the plugin usable', async (
     const loaded = await plugin.call('/pr-review-api/review?number=1');
     assert.equal(loaded.status, 200);
     assert.notEqual(loaded.json.review, null);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the review-data system prompt section comes from prompts/review-data.md', async () => {
+  const plugin = await setup();
+  try {
+    const section = plugin.promptSections.find((entry) => entry.name === 'pr-review: review-data');
+    assert.ok(section !== undefined, 'review-data section is registered');
+    assert.equal(section.text, loadPrompt('review-data'));
+    assert.match(section.text, /review_update_overview/);
   } finally {
     await plugin.dispose();
   }

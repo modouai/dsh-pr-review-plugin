@@ -481,6 +481,18 @@ test('buildConcludePrompt: coverage, unanalyzed (<=20), previous ids, locked ids
   assert.match(entriesJson, /"suggestion":"加判空"/);
 });
 
+test('buildConcludePrompt renders a partial pull without throwing', () => {
+  const prompt = buildConcludePrompt(
+    { platform: 'github', repo: 'o/r', number: 7, title: 't' },
+    null,
+    new Map(),
+    null,
+  );
+  const text = prompt.messages[0].content[0].text;
+  assert.match(text, /PR #7：t/);
+  assert.match(text, /规模：0 个文件，\+0 \/ -0/);
+});
+
 test('buildConcludePrompt: marks truncated report/explanations explicitly', () => {
   const explanations = new Map([
     ['a.js', { verdict: 'suggest', summary: 'y'.repeat(20000), issues: [] }],
@@ -688,6 +700,7 @@ test('the feedback prompt uses the compact system, not the full framework', () =
   assert.doesNotMatch(compact, /化简审查/);
   assert.doesNotMatch(compact, /六个维度/);
   assert.doesNotMatch(buildFeedbackPrompt(pull, [], [], { language: 'en' }).system, /使用简体中文/);
+  assert.match(buildFeedbackPrompt(pull, [], [], { language: 'en' }).system, /quoted text verbatim/);
 });
 
 test('conclude prompt: names residual risks and follows the comment language', () => {

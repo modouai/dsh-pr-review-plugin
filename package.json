@@ -61,6 +61,8 @@
     "provider-codeup.js",
     "diff.js",
     "llm.js",
+    "prompts.js",
+    "prompts/**/*.md",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
