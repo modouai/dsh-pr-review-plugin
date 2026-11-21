@@ -856,6 +856,21 @@ test('normalizeReport and normalizeExplanation expose only refuted audit entries
   assert.equal('unverified' in explanation, false);
 });
 
+test('normalizeReport keeps persisted focus and is idempotent', () => {
+  const input = {
+    verdict: 'suggest', summary: 's', risks: [], refuted: [],
+    order: [{ file: 'src/a.js', reason: '入口' }],
+    focus: { 'src/a.js': '重点' },
+  };
+  const once = normalizeReport(input, []);
+  assert.deepEqual(once.order, [{ file: 'src/a.js', reason: '入口' }]);
+  assert.deepEqual(once.focus, { 'src/a.js': '重点' });
+  const twice = normalizeReport(once, []);
+  assert.deepEqual(twice.order, once.order);
+  assert.deepEqual(twice.focus, once.focus);
+  assert.deepEqual(twice, once);
+});
+
 test('the conclusion prompt omits the internal refuted audit', () => {
   const prompt = buildConcludePrompt(
     { platform: 'github', repo: 'acme/demo', number: 1, title: 't', headRef: 'f', baseRef: 'm' },

@@ -427,8 +427,8 @@ test('restoring a 0.3.0 report drops legacy unverified/raised/discarded fields',
           verdict: 'suggest',
           summary: '旧报告',
           risks: [],
-          order: [],
-          focus: {},
+          order: [{ file: 'src/a.js', reason: '入口' }],
+          focus: { 'src/a.js': '重点' },
           unverified: [{ point: '旧未验证项', missing: '旧证据' }],
           raised: 3,
           discarded: 1,
@@ -440,6 +440,9 @@ test('restoring a 0.3.0 report drops legacy unverified/raised/discarded fields',
     const review = await plugin.review();
     assert.equal(review.report.summary, '旧报告');
     assert.deepEqual(review.report.risks, []);
+    // Restore normalizes; the persisted focus map and reading order survive unchanged.
+    assert.deepEqual(review.report.order, [{ file: 'src/a.js', reason: '入口' }]);
+    assert.deepEqual(review.report.focus, { 'src/a.js': '重点' });
     assert.equal('unverified' in review.report, false);
     assert.equal('raised' in review.report, false);
     assert.equal('discarded' in review.report, false);
@@ -450,6 +453,8 @@ test('restoring a 0.3.0 report drops legacy unverified/raised/discarded fields',
     await plugin.runTool('review_update_analysis', { path: 'src/a.js', revision: 0, summary: '保存归一化报告' });
     const persisted = await readPersistedReview(plugin.home, (saved) => saved.revision === 1);
     assert.deepEqual(persisted.report.refuted, []);
+    assert.deepEqual(persisted.report.order, [{ file: 'src/a.js', reason: '入口' }]);
+    assert.deepEqual(persisted.report.focus, { 'src/a.js': '重点' });
     assert.equal('unverified' in persisted.report, false);
     assert.equal('raised' in persisted.report, false);
     assert.equal('discarded' in persisted.report, false);

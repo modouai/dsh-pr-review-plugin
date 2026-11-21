@@ -651,6 +651,12 @@ export function normalizeReportDraft(raw, fallbackOrder) {
       if (item === null || typeof item !== 'object' || typeof item.file !== 'string') continue;
       focus.set(item.file, typeof item.point === 'string' ? item.point : '');
     }
+  } else if (raw?.focus !== null && typeof raw?.focus === 'object') {
+    // Persisted reports store the normalized map form; restoring through this function
+    // must preserve it, or the next save would silently drop every focus point.
+    for (const [filePath, point] of Object.entries(raw.focus)) {
+      if (typeof filePath === 'string' && filePath !== '' && typeof point === 'string') focus.set(filePath, point);
+    }
   }
   return {
     verdict,
