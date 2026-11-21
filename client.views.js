@@ -435,42 +435,6 @@ window.__ModuleLoader__.load({
         );
       }
 
-      /**
-       * Points the verifier could not confirm: they get their own block so they are never
-       * mistaken for findings. Malformed entries are dropped instead of leaking "undefined".
-       */
-      function UnverifiedBlock(props) {
-        const { t } = props;
-        const list = (Array.isArray(props.items) ? props.items : []).filter(
-          (item) => item !== null && typeof item === 'object' && typeof item.point === 'string' && item.point.trim() !== '',
-        );
-        if (list.length === 0) return null;
-        return h(
-          'div',
-          null,
-          h('div', { className: 'prr-h2' }, t('unverified')),
-          h(
-            'div',
-            { className: 'prr-card prr-unverified' },
-            h('div', { className: 'prr-subtle' }, t('unverifiedHint')),
-            list.map((item, index) =>
-              h(
-                'div',
-                { className: 'prr-rowitem', key: index },
-                h(
-                  'div',
-                  { className: 'prr-rowmain' },
-                  h('div', { className: 'prr-text' }, item.point),
-                  typeof item.missing === 'string' && item.missing !== ''
-                    ? h('div', { className: 'prr-subtle' }, `${t('unverifiedMissing')}${item.missing}`)
-                    : null,
-                ),
-              ),
-            ),
-          ),
-        );
-      }
-
       /** Per-file review detail: logic, walkthrough, changes, and the one findings list. */
       function FileDetailPanel(props) {
         const { t, filePath, explanation } = props;
@@ -525,7 +489,6 @@ window.__ModuleLoader__.load({
                 ),
               ),
             );
-        const unverified = h(UnverifiedBlock, { t, items: detail.unverified });
         return h(
           'div',
           null,
@@ -556,7 +519,6 @@ window.__ModuleLoader__.load({
           h('div', { className: 'prr-card prr-text' }, detail.summary),
           section(t('changes'), detail.changes),
           issues,
-          unverified,
         );
       }
 
@@ -654,7 +616,7 @@ window.__ModuleLoader__.load({
       /**
        * Overview page: the fix record first (round >= 2), then the change digest, the single
        * findings list and the completeness line. Only verified facts and pending actions live
-       * here — initial-screen risks, unverified notes and the report verdict are pipeline
+       * here — initial-screen risks and the report verdict are pipeline
        * internals and never render; the only decision surface is the conclusion page.
        */
       function OverviewPage(props) {

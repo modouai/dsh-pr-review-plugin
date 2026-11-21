@@ -2770,9 +2770,9 @@ test('dragged columns are clamped to usable ranges and can be reset', () => {
   assert.equal(parts.clampColumnWidth('detail', 2000), 760);
 });
 
-// ---------- unverified notes (evidence verification) ----------
+// ---------- unverified section (removed) ----------
 
-test('the file detail breaks unverified points out of the findings', () => {
+test('file detail no longer renders an unverified section', () => {
   const client = loadClient();
   const { parts, fake } = client;
   const { textOnly, elements } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
@@ -2781,38 +2781,19 @@ test('the file detail breaks unverified points out of the findings', () => {
     explanation: {
       status: 'done',
       explanation: {
-        verdict: 'suggest',
+        verdict: 'pass',
         summary: '文件摘要',
         logic: '',
         changes: '',
-        issues: [{ severity: 'suggest', point: '已确认问题', line: 1 }],
-        unverified: [{ point: '可疑调用方', missing: '缺少 callers 证据' }],
+        issues: [],
+        refuted: [{ point: '内部审计项', reason: '已证伪' }],
       },
     },
     onExplain: () => {},
   }));
-
-  assert.match(textOnly, /审查意见/);
-  assert.match(textOnly, /已确认问题/);
-  assert.match(textOnly, /未验证项/);
-  assert.match(textOnly, /可疑调用方/);
-  assert.match(textOnly, /缺少证据：缺少 callers 证据/);
-  assert.ok(elements.some((node) => node.props.className === 'prr-card prr-unverified'));
-});
-
-test('no unverified notes means no unverified section', () => {
-  const client = loadClient();
-  const { parts, fake } = client;
-  const { textOnly } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
-    t: translator(parts),
-    filePath: 'src/a.js',
-    explanation: {
-      status: 'done',
-      explanation: { verdict: 'pass', summary: '文件摘要', logic: '', changes: '', issues: [] },
-    },
-    onExplain: () => {},
-  }));
   assert.doesNotMatch(textOnly, /未验证项/);
+  assert.doesNotMatch(textOnly, /内部审计项/);
+  assert.ok(!elements.some((node) => String(node.props?.className ?? '').includes('prr-unverified')));
 });
 
 test('the zh and en tables expose the same keys', () => {
@@ -2828,7 +2809,7 @@ test('the overview no longer renders a reading-order section', () => {
       verdict: 'suggest',
       summary: '报告',
       risks: [],
-      unverified: [],
+      refuted: [],
       order: [{ file: 'src/a.js', reason: '这是排序理由不该出现在总览' }],
       focus: {},
     },
@@ -2836,30 +2817,6 @@ test('the overview no longer renders a reading-order section', () => {
   const { textOnly } = renderOverview(client, review);
   assert.doesNotMatch(textOnly, /审查顺序/);
   assert.doesNotMatch(textOnly, /这是排序理由不该出现在总览/);
-});
-
-test('malformed unverified entries are dropped instead of leaking into the panel', () => {
-  const client = loadClient();
-  const { parts, fake } = client;
-  const { textOnly } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
-    t: translator(parts),
-    filePath: 'src/a.js',
-    explanation: {
-      status: 'done',
-      explanation: {
-        verdict: 'suggest',
-        summary: '摘要',
-        logic: '',
-        changes: '',
-        issues: [],
-        unverified: [null, {}, { point: '   ' }, { point: '有效疑点', missing: null }],
-      },
-    },
-    onExplain: () => {},
-  }));
-  assert.match(textOnly, /有效疑点/);
-  assert.doesNotMatch(textOnly, /undefined/);
-  assert.doesNotMatch(textOnly, /缺少证据/);
 });
 
 test('derivePhase folds host state into one phase', () => {
