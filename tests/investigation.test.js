@@ -192,3 +192,67 @@ test('validateFinal exempts baseline carry-over items and validates report risks
   assert.equal(reportResult.ok, true);
   assert.equal(reportResult.issues[0].file, 'src/a.js');
 });
+
+test('validateFinal downgrades a confirmed claim whose evidence is unknown with a fixed reason', () => {
+  const result = validateFinal({ summary: 's', issues: [] }, [
+    { id: 'C1', statement: '悬空确认', status: 'confirmed', reason: '模型说确认', evidence: ['E9'] },
+  ], new Set(['E1']), 'file');
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.refuted, [{ point: '悬空确认', reason: '确认缺少证据引用' }]);
+  assert.equal(result.claims[0].status, 'refuted');
+  assert.deepEqual(result.claims[0].evidence, []);
+});
+
+test('validateFinal rejects a final with neither summary nor items', () => {
+  const result = validateFinal({ summary: '   ', issues: [] }, [], new Set(), 'file');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /既没有 summary/);
+});
+
+test('validateFinal rejects two issues that reuse one confirmed claim', () => {
+  const result = validateFinal({
+    summary: 's',
+    issues: [
+      { severity: 'block', point: '第一处', claim: 'C1' },
+      { severity: 'suggest', point: '第二处', claim: 'C1' },
+    ],
+  }, [
+    { id: 'C1', statement: 'x', status: 'confirmed', reason: 'r', evidence: ['E1'] },
+  ], new Set(['E1']), 'file');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /多条审查意见/);
+});
+
+test('normalizeClaims hardens status, truncation, evidence cap and empty statements', () => {
+  const previous = [
+    { id: 'C1', statement: '旧断言', status: 'confirmed', reason: '旧理由', evidence: ['E1'] },
+    null,
+    { id: 42, statement: 'ignored' },
+  ];
+  const { claims } = normalizeClaims([
+    { id: 'C1', statement: '   ', status: 'bogus' },
+    {
+      id: 'C2',
+      statement: 'x'.repeat(400),
+      status: 'bogus',
+      reason: 'r'.repeat(600),
+      evidence: Array.from({ length: 10 }, (_, i) => `E${i + 1}`),
+    },
+    { id: 'C3', statement: '   ', status: 'confirmed' },
+  ], previous);
+  assert.equal(claims.length, 2);
+  assert.deepEqual(claims[0], { id: 'C1', statement: '旧断言', status: 'confirmed', reason: '旧理由', evidence: ['E1'] });
+  assert.equal(claims[1].statement, 'x'.repeat(300));
+  assert.equal(claims[1].status, 'investigating');
+  assert.equal(claims[1].reason, 'r'.repeat(500));
+  assert.deepEqual(claims[1].evidence, ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'E8']);
+});
+
+test('validateFinal enforces allowed baseline round items when provided', () => {
+  const final = { summary: 's', issues: [{ severity: 'suggest', point: '旧问题', roundItem: 2 }] };
+  const rejected = validateFinal(final, [], new Set(), 'file', { allowedRoundItems: new Set([1]) });
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.error, /不存在的基准序号：2/);
+  assert.equal(validateFinal(final, [], new Set(), 'file', { allowedRoundItems: new Set([1, 2]) }).ok, true);
+  assert.equal(validateFinal(final, [], new Set(), 'file').ok, true);
+});

@@ -115,14 +115,18 @@ export function normalizeQueries(raw, max = 4) {
 /** Merge one step's claims into the ledger; an existing id keeps its statement. */
 export function normalizeClaims(raw, previous = [], max = 12) {
   const next = new Map();
-  for (const claim of Array.isArray(previous) ? previous : []) next.set(claim.id, claim);
+  for (const claim of Array.isArray(previous) ? previous : []) {
+    if (!claim || typeof claim !== 'object' || typeof claim.id !== 'string') continue;
+    next.set(claim.id, claim);
+  }
   for (const item of Array.isArray(raw) ? raw : []) {
     if (item === null || typeof item !== 'object') continue;
     const id = text(item.id);
     if (id === '') continue;
     const existing = next.get(id);
-    const statement = text(item.statement) !== ''
-      ? text(item.statement).slice(0, 300)
+    const rawStatement = text(item.statement);
+    const statement = rawStatement !== ''
+      ? rawStatement.slice(0, 300)
       : (existing?.statement ?? '');
     if (statement === '') continue;
     const status = CLAIM_STATUSES.has(item.status) ? item.status : (existing?.status ?? 'investigating');
@@ -142,21 +146,23 @@ export function normalizeClaims(raw, previous = [], max = 12) {
  * cite real evidence and produce exactly one finding. Baseline carry-overs (roundItem)
  * are exempt because they were confirmed in an earlier round.
  */
-export function validateFinal(final, claims, evidenceIds, mode = 'file') {
+export function validateFinal(final, claims, evidenceIds, mode = 'file', options = {}) {
   if (final === null || typeof final !== 'object') return { ok: false, error: 'final 必须是对象' };
-  const open = claims.filter((claim) => claim.status === 'investigating');
+  const safeClaims = Array.isArray(claims) ? claims : [];
+  const open = safeClaims.filter((claim) => claim.status === 'investigating');
   if (open.length > 0) return { ok: false, error: `仍有未闭合 claim：${open.map((claim) => claim.id).join('、')}` };
   const known = evidenceIds instanceof Set ? evidenceIds : new Set(Array.isArray(evidenceIds) ? evidenceIds : []);
+  const allowedRoundItems = options.allowedRoundItems instanceof Set ? options.allowedRoundItems : null;
   const refuted = [];
   const confirmed = new Map();
-  const settled = claims.map((claim) => {
+  const settled = safeClaims.map((claim) => {
     if (claim.status !== 'confirmed') {
       refuted.push({ point: claim.statement, reason: claim.reason || '已证伪' });
       return claim;
     }
     const evidence = claim.evidence.filter((id) => known.has(id));
     if (evidence.length === 0) {
-      refuted.push({ point: claim.statement, reason: claim.reason || '确认缺少证据引用' });
+      refuted.push({ point: claim.statement, reason: '确认缺少证据引用' });
       return { ...claim, status: 'refuted', evidence: [] };
     }
     const closed = { ...claim, evidence };
@@ -175,6 +181,9 @@ export function validateFinal(final, claims, evidenceIds, mode = 'file') {
     const point = text(rawItem.point);
     if (point === '') return { ok: false, error: '终稿条目缺少 point' };
     const carried = Number.isInteger(rawItem.roundItem) && rawItem.roundItem > 0;
+    if (carried && allowedRoundItems !== null && !allowedRoundItems.has(rawItem.roundItem)) {
+      return { ok: false, error: `延续条目引用了不存在的基准序号：${rawItem.roundItem}` };
+    }
     const claim = text(rawItem.claim);
     if (!carried) {
       if (claim === '' || !confirmed.has(claim)) {
