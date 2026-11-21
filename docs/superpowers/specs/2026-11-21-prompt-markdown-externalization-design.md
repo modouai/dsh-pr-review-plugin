@@ -53,6 +53,8 @@ prompts/
     language-en.md
     verify-language-zh.md  # 裁判任务的语言相关判定规则
     verify-language-en.md
+    chat-file-contract.md  # 对话：文件范围输出的 findingOps 契约
+    chat-overview-contract.md  # 对话：总览范围输出的 suggestionOps 契约
 ```
 
 `prompts/` 与 `llm.js` 同级。每个任务文件是一份完整的 Markdown 文档，包含：任务说明、动态数据占位符、输出契约（围栏 JSON 代码块）。
@@ -72,7 +74,7 @@ fragment(name)              // 读取 prompts/fragments/<name>.md
 - 同步 `readFileSync(new URL('./prompts/<name>.md', import.meta.url), 'utf8')`。
 - `{{key}}` 只匹配 `[A-Za-z][A-Za-z0-9_]*`。
 - `values` 缺少某个占位符对应的键 → 抛出 `Missing prompt value: <file>#<key>`。
-- 渲染完成后文本中仍有 `{{` → 抛出 `Unresolved placeholder: <file>`。
+- 替换前检查模板：把合法占位符去掉后模板里仍有 `{{` → 抛出 `Malformed placeholder: <file>`。该检查只看模板，不看替换值，避免 diff 等动态内容里出现 `{{` 时误报。
 - 文件读取失败直接抛出，让插件在加载期快速失败。
 - 返回值做 `trimEnd()`，不加尾随换行。
 
@@ -96,7 +98,7 @@ fragment(name)              // 读取 prompts/fragments/<name>.md
 - `report.md`：`{{platform}}`、`{{repo}}`、`{{pullNumber}}`、`{{title}}`、`{{author}}`、`{{headRef}}`、`{{baseRef}}`、`{{changedFiles}}`、`{{additions}}`、`{{deletions}}`、`{{body}}`、`{{fileLines}}`、`{{order}}`、`{{excerpts}}`
 - `explain.md`：PR 元信息、`{{filePath}}`、`{{fileStatus}}`、`{{additions}}`、`{{deletions}}`、`{{focus}}`、`{{reportLine}}`、`{{diff}}`、`{{fileContent}}`、`{{baselineSection}}`、`{{previousVerdictsField}}`
 - `verify.md`：`{{header}}`、`{{candidates}}`、`{{evidence}}`、`{{missing}}`、`{{diffSection}}`、`{{verifyLanguageRule}}`
-- `chat.md`：PR 元信息、`{{scopeLabel}}`、`{{reportLine}}`、`{{explanation}}`、`{{scopeSection}}`、`{{transcript}}`、`{{question}}`、`{{outputOps}}`
+- `chat.md`：PR 元信息、`{{scopeLabel}}`、`{{reportLine}}`、`{{explanation}}`、`{{scopeSection}}`、`{{transcript}}`、`{{question}}`、`{{outputContract}}`
 - `conclude.md`：PR 元信息、`{{report}}`、`{{entries}}`、`{{coverageSection}}`、`{{previousItemsSection}}`、`{{humanItemIdsSection}}`、`{{feedbackSection}}`、`{{chatSection}}`、`{{currentConclusionSection}}`
 - `feedback.md`：`{{pullNumber}}`、`{{title}}`、`{{itemLines}}`、`{{commentLines}}`
 
