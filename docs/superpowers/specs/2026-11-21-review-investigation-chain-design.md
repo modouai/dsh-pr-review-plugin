@@ -123,7 +123,7 @@ file scope:            │  loop:                              │
 1. **claim 可证伪**：`statement` 非空、不超过 300 字；模型被要求在提出时写成「谁、在什么条件下、发生什么」的事实断言。改写不了的候选用 `refuted` + `reason: "不可证伪：…"` 结束。
 2. **confirmed 必须引用证据**：至少一个 `evidence` id 存在于本次会话的证据账本；否则宿主把它改为 `refuted`，`reason: "确认缺少证据引用"`。
 3. **issue / risk 必须对应 confirmed claim**：`final.issues[].claim`（报告范围为 `final.risks[].claim`）必须指向一条 confirmed claim；每个 confirmed claim 最多产生一条 issue。调查中才想到的新问题也必须先成为 claim，再走确认。
-   例外：带 `roundItem` 的基准轮延续条目不是新发现的 claim，校验时豁免；它们沿用既有的 `previousVerdicts` 与 `unjudged` 规则，且 `roundItem` 必须是本文件基准轮真实存在的序号（宿主按基线索引集合校验），伪造的序号直接拒绝。报告范围没有基准轮，任何 `roundItem` 都会被拒绝。
+   基准轮延续条目由宿主根据 `previousVerdicts` 合成，**模型不得在 final 里写 `roundItem`**；带 `roundItem` 但没有 claim 的条目会被拒绝，避免模型把已判 fixed 或别的文件的条目重新塞回来。
 4. **终稿必须闭合**：存在 `status: "investigating"` 的 claim 时拒绝终稿，退回要求继续（并附当前未闭合清单）。
 5. **额度**：单步 `queries` 最多 4 条；会话 claims 最多 12 条；超出部分拒绝并要求模型收敛（不静默截断 claim）。
 6. **重复查询**：按规范化 key 命中账本时直接返回原证据 id 与内容，不重复执行。
@@ -136,7 +136,7 @@ file scope:            │  loop:                              │
 
 - 收到通过校验的 `final`；
 - 预算耗尽：发出一次**强制收口**请求（禁止新查询，只能用账本内证据给每个 claim 终态与终稿）。仍不合法 → 抛错，该文件分析进入 `error`。
-- 会话超时（`investigationTimeoutMs`）或外部取消 → 中止；取消按现有 epoch/abort 规则丢弃。
+- 会话超时（`investigationTimeoutMs`）或外部取消 → 中止；取消按现有 epoch/abort 规则丢弃。每次模型调用的 `timeoutMs` 取「默认超时」与「距会话 deadline 的剩余时间」的较小值，避免多次调用累计远超会话上限。
 
 ## 6. 查询执行器（宿主侧）
 
@@ -195,7 +195,7 @@ src/handlers/a.js:12
 终稿产出后，对 confirmed findings 做一次对抗性检查：
 
 - `refuteLevel`：`block`（默认，只复核 block）、`all`、`off`。
-- 反驳者拿到 finding、对应 claim、引用证据与调查摘要，可发最多 `refuteMaxQueries`（默认 3）条查询（走同一执行器与预算，独立记账）。反驳步与主会话同构：先返回 `{ "queries": [...] }`，查询用尽后返回 `{ "results": [...] }`。
+- 反驳者拿到 finding、对应 claim、**被引用证据的正文**与调查摘要，可发最多 `refuteMaxQueries`（默认 3）条查询（走同一执行器与预算，独立记账）。反驳步与主会话同构：先返回 `{ "queries": [...] }`，查询用尽后返回 `{ "results": [...] }`。
 - 输出 `{ "results": [{ "claim": "C1", "decision": "keep | drop", "reason": "…" }] }`，每条已确认 finding 恰好一条结果。
 - `drop` 的 finding 移出 issues，写入内部 `refuted` 审计。
 - 反驳结束后按**剩余** issues / risks 重新校准 verdict（沿用现有规则：有确认 blocker → block；无任何确认 finding → pass；否则沿用模型 verdict，裸 block 降为 suggest）。基准轮延续条目（带 `roundItem`）不参与反驳。

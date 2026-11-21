@@ -967,6 +967,10 @@ Create `prompts/refute.md`:
 
 {{claims}}
 
+## 引用的证据
+
+{{evidence}}
+
 ## 已有调查记录
 
 {{trace}}
@@ -1289,7 +1293,7 @@ export function buildRefuterSystem(language) {
   return renderPrompt('refuter', { languageRule: languageRule(language) });
 }
 
-export function buildRefuteStepPrompt({ opening, system, findings, claims, trace, queriesLeft, closure }) {
+export function buildRefuteStepPrompt({ opening, system, findings, claims, evidence, trace, queriesLeft, closure }) {
   const list = findings.map((item) => {
     const where = item.file === undefined || item.file === '' ? '' : ` [${item.file}]`;
     return `- [${item.claim}]${where} ${item.point}${item.suggestion === '' ? '' : ` —— 建议：${item.suggestion}`}`;
@@ -1306,6 +1310,7 @@ export function buildRefuteStepPrompt({ opening, system, findings, claims, trace
     opening,
     findings: list,
     claims: claimLines === '' ? '（无）' : claimLines,
+    evidence: evidence === '' || evidence === undefined ? '（无）' : evidence,
     trace: renderTrace(trace),
     quota,
   });
@@ -1651,9 +1656,7 @@ async function runInvestigation(record, options, signal) {
       const answer = await callModelJson(prompt, signal, (value) => value !== null && typeof value === 'object' && value.final !== undefined);
       if (stale()) return { discarded: true };
       const closed = normalizeClaims(answer.parsed?.claims, claims);
-      const validated = validateFinal(answer.parsed?.final, closed.claims, executor.evidenceIds(), mode, {
-        allowedRoundItems: options.allowedRoundItems,
-      });
+      const validated = validateFinal(answer.parsed?.final, closed.claims, executor.evidenceIds(), mode);
       if (!validated.ok) throw new Error(`调查未能闭合：${validated.error}`);
       return { ...validated, final: answer.parsed.final, trace, evidenceCount: evidenceCount() };
     }
@@ -1678,9 +1681,7 @@ async function runInvestigation(record, options, signal) {
       trace.push({ step, note: `claims 超过 ${MAX_CLAIMS} 条上限，超出部分已忽略；请用已有 claim 收口。` });
     }
     if (answer.parsed.final !== undefined) {
-      const validated = validateFinal(answer.parsed.final, claims, executor.evidenceIds(), mode, {
-        allowedRoundItems: options.allowedRoundItems,
-      });
+      const validated = validateFinal(answer.parsed.final, claims, executor.evidenceIds(), mode);
       if (validated.ok) return { ...validated, final: answer.parsed.final, trace, evidenceCount: evidenceCount() };
       trace.push({
         step,
@@ -1793,9 +1794,6 @@ async function refuteFindings(record, options, signal) {
         opening,
         mode: 'file',
         stale: () => (record.analysisEpoch ?? 0) !== epoch,
-        // A carry-over item must point at a real baseline entry; a fabricated roundItem
-        // would otherwise bypass evidence validation entirely.
-        allowedRoundItems: new Set(baselineFindings.map((item) => item.index)),
       },
       signal,
     );
@@ -1936,7 +1934,7 @@ Replace from `const prompt = buildReportPrompt(...)` through the `scheduleSave()
     try {
       investigated = await runInvestigation(
         record,
-        { opening, mode: 'report', allowedRoundItems: new Set() },
+        { opening, mode: 'report' },
         undefined,
       );
     } catch (error) {
@@ -2343,13 +2341,12 @@ export const FRAGMENT_NAMES = [
 ];
 ```
 
-- Delete legacy tests in `tests/index.test.js`:
-  - `a concern becomes a finding only after the verifier scores it against evidence`
-  - `a verifier that returns junk turns every concern into an unverified note`
-  - `evidenceVerify off keeps the single-pass contract`
-  - `the report verifier decides risks; unconfirmed points stay out of risks`
-  - any test asserting `unverified` / `verifyConcerns` / `evidenceVerify`.
-  - `llmTriageThenVerify` helper.
+- Delete legacy tests in `tests/index.test.js` **or rewrite their fixtures to the claims/final protocol**:
+  - the old verifier/prompt tests listed in Task 8 Step 4;
+  - the batch/analysis tests whose fakes return `BATCH_EXPLANATION` or other pre-investigation shapes (`duplicate explain requests…`, `autoAnalyze…`, `manual analyze…`, `a fresh explain for the new round…`, `a new round reads the new head…`, `an automatic batch continues…`, `the schema default turns batch analysis on…`, `a restored entry without an explanation…`, `failed/aborted batches release…`, `the analysis slot ceiling…`);
+  - the baseline/delta tests (`a per-file analysis re-judges the baseline findings…`, `a carry-over finding skips verification…`, `a cross-file claim is not stored…`, `the analysis pipeline drops a fresh concern…`).
+  These behavior tests must keep their intent; only the fake model outputs change to the investigation protocol (`claims` + `queries`/`final`). The suite must be fully green at the end of this task.
+  - Also remove the now-dead `runGit` helper (only `collectEvidence` used it) and update `review_update_analysis` to preserve `refuted` instead of `unverified`.
 
 - Delete legacy tests in `tests/llm.test.js`:
   - everything importing or exercising `buildExplainVerifyPrompt` / `buildReportVerifyPrompt` / `normalizeConcerns` / `normalizeEvidenceNeeds` / `normalizeUnverified` / `partitionVerdicts`;
