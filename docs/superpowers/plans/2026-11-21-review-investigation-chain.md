@@ -2220,6 +2220,7 @@ const explanationView = explanation === null || explanation === undefined
       verdict: explanation.verdict,
       summary: explanation.summary,
       logic: explanation.logic,
+      walkthrough: explanation.walkthrough,
       changes: explanation.changes,
       issues: explanation.issues,
     };
@@ -2352,7 +2353,7 @@ export const FRAGMENT_NAMES = [
   - the report/round tests whose fake LLM still returns the old report shape: `the report verifier decides risks…`, `a stub report JSON is retried…`, `the report records how many triage concerns the verifier discarded`, `force review opens round 2…`, `a new round cancels the batch…`, `a cancelled call cannot write into the new round…`, `a manual explain in flight is discarded…`, `a stale malformed answer is discarded…`.
   These behavior tests must keep their intent; only the fake model outputs change to the investigation protocol (`claims` + `queries`/`final`). The suite must be fully green at the end of this task.
   - Also remove the now-dead `runGit` helper (only `collectEvidence` used it) and update `review_update_analysis` to preserve `refuted` instead of `unverified`.
-  - In `serializeReview` (the browser snapshot), strip `refuted` from both the report and each explanation so the internal audit never reaches the client payload.
+  - In `serializeReview` (the browser snapshot), strip `refuted` from both the report and each explanation so the internal audit never reaches the client payload. Also strip it from the `/explain` route response, which bypasses `serializeReview`.
 
 - Delete legacy tests in `tests/llm.test.js`:
   - everything importing or exercising `buildExplainVerifyPrompt` / `buildReportVerifyPrompt` / `normalizeConcerns` / `normalizeEvidenceNeeds` / `normalizeUnverified` / `partitionVerdicts`;
