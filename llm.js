@@ -474,39 +474,39 @@ export function buildConcludePrompt(pull, report, explanations, currentConclusio
   const humanItemIds = (Array.isArray(options.humanItemIds) ? options.humanItemIds : []).filter((id) => typeof id === 'string' && id !== '');
   const feedback = options.feedback === null || options.feedback === undefined ? null : options.feedback;
   const pullChat = Array.isArray(options.pullChat) ? options.pullChat : [];
-  const lines = [
-    `平台：${platformLabel(pull.platform)}；仓库：${pull.repo}`,
-    `PR #${pull.number}：${pull.title}（${pull.headRef} → ${pull.baseRef}）`,
-    `规模：${pull.changedFiles} 个文件，+${pull.additions} / -${pull.deletions}`,
-    report === null || report === undefined ? '' : `总体报告：${truncateWithMarker(JSON.stringify(report), 5000)}`,
-    `已逐文件分析（${entries.length} 个）：${truncateWithMarker(JSON.stringify(entries), 16000)}`,
-  ];
-  if (coverage !== null) {
+  const reportLine = report === null || report === undefined ? '' : `总体报告：${truncateWithMarker(JSON.stringify(report), 5000)}`;
+
+  const coverageSection = coverage === null ? '' : (() => {
     const analyzed = Number.isFinite(coverage.analyzed) ? coverage.analyzed : 0;
     const total = Number.isFinite(coverage.total) ? coverage.total : 0;
     const unanalyzed = Array.isArray(coverage.unanalyzed) ? coverage.unanalyzed.filter((item) => typeof item === 'string' && item !== '') : [];
-    lines.push('', '## 覆盖率');
-    lines.push(`已分析 ${analyzed}/${total} 个变更文件；未分析 ${unanalyzed.length} 个。`);
+    const lines = ['## 覆盖率', `已分析 ${analyzed}/${total} 个变更文件；未分析 ${unanalyzed.length} 个。`];
     if (unanalyzed.length > 0) {
       const shown = unanalyzed.slice(0, 20);
       lines.push(
         `未分析文件（最多列 20 个，这些文件没有逐文件分析，结论里不要臆测它们的内容）：${shown.join('、')}${unanalyzed.length > shown.length ? ` 等 ${unanalyzed.length} 个` : ''}`,
       );
     }
-  }
-  if (previousItems.length > 0) {
-    lines.push('', '## 上一轮结论条目（尽量沿用下面的 id；未变化的条目必须复用原 id，不要重新编号）');
+    return lines.join('\n');
+  })();
+
+  const previousItemsSection = previousItems.length === 0 ? '' : (() => {
+    const lines = ['## 上一轮结论条目（尽量沿用下面的 id；未变化的条目必须复用原 id，不要重新编号）'];
     previousItems.forEach((item, index) => {
       const kindLabel = item.kind === 'blocker' ? '阻塞' : '建议';
       const line = Number.isInteger(item.line) && item.line > 0 ? `:${item.line}` : '';
       const file = typeof item.file === 'string' && item.file !== '' ? `${item.file}${line} — ` : '';
       lines.push(`${index + 1}. [${item.id ?? ''}] [${kindLabel}] ${file}${item.point ?? ''}`);
     });
-  }
-  if (humanItemIds.length > 0) {
-    lines.push('', `人工锁定 id（这些条目由人工确认，必须原样保留，不得删除或改写其 point）：${humanItemIds.join(', ')}`);
-  }
-  if (feedback !== null && typeof feedback === 'object') {
+    return lines.join('\n');
+  })();
+
+  const humanItemIdsSection = humanItemIds.length === 0
+    ? ''
+    : `人工锁定 id（这些条目由人工确认，必须原样保留，不得删除或改写其 point）：${humanItemIds.join(', ')}`;
+
+  const feedbackSection = (() => {
+    if (feedback === null || typeof feedback !== 'object') return '';
     const states = feedback.states !== null && typeof feedback.states === 'object' ? feedback.states : {};
     const stateLines = Object.entries(states).map(([key, state]) => {
       const label = FEEDBACK_STATUS_LABELS[state?.status] ?? '状态不明';
@@ -514,36 +514,41 @@ export function buildConcludePrompt(pull, report, explanations, currentConclusio
       return `- [${key}] ${label}${reason}`;
     });
     const notes = Array.isArray(feedback.notes) ? feedback.notes.filter((note) => typeof note === 'string' && note !== '') : [];
-    if (stateLines.length > 0 || notes.length > 0) {
-      lines.push('', '## 实现者反馈（来自 PR 评论区的回复，用于判断条目是否仍然成立）');
-      lines.push(...stateLines);
-      for (const note of notes.slice(0, 10)) lines.push(`- 备注：${note.slice(0, 300)}`);
-    }
-  }
+    if (stateLines.length === 0 && notes.length === 0) return '';
+    const lines = ['## 实现者反馈（来自 PR 评论区的回复，用于判断条目是否仍然成立）', ...stateLines];
+    for (const note of notes.slice(0, 10)) lines.push(`- 备注：${note.slice(0, 300)}`);
+    return lines.join('\n');
+  })();
+
   const chat = pullChat
     .slice(-12)
     .map((turn) => `${turn?.role === 'assistant' ? '助手' : '用户'}：${String(turn?.text ?? '').slice(0, 400)}`);
-  if (chat.length > 0) {
-    lines.push('', '## 人机讨论（最近 12 条，每条截断 400 字）');
-    lines.push(...chat);
-  }
-  if (currentConclusion !== null && currentConclusion !== undefined) {
-    lines.push('', `## 当前结论（可能经过人工在对话中修订；请在此基础上更新，人工确认的内容优先保留）\n${truncateWithMarker(JSON.stringify(currentConclusion), 8000)}`);
-  }
-  lines.push(
-    '',
-    '输出要求：沿用上一轮条目的 id（未变化的条目必须复用原 id）；人工锁定 id 必须原样保留；新增条目不要编造 id；只有本次逐文件分析或 diff 明确表明问题已消失时，才可以不输出旧条目——无法确认是否修复时必须保留。',
-    'line 为 PR head 新文件行号，可选：填整数（未知填 0）；文件路径必须与变更文件清单一致。',
-    '请输出严格 JSON，作为合并前的最终审查结论：',
-    '{',
-    '  "verdict": "block | suggest | pass",',
-    '  "summary": "3-5 句最终结论：改动的价值、实现是否匹配 PR 描述、遗留风险与测试空白、是否可合并；没有阻塞项时明确写「未发现阻塞项」",',
-    '  "blockers": [{ "id": "可选：沿用上一轮条目的 id", "file": "路径", "line": 0, "point": "问题 + 影响 + 修法（一条只写一个核心问题）" }],',
-    '  "suggestions": [{ "id": "可选：沿用上一轮条目的 id", "file": "路径", "line": 0, "point": "问题 + 影响 + 修法（一条只写一个核心问题）" }],',
-    '  "nextSteps": ["合并前要做的事，按顺序；只写要执行的动作与要补的测试，不要写未验证项"]',
-    '}',
-  );
-  const user = lines.filter((line) => line !== '').join('\n');
+  const chatSection = chat.length === 0 ? '' : ['## 人机讨论（最近 12 条，每条截断 400 字）', ...chat].join('\n');
+
+  const currentConclusionSection = currentConclusion === null || currentConclusion === undefined
+    ? ''
+    : `## 当前结论（可能经过人工在对话中修订；请在此基础上更新，人工确认的内容优先保留）\n${truncateWithMarker(JSON.stringify(currentConclusion), 8000)}`;
+
+  const user = renderPrompt('conclude', {
+    platform: platformLabel(pull.platform),
+    repo: pull.repo,
+    pullNumber: pull.number,
+    title: pull.title,
+    headRef: pull.headRef,
+    baseRef: pull.baseRef,
+    changedFiles: pull.changedFiles,
+    additions: pull.additions,
+    deletions: pull.deletions,
+    reportLine,
+    entryCount: entries.length,
+    entries: truncateWithMarker(JSON.stringify(entries), 16000),
+    coverageSection,
+    previousItemsSection,
+    humanItemIdsSection,
+    feedbackSection,
+    chatSection,
+    currentConclusionSection,
+  });
   return { system: reviewerSystem(languageOf(options)), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 8000, timeoutMs: 300_000 };
 }
 
