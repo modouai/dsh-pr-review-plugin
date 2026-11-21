@@ -13,6 +13,9 @@ const MAX_PATTERN = 200;
 const text = (value) => (typeof value === 'string' ? value.trim() : '');
 const positive = (value) => (Number.isInteger(value) && value > 0 ? value : 0);
 const CONTROL = /[\u0000-\u001f\u007f]/;
+const BACKREFERENCE = /\\[1-9]/;
+const NESTED_QUANTIFIER = /(\([^)]*[*+?}][^)]*\))[*+?{]/;
+const MAX_SYMBOL = 200;
 const WINDOWS_DRIVE = /^[A-Za-z]:[\\/]/;
 
 /** A preview of any rejected value; never throws, even for circular or exotic input. */
@@ -58,10 +61,12 @@ export function normalizeQuery(raw) {
   const pathGlob = text(raw.pathGlob);
   if (path !== '' && !isSafePath(path)) return null;
   if (pathGlob !== '' && !isSafeGlob(pathGlob)) return null;
+  if (symbol.length > MAX_SYMBOL || CONTROL.test(symbol)) return null;
   if (op === 'read' && path === '') return null;
   if ((op === 'find' || op === 'tests') && symbol === '') return null;
   if (op === 'grep') {
     if (pattern.trim() === '' || pattern.length > MAX_PATTERN) return null;
+    if (CONTROL.test(pattern) || BACKREFERENCE.test(pattern) || NESTED_QUANTIFIER.test(pattern)) return null;
     try {
       new RegExp(pattern);
     } catch {

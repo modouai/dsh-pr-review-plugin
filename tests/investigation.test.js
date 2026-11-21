@@ -248,6 +248,19 @@ test('normalizeClaims hardens status, truncation, evidence cap and empty stateme
   assert.deepEqual(claims[1].evidence, ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'E8']);
 });
 
+test('normalizeQuery rejects ReDoS-prone grep patterns and unsafe symbols', () => {
+  assert.equal(normalizeQuery({ op: 'grep', pattern: '(a+)+$' }), null);
+  assert.equal(normalizeQuery({ op: 'grep', pattern: '(x*)*' }), null);
+  assert.equal(normalizeQuery({ op: 'grep', pattern: '\\1' }), null);
+  const literal = normalizeQuery({ op: 'grep', pattern: 'new Map\\(' });
+  assert.notEqual(literal, null);
+  assert.equal(literal.pattern, 'new Map\\(');
+  assert.equal(normalizeQuery({ op: 'find', symbol: 'a\u0000b' }), null);
+  assert.equal(normalizeQuery({ op: 'find', symbol: 'a'.repeat(201) }), null);
+  assert.notEqual(normalizeQuery({ op: 'find', symbol: 'a'.repeat(200) }), null);
+  assert.equal(normalizeQuery({ op: 'grep', pattern: 'a\u0000b' }), null);
+});
+
 test('validateFinal enforces allowed baseline round items when provided', () => {
   const final = { summary: 's', issues: [{ severity: 'suggest', point: '旧问题', roundItem: 2 }] };
   const rejected = validateFinal(final, [], new Set(), 'file', { allowedRoundItems: new Set([1]) });
