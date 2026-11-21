@@ -2403,6 +2403,8 @@ git add -A
 git commit -m "refactor(review): remove the unverified verification pass"
 ```
 
+**实施备注（2026-11-22）**：Task 8 实际分三步执行。8a 完成代码/提示词/数据契约清理；8b 删除 7 个旧验证器测试、改写 3 个行为测试并把 `BATCH_EXPLANATION` 换成合法的调查答案；8c 完成剩余 11 个基线/报告/轮次测试。`llmTriageThenVerify` 已删除；补回 `evidence.js` 的 200 行截断与 200 KB 截断覆盖。最终 index 99/99、全量 340/340。
+
 ---
 
 ## Task 9: 配置、README 与版本
