@@ -446,12 +446,16 @@ test('force review opens round 2: previousRound, cleared state, and a frozen bas
     }
     throw new Error(`unexpected fetch in test: ${target}`);
   };
+  // A valid one-call report investigation: no claims, so the final closes at once.
   const reportReply = JSON.stringify({
-    verdict: 'suggest',
-    summary: '第二轮报告',
-    risks: [],
-    order: [{ file: 'src/a.js', reason: '' }],
-    focus: {},
+    claims: [],
+    final: {
+      verdict: 'suggest',
+      summary: '第二轮报告',
+      risks: [],
+      order: [{ file: 'src/a.js', reason: '' }],
+      focus: {},
+    },
   });
   const conclusionReply = JSON.stringify({
     verdict: 'block',
@@ -2722,11 +2726,14 @@ test('autoAnalyze off leaves files untouched; the manual analyze route fills and
 
 test('a new round cancels the batch and drops its in-flight answer', async () => {
   const reportReply = JSON.stringify({
-    verdict: 'suggest',
-    summary: '第二轮报告',
-    risks: [],
-    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
-    focus: {},
+    claims: [],
+    final: {
+      verdict: 'suggest',
+      summary: '第二轮报告',
+      risks: [],
+      order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+      focus: {},
+    },
   });
   let aborted = false;
   const explainPrompts = [];
@@ -2811,11 +2818,14 @@ test('a fresh explain for the new round does not join the stale in-flight call',
 
 test('a cancelled call cannot write into the new round even if the provider ignores the abort', async () => {
   const reportReply = JSON.stringify({
-    verdict: 'suggest',
-    summary: '第二轮报告',
-    risks: [],
-    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
-    focus: {},
+    claims: [],
+    final: {
+      verdict: 'suggest',
+      summary: '第二轮报告',
+      risks: [],
+      order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+      focus: {},
+    },
   });
   const llm = (options) => {
     const prompt = JSON.stringify(options.messages);
@@ -2847,11 +2857,14 @@ test('a cancelled call cannot write into the new round even if the provider igno
 
 test('a manual explain in flight is discarded when a new round starts', async () => {
   const reportReply = JSON.stringify({
-    verdict: 'suggest',
-    summary: '第二轮报告',
-    risks: [],
-    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
-    focus: {},
+    claims: [],
+    final: {
+      verdict: 'suggest',
+      summary: '第二轮报告',
+      risks: [],
+      order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+      focus: {},
+    },
   });
   const llm = (options) => {
     const prompt = JSON.stringify(options.messages);
@@ -2948,11 +2961,14 @@ test('a new round reads the new head instead of the cached file content', async 
 
 test('a stale malformed answer is discarded instead of reported as a failure', async () => {
   const reportReply = JSON.stringify({
-    verdict: 'suggest',
-    summary: '第二轮报告',
-    risks: [],
-    order: [{ file: 'src/a.js', reason: '' }],
-    focus: {},
+    claims: [],
+    final: {
+      verdict: 'suggest',
+      summary: '第二轮报告',
+      risks: [],
+      order: [{ file: 'src/a.js', reason: '' }],
+      focus: {},
+    },
   });
   const llm = (options) => {
     const prompt = JSON.stringify(options.messages);
@@ -3690,50 +3706,44 @@ test('all refutation also drops confirmed suggestions', async () => {
   }
 });
 
-/** One fake LLM answer: triage for the first call, verifier output for the second. */
-function llmTriageThenVerify(triage, verify) {
-  let call = 0;
-  return () => {
-    call += 1;
-    const text = call === 1 ? JSON.stringify(triage) : (typeof verify === 'string' ? verify : JSON.stringify(verify));
-    return (async function* () {
-      yield { type: 'text-delta', text };
-      yield { type: 'finish', reason: { kind: 'stop' } };
-    })();
-  };
-}
-
 test('the report verifier decides risks; unconfirmed points stay out of risks', async () => {
   const plugin = await setup({
     fetch: roundReviewFetch,
     reviews: { 1: unanalyzedReview() },
-    llm: llmTriageThenVerify({
-      verdict: 'suggest',
-      summary: '报告',
-      concerns: [
-        { severity: 'block', file: 'src/a.js', point: '并发写入' },
-        { severity: 'suggest', file: 'src/b.js', point: '命名不清' },
-      ],
-      evidenceNeeds: [
-        { concern: 1, kind: 'file', path: 'src/a.js' },
-        { concern: 2, kind: 'file', path: 'src/b.js' },
-      ],
-      order: [],
-      focus: [],
-    }, {
-      results: [
-        { index: 1, confidence: 88, severity: 'block', point: '并发写入' },
-        { index: 2, confidence: 40, point: '命名不清', missing: '缺调用方' },
-      ],
-      extraIssues: [],
-    }),
+    // The investigation is the verification: a claim only becomes a risk once it is
+    // confirmed with cited evidence; an unconfirmed point is refuted and never published.
+    llm: llmSequence([
+      {
+        claims: [
+          { id: 'C1', statement: '并发写入', status: 'investigating' },
+          { id: 'C2', statement: '命名不清', status: 'investigating' },
+        ],
+        queries: [
+          { op: 'read', path: 'src/a.js' },
+          { op: 'read', path: 'src/b.js' },
+        ],
+      },
+      {
+        claims: [
+          { id: 'C1', statement: '并发写入', status: 'confirmed', reason: '写入无锁', evidence: ['E1'] },
+          { id: 'C2', statement: '命名不清', status: 'refuted', reason: '缺调用方' },
+        ],
+        final: {
+          verdict: 'suggest',
+          summary: '报告',
+          risks: [{ severity: 'block', file: 'src/a.js', point: '并发写入', claim: 'C1' }],
+          order: [],
+          focus: [],
+        },
+      },
+    ]),
   });
   try {
     await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
     const review = await plugin.waitFor(1, (current) => current.status === 'done' && current.report !== null);
     assert.deepEqual(review.report.risks, [{ severity: 'block', file: 'src/a.js', point: '并发写入' }]);
-    assert.deepEqual(review.report.unverified, [{ point: '命名不清', missing: '缺调用方' }]);
-    assert.equal(review.report.verdict, 'block', 'a confirmed blocker outranks the triage verdict');
+    assert.equal(review.report.risks.some((risk) => risk.point === '命名不清'), false, 'an unconfirmed point never enters risks');
+    assert.equal(review.report.verdict, 'block', 'a confirmed blocker outranks the investigation verdict');
   } finally {
     await plugin.dispose();
   }
@@ -3776,22 +3786,24 @@ test('an answer in prose is retried once as JSON instead of failing the round', 
 
 test('a stub report JSON is retried, then fails the round instead of showing an empty report', async () => {
   let calls = 0;
+  const stub = JSON.stringify({ verdict: 'suggest' });
   const plugin = await setup({
     fetch: roundReviewFetch,
     reviews: { 1: unanalyzedReview() },
-    llm: () => {
+    // Two steps is enough: the stub is never a usable investigation answer, so the first
+    // step retries it once, then the forced-closing step rejects it.
+    investigationMaxSteps: 2,
+    llm: (options) => {
       calls += 1;
-      return (async function* () {
-        yield { type: 'text-delta', text: JSON.stringify({ verdict: 'suggest' }) };
-        yield { type: 'finish', reason: { kind: 'stop' } };
-      })();
+      return llmFromText(stub)(options);
     },
   });
   try {
     await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
     const review = await plugin.waitFor(1, (current) => current.status === 'error');
-    assert.match(review.error, /完整的报告 JSON/);
-    assert.equal(calls, 2, 'the corrective turn ran once');
+    assert.match(review.error, /调查未能闭合：final 必须是对象/);
+    assert.equal(review.report, null, 'the failed round does not show an empty report');
+    assert.ok(calls >= 2, 'the corrective turn ran at least once');
   } finally {
     await plugin.dispose();
   }
@@ -3928,31 +3940,44 @@ test('a per-file analysis re-judges the baseline findings one by one', async () 
     findings: baselineRows,
   }];
   const reportReply = JSON.stringify({
-    verdict: 'suggest', summary: '第 2 轮报告',
-    risks: [], order: [{ file: 'src/a.js', reason: '' }], focus: {},
+    claims: [],
+    final: {
+      verdict: 'suggest', summary: '第 2 轮报告',
+      risks: [], order: [{ file: 'src/a.js', reason: '' }], focus: {},
+    },
   });
-  const explainReply = JSON.stringify({
-    verdict: 'pass',
-    summary: '重新分析',
-    logic: '', changes: '',
-    // index 1 判 fixed（本轮不再出现）；index 2 判 still-open 并重写表述；index 3 模型漏判
-    previousVerdicts: [
-      { index: 1, status: 'fixed' },
-      { index: 2, status: 'still-open', point: '旧问题二（仍在）', line: 5 },
-    ],
-    concerns: [{ severity: 'suggest', point: '新发现', suggestion: '修法', line: 9 }],
-  });
+  // 第一次文件调查提出新发现并请求读文件；第二次收口时用 E1 确认它，同时逐条判定基准：
+  // index 1 判 fixed（本轮不再出现）；index 2 判 still-open 并重写表述；index 3 模型漏判。
+  const explainAnswers = [
+    JSON.stringify({
+      claims: [{ id: 'C1', statement: '新发现', status: 'investigating' }],
+      queries: [{ op: 'read', path: 'src/a.js' }],
+    }),
+    JSON.stringify({
+      claims: [{ id: 'C1', statement: '新发现', status: 'confirmed', reason: '文件里确认', evidence: ['E1'] }],
+      final: {
+        verdict: 'pass',
+        summary: '重新分析',
+        logic: '', changes: '',
+        issues: [{ severity: 'suggest', point: '新发现', suggestion: '修法', line: 9, claim: 'C1' }],
+        previousVerdicts: [
+          { index: 1, status: 'fixed' },
+          { index: 2, status: 'still-open', point: '旧问题二（仍在）', line: 5 },
+        ],
+      },
+    }),
+  ];
+  let fileStep = 0;
   const recordedPrompts = [];
   const plugin = await setup({
     reviews: { 1: legacyReview({ roundHistory: roundOneHistory, conclusion: roundOneConclusion, conclusionAt: 300 }) },
     fetch: roundReviewFetch,
     llm: (streamOptions) => {
-      const promptText = JSON.stringify(streamOptions.messages);
+      const promptText = promptTextOf(streamOptions);
       recordedPrompts.push(promptText);
-      let reply;
-      if (promptText.includes('基准轮审查意见')) reply = explainReply;
-      else if (promptText.includes('## 变更文件清单')) reply = reportReply;
-      else reply = JSON.stringify({ verdict: 'pass', summary: '第 2 轮报告兜底', blockers: [], suggestions: [], nextSteps: [] });
+      if (!promptText.includes('正在审查文件')) return llmFromText(reportReply)(streamOptions);
+      const reply = explainAnswers[Math.min(fileStep, explainAnswers.length - 1)];
+      fileStep += 1;
       return llmFromText(reply)(streamOptions);
     },
   });
@@ -3995,32 +4020,39 @@ test('a carry-over finding skips verification while new concerns go through it',
     publishedIds: [],
     findings: carryBaseline,
   }];
-  const verifierPrompts = [];
+  const filePrompts = [];
+  // 延续条目由宿主根据 previousVerdicts 合成，不进入模型的 issues；新发现必须走
+  // claim → 读文件取证 → 终稿的验证链路。
+  const reportReply = JSON.stringify({
+    claims: [],
+    final: { verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} },
+  });
+  const fileAnswers = [
+    JSON.stringify({
+      claims: [{ id: 'C1', statement: '新发现', status: 'investigating' }],
+      queries: [{ op: 'read', path: 'src/a.js' }],
+    }),
+    JSON.stringify({
+      claims: [{ id: 'C1', statement: '新发现', status: 'confirmed', reason: '读到问题', evidence: ['E1'] }],
+      final: {
+        verdict: 'suggest',
+        summary: '重新分析',
+        logic: '', changes: '',
+        issues: [{ severity: 'suggest', point: '新发现', suggestion: '修法', line: 9, claim: 'C1' }],
+        previousVerdicts: [{ index: 1, status: 'still-open' }],
+      },
+    }),
+  ];
+  let fileStep = 0;
   const plugin = await setup({
     reviews: { 1: legacyReview({ roundHistory: carryHistory, conclusion: carryConclusion, conclusionAt: 300 }) },
     fetch: roundReviewFetch,
     llm: (streamOptions) => {
-      const promptText = JSON.stringify(streamOptions.messages);
-      let reply;
-      if (promptText.includes('基准轮审查意见')) {
-        reply = JSON.stringify({
-          verdict: 'suggest',
-          summary: '重新分析',
-          logic: '', changes: '',
-          previousVerdicts: [{ index: 1, status: 'still-open' }],
-          concerns: [{ severity: 'suggest', point: '新发现', suggestion: '修法', line: 9 }],
-        });
-      } else if (promptText.includes('## 候选问题')) {
-        verifierPrompts.push(promptText);
-        reply = JSON.stringify({
-          results: [{ index: 1, confidence: 90, point: '新发现', line: 9 }],
-          extraIssues: [],
-        });
-      } else if (promptText.includes('## 变更文件清单')) {
-        reply = JSON.stringify({ verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} });
-      } else {
-        reply = JSON.stringify({ verdict: 'pass', summary: '结论兜底', blockers: [], suggestions: [], nextSteps: [] });
-      }
+      const promptText = promptTextOf(streamOptions);
+      if (!promptText.includes('正在审查文件')) return llmFromText(reportReply)(streamOptions);
+      filePrompts.push(promptText);
+      const reply = fileAnswers[Math.min(fileStep, fileAnswers.length - 1)];
+      fileStep += 1;
       return llmFromText(reply)(streamOptions);
     },
   });
@@ -4034,10 +4066,11 @@ test('a carry-over finding skips verification while new concerns go through it',
       { severity: 'suggest', point: '上一轮意见', suggestion: '', line: 3, roundItem: 1 },
       { severity: 'suggest', point: '新发现', suggestion: '修法', line: 9 },
     ]);
-    // verifier 只见过新发现候选：延续条目不进复审。
-    assert.equal(verifierPrompts.length, 1);
-    assert.ok(!verifierPrompts[0].includes('上一轮意见'));
-    assert.ok(verifierPrompts[0].includes('新发现'));
+    // 延续条目由持久化的 still-open 直接合成（roundItem 1），不经过调查取证；
+    // 新发现走完 claim/evidence 两步——第二步的 prompt 已带 E1 证据账本。
+    assert.equal(filePrompts.length, 2, 'the new concern needed claim + final; the carry-over added no verification step');
+    assert.match(filePrompts[1], /## E1 · read/);
+    assert.ok(filePrompts[1].includes('新发现'));
   } finally {
     await plugin.dispose();
   }
@@ -4192,12 +4225,15 @@ test('a cross-file claim is not stored when the owning file is analyzed this rou
     { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
   ];
   const reply = JSON.stringify({
-    verdict: 'suggest',
-    summary: '分析',
-    logic: '', changes: '',
-    // 分析 src/impl.js 时跨文件认领归属文件的基准条目
-    previousVerdicts: [{ index: 1, status: 'still-open' }],
-    concerns: [],
+    claims: [],
+    final: {
+      verdict: 'suggest',
+      summary: '分析',
+      logic: '', changes: '',
+      issues: [],
+      // 分析 src/impl.js 时跨文件认领归属文件的基准条目
+      previousVerdicts: [{ index: 1, status: 'still-open' }],
+    },
   });
   const plugin = await setup({
     reviews: {
@@ -4218,9 +4254,9 @@ test('a cross-file claim is not stored when the owning file is analyzed this rou
     },
     fetch: roundReviewFetch,
     llm: (streamOptions) => {
-      const promptText = JSON.stringify(streamOptions.messages);
-      const res = promptText.includes('基准轮审查意见') ? reply
-        : JSON.stringify({ verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} });
+      const promptText = promptTextOf(streamOptions);
+      const res = promptText.includes('正在审查文件') ? reply
+        : JSON.stringify({ claims: [], final: { verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} } });
       return llmFromText(res)(streamOptions);
     },
   });
@@ -4407,20 +4443,35 @@ test('the analysis pipeline drops a fresh concern that repeats a still-open verd
       }),
     },
     fetch: roundReviewFetch,
-    llm: (streamOptions) => {
-      const promptText = JSON.stringify(streamOptions.messages);
-      const reply = promptText.includes('基准轮审查意见')
-        ? JSON.stringify({
+    llm: (() => {
+      const fileAnswers = [
+        JSON.stringify({
+          claims: [{ id: 'C1', statement: '回退链仍可到满格', status: 'investigating' }],
+          queries: [{ op: 'read', path: 'src/a.js' }],
+        }),
+        JSON.stringify({
+          claims: [{ id: 'C1', statement: '回退链仍可到满格', status: 'confirmed', reason: '读到了问题', evidence: ['E1'] }],
+          final: {
             verdict: 'suggest',
             summary: '复现',
             logic: '', changes: '',
-            previousVerdicts: [{ index: 1, status: 'still-open' }],
             // 同一问题又被当成新发现写一遍（文本相同、多了空白）。
-            concerns: [{ severity: 'suggest', point: '  回退链仍可到满格 ', suggestion: '', line: 264 }],
-          })
-        : JSON.stringify({ verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} });
-      return llmFromText(reply)(streamOptions);
-    },
+            issues: [{ severity: 'suggest', point: '  回退链仍可到满格 ', suggestion: '', line: 264, claim: 'C1' }],
+            previousVerdicts: [{ index: 1, status: 'still-open' }],
+          },
+        }),
+      ];
+      let fileStep = 0;
+      return (streamOptions) => {
+        const promptText = promptTextOf(streamOptions);
+        if (!promptText.includes('正在审查文件')) {
+          return llmFromText(JSON.stringify({ claims: [], final: { verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} } }))(streamOptions);
+        }
+        const reply = fileAnswers[Math.min(fileStep, fileAnswers.length - 1)];
+        fileStep += 1;
+        return llmFromText(reply)(streamOptions);
+      };
+    })(),
   });
   try {
     const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
