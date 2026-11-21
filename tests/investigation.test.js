@@ -176,13 +176,16 @@ test('validateFinal rejects a confirmed claim with no issue', () => {
   assert.match(result.error, /没有对应的审查意见/);
 });
 
-test('validateFinal exempts baseline carry-over items and validates report risks', () => {
+test('validateFinal rejects a model-supplied roundItem item without a claim', () => {
   const fileResult = validateFinal({
     summary: 's',
     issues: [{ severity: 'suggest', point: '旧问题', roundItem: 2 }],
   }, [], new Set(), 'file');
-  assert.equal(fileResult.ok, true);
+  assert.equal(fileResult.ok, false);
+  assert.match(fileResult.error, /未对应已确认 claim/);
+});
 
+test('validateFinal validates report risks through confirmed claims', () => {
   const reportResult = validateFinal({
     summary: '报告',
     risks: [{ severity: 'block', file: 'src/a.js', point: '并发写入', claim: 'C1' }],
@@ -191,6 +194,7 @@ test('validateFinal exempts baseline carry-over items and validates report risks
   ], new Set(['E2']), 'report');
   assert.equal(reportResult.ok, true);
   assert.equal(reportResult.issues[0].file, 'src/a.js');
+  assert.equal(reportResult.issues[0].claim, 'C1');
 });
 
 test('validateFinal downgrades a confirmed claim whose evidence is unknown with a fixed reason', () => {
@@ -259,13 +263,4 @@ test('normalizeQuery rejects ReDoS-prone grep patterns and unsafe symbols', () =
   assert.equal(normalizeQuery({ op: 'find', symbol: 'a'.repeat(201) }), null);
   assert.notEqual(normalizeQuery({ op: 'find', symbol: 'a'.repeat(200) }), null);
   assert.equal(normalizeQuery({ op: 'grep', pattern: 'a\u0000b' }), null);
-});
-
-test('validateFinal enforces allowed baseline round items when provided', () => {
-  const final = { summary: 's', issues: [{ severity: 'suggest', point: '旧问题', roundItem: 2 }] };
-  const rejected = validateFinal(final, [], new Set(), 'file', { allowedRoundItems: new Set([1]) });
-  assert.equal(rejected.ok, false);
-  assert.match(rejected.error, /不存在的基准序号：2/);
-  assert.equal(validateFinal(final, [], new Set(), 'file', { allowedRoundItems: new Set([1, 2]) }).ok, true);
-  assert.equal(validateFinal(final, [], new Set(), 'file').ok, true);
 });

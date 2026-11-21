@@ -368,7 +368,7 @@ export function buildRefuterSystem(language) {
 }
 
 /** One refutation step: the confirmed findings, their claims, the trace and the query quota. */
-export function buildRefuteStepPrompt({ opening, system, findings, claims, trace, queriesLeft, closure }) {
+export function buildRefuteStepPrompt({ opening, system, findings, claims, trace, queriesLeft, closure, evidence = '' }) {
   const list = findings.map((item) => {
     const parts = [];
     if (typeof item.claim === 'string' && item.claim !== '') parts.push(`[${item.claim}]`);
@@ -390,7 +390,15 @@ export function buildRefuteStepPrompt({ opening, system, findings, claims, trace
   const outputInstruction = exhausted
     ? `查询配额已用尽：直接输出 results，不要再申请查询。\n\n${resultsBlock}`
     : `你可以先申请补充查询（最多 ${queriesLeft} 条）：\n\n\`\`\`json\n{ "queries": [{ "op": "read", "path": "src/a.js", "symbol": "writeCache" }] }\n\`\`\`\n\n查询用尽后必须给出逐条判定：\n\n${resultsBlock}`;
-  const text = renderPrompt('refute', { opening, findings: list, claims: claimLines === '' ? '（无）' : claimLines, trace: renderTrace(trace), quota, outputInstruction });
+  const text = renderPrompt('refute', {
+    opening,
+    findings: list,
+    claims: claimLines === '' ? '（无）' : claimLines,
+    evidence: evidence === '' ? '（无）' : evidence,
+    trace: renderTrace(trace),
+    quota,
+    outputInstruction,
+  });
   return { system, messages: [{ role: 'user', content: [{ type: 'text', text }] }], maxTokens: 4000, timeoutMs: 300_000 };
 }
 

@@ -1785,7 +1785,11 @@ export function apply(ctx, config) {
     const cwd = evidenceWorkspace();
     if (cwd === '') return '';
     const result = await runGitResult(cwd, ['rev-parse', '--show-toplevel']);
-    return result !== null && result.code === 0 && result.stdout.trim() !== '' ? result.stdout.trim() : cwd;
+    // A failed rev-parse degrades the executor to diff-only; returning cwd would make
+    // every workspace search report "git 不可用" instead.
+    if (result === null || result.code !== 0) return '';
+    const root = result.stdout.trim();
+    return root === '' ? '' : root;
   }
 
   /** Executor-facing git: stdout for success and for grep's "no matches" (code 1). */
@@ -1816,7 +1820,16 @@ export function apply(ctx, config) {
 
   function isInvestigationAnswer(value) {
     return value !== null && typeof value === 'object'
-      && (value.final !== undefined || Array.isArray(value.queries) || Array.isArray(value.claims));
+      && ((value.final !== null && typeof value.final === 'object') || Array.isArray(value.queries) || Array.isArray(value.claims));
+  }
+
+  /** The evidence blocks behind the confirmed claims, handed to the refuter verbatim. */
+  function citedEvidenceOf(trace, claims) {
+    const ids = new Set();
+    for (const claim of claims) if (claim.status === 'confirmed' && Array.isArray(claim.evidence)) for (const id of claim.evidence) ids.add(id);
+    const blocks = [];
+    for (const entry of trace) for (const result of entry.results ?? []) if (ids.has(result.id) && typeof result.block === 'string') blocks.push(result.block);
+    return blocks.join('\n\n');
   }
 
   async function runInvestigation(record, options, signal) {
@@ -1824,6 +1837,7 @@ export function apply(ctx, config) {
     const executor = await newEvidenceExecutor(record);
     const evidenceCount = () => executor.summary().count;
     const deadline = Date.now() + budget.timeoutMs;
+    const withDeadline = (prompt) => ({ ...prompt, timeoutMs: Math.max(1000, Math.min(prompt.timeoutMs ?? 600000, deadline - Date.now())) });
     const mode = options.mode === 'report' ? 'report' : 'file';
     const trace = [];
     let claims = [];
@@ -1842,12 +1856,12 @@ export function apply(ctx, config) {
           budgetLine: '预算已用尽：不得再发起查询，只能用已有证据收口。',
           instruction: '强制收口：不要再输出 queries；为每个 claim 给出 confirmed 或 refuted，并输出 final。',
         });
-        const answer = await callModelJson(prompt, signal, (value) => value !== null && typeof value === 'object' && value.final !== undefined);
+        const answer = await callModelJson(withDeadline(prompt), signal, (value) => value !== null && typeof value === 'object'
+          && value.final !== null && typeof value.final === 'object');
         if (stale()) return { discarded: true };
+        if (Date.now() > deadline) closing = true;
         const closed = normalizeClaims(answer.parsed?.claims, claims);
-        const validated = validateFinal(answer.parsed?.final, closed.claims, executor.evidenceIds(), mode, {
-          allowedRoundItems: options.allowedRoundItems,
-        });
+        const validated = validateFinal(answer.parsed?.final, closed.claims, executor.evidenceIds(), mode);
         if (!validated.ok) throw new Error(`调查未能闭合：${validated.error}`);
         return { ...validated, final: answer.parsed.final, trace, evidenceCount: evidenceCount() };
       }
@@ -1857,19 +1871,17 @@ export function apply(ctx, config) {
         budgetLine: `已获 ${executor.summary().count} 条证据 / ${executor.summary().files} 个文件；上限 ${budget.maxSteps} 步、${budget.maxFiles} 个文件、${budget.maxTotalChars} 字符`,
         instruction: step === 1 ? '第一步：先从开篇资料提出可证伪的 claims，再给出需要的证据查询。' : '继续调查。所有 claim 闭合后输出 final；仍缺证据就继续 queries。',
       });
-      const answer = await callModelJson(prompt, signal, isInvestigationAnswer);
+      const answer = await callModelJson(withDeadline(prompt), signal, isInvestigationAnswer);
       if (stale()) return { discarded: true };
+      if (Date.now() > deadline) closing = true;
       if (answer.parsed === null) throw new Error(`调查第 ${step} 步没有返回可解析的 JSON。`);
       const normalized = normalizeClaims(answer.parsed.claims, claims);
       claims = normalized.claims;
       if (normalized.overflow) trace.push({ step, note: `claims 超过 ${MAX_CLAIMS} 条上限，超出部分已忽略；请用已有 claim 收口。` });
       if (answer.parsed.final !== undefined) {
-        const validated = validateFinal(answer.parsed.final, claims, executor.evidenceIds(), mode, {
-          allowedRoundItems: options.allowedRoundItems,
-        });
+        const validated = validateFinal(answer.parsed.final, claims, executor.evidenceIds(), mode);
         if (validated.ok) return { ...validated, final: answer.parsed.final, trace, evidenceCount: evidenceCount() };
         trace.push({ step, note: `终稿被拒绝：${validated.error}\n你上一步给出的 final：${JSON.stringify(answer.parsed.final).slice(0, 4000)}` });
-        continue;
       }
       const { accepted, rejected } = normalizeQueries(answer.parsed.queries, MAX_QUERIES_PER_STEP);
       if (accepted.length === 0) {
@@ -1885,8 +1897,11 @@ export function apply(ctx, config) {
   async function refuteFindings(record, options, signal) {
     const level = settings.refuteLevel ?? DEFAULTS.refuteLevel;
     if (level === 'off') return { kept: options.findings, refuted: [] };
-    const targets = options.findings.filter((item) => item.roundItem === undefined && (level === 'all' || item.severity === 'block'));
+    const targets = options.findings.filter((item) => typeof item.claim === 'string' && item.claim !== ''
+      && item.roundItem === undefined && (level === 'all' || item.severity === 'block'));
     if (targets.length === 0) return { kept: options.findings, refuted: [] };
+    const discarded = () => ({ discarded: true, kept: options.findings, refuted: [] });
+    const stale = () => typeof options.stale === 'function' && options.stale() === true;
     const claimById = new Map((Array.isArray(options.claims) ? options.claims : []).map((claim) => [claim.id, claim]));
     const targetClaims = targets.map((item) => claimById.get(item.claim)).filter((claim) => claim !== undefined);
     const executor = await newEvidenceExecutor(record, options.startIndex ?? 0);
@@ -1896,16 +1911,15 @@ export function apply(ctx, config) {
     const decisions = [];
     while (true) {
       if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
+      if (stale()) return discarded();
       const closing = remaining <= 0;
       const prompt = buildRefuteStepPrompt({
         opening: options.opening.text, system, findings: targets, claims: targetClaims, trace,
-        queriesLeft: remaining, closure: closing,
+        queriesLeft: remaining, closure: closing, evidence: options.evidence ?? '',
       });
       const answer = await callModelJson(prompt, signal, (value) => value !== null && typeof value === 'object'
         && (Array.isArray(value.results) || (Array.isArray(value.queries) && closing !== true)));
-      if (typeof options.stale === 'function' && options.stale() === true) {
-        return { discarded: true, kept: options.findings, refuted: [] };
-      }
+      if (stale()) return discarded();
       if (answer.parsed === null) throw new Error('反驳复核没有返回可解析的 JSON。');
       if (Array.isArray(answer.parsed.results)) {
         const covered = new Map();
@@ -1914,6 +1928,7 @@ export function apply(ctx, config) {
           const claim = typeof item.claim === 'string' ? item.claim.trim() : '';
           const decision = item.decision === 'drop' ? 'drop' : (item.decision === 'keep' ? 'keep' : '');
           if (claim === '' || decision === '') continue;
+          if (covered.has(claim)) throw new Error(`反驳复核对 claim ${claim} 给出了重复判定。`);
           covered.set(claim, { claim, decision, reason: typeof item.reason === 'string' ? item.reason.trim().slice(0, 300) : '' });
         }
         const missing = targets.filter((item) => !covered.has(item.claim));
@@ -2006,7 +2021,6 @@ export function apply(ctx, config) {
         opening,
         mode: 'file',
         stale: () => (record.analysisEpoch ?? 0) !== epoch,
-        allowedRoundItems: new Set(baselineFindings.map((item) => item.index)),
       },
       signal,
     );
@@ -2021,6 +2035,7 @@ export function apply(ctx, config) {
         claims: investigated.claims,
         startIndex: investigated.evidenceCount,
         stale: () => (record.analysisEpoch ?? 0) !== epoch,
+        evidence: citedEvidenceOf(investigated.trace, investigated.claims),
       }, signal);
       if (refutation.discarded === true) return { explanation: null, cached: false, discarded: true };
       issues = refutation.kept;
@@ -2085,10 +2100,13 @@ export function apply(ctx, config) {
       ? 'block'
       : (issues.length === 0 ? 'pass' : (rawVerdict === 'block' ? 'suggest' : rawVerdict));
     const explanation = normalizeExplanation({
-      ...parsed,
+      verdict,
+      summary: parsed.summary,
+      logic: parsed.logic,
+      walkthrough: parsed.walkthrough,
+      changes: parsed.changes,
       issues,
       refuted,
-      verdict,
     });
     // Repeat the check at the write point: an await added between parse and store must
     // not reopen the stale-write window.

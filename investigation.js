@@ -148,16 +148,15 @@ export function normalizeClaims(raw, previous = [], max = 12) {
 
 /**
  * Validate the terminal answer. Every claim must be closed; every confirmed claim must
- * cite real evidence and produce exactly one finding. Baseline carry-overs (roundItem)
- * are exempt because they were confirmed in an earlier round.
+ * cite real evidence and produce exactly one finding. The host synthesizes baseline
+ * carry-overs from previousVerdicts, so the model may never supply roundItem items.
  */
-export function validateFinal(final, claims, evidenceIds, mode = 'file', options = {}) {
+export function validateFinal(final, claims, evidenceIds, mode = 'file') {
   if (final === null || typeof final !== 'object') return { ok: false, error: 'final 必须是对象' };
   const safeClaims = Array.isArray(claims) ? claims : [];
   const open = safeClaims.filter((claim) => claim.status === 'investigating');
   if (open.length > 0) return { ok: false, error: `仍有未闭合 claim：${open.map((claim) => claim.id).join('、')}` };
   const known = evidenceIds instanceof Set ? evidenceIds : new Set(Array.isArray(evidenceIds) ? evidenceIds : []);
-  const allowedRoundItems = options.allowedRoundItems instanceof Set ? options.allowedRoundItems : null;
   const refuted = [];
   const confirmed = new Map();
   const settled = safeClaims.map((claim) => {
@@ -185,27 +184,19 @@ export function validateFinal(final, claims, evidenceIds, mode = 'file', options
     }
     const point = text(rawItem.point);
     if (point === '') return { ok: false, error: '终稿条目缺少 point' };
-    const carried = Number.isInteger(rawItem.roundItem) && rawItem.roundItem > 0;
-    if (carried && allowedRoundItems !== null && !allowedRoundItems.has(rawItem.roundItem)) {
-      return { ok: false, error: `延续条目引用了不存在的基准序号：${rawItem.roundItem}` };
-    }
     const claim = text(rawItem.claim);
-    if (!carried) {
-      if (claim === '' || !confirmed.has(claim)) {
-        return { ok: false, error: `终稿条目未对应已确认 claim：${point}` };
-      }
-      if (used.has(claim)) return { ok: false, error: `claim ${claim} 产生了多条审查意见` };
-      used.add(claim);
+    if (claim === '' || !confirmed.has(claim)) {
+      return { ok: false, error: `终稿条目未对应已确认 claim：${point}` };
     }
+    if (used.has(claim)) return { ok: false, error: `claim ${claim} 产生了多条审查意见` };
+    used.add(claim);
     items.push({
       severity: rawItem.severity === 'block' ? 'block' : 'suggest',
       point,
       suggestion: text(rawItem.suggestion),
       line: positive(rawItem.line),
       ...(mode === 'report' ? { file: text(rawItem.file) } : {}),
-      ...(claim === '' ? {} : { claim }),
-      ...(carried ? { roundItem: Math.floor(rawItem.roundItem) } : {}),
-      ...(rawItem.unjudged === true ? { unjudged: true } : {}),
+      claim,
     });
   }
   for (const id of confirmed.keys()) {

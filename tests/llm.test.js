@@ -1278,11 +1278,14 @@ test('the refuter prompt lists findings and allows bounded queries', () => {
     trace: [],
     queriesLeft: 3,
     closure: false,
+    evidence: '## E1 · read · src/a.js\n\n<<<EVIDENCE E1 START>>>\nconst a = 1;\n<<<EVIDENCE E1 END>>>',
   });
   const text = prompt.messages[0].content[0].text;
   assert.match(text, /C1/);
   assert.match(text, /3/);
   assert.match(text, /"results"/);
+  assert.match(text, /## 引用的证据/);
+  assert.match(text, /## E1 · read/);
   assert.match(buildRefuterSystem('zh'), /反驳/);
 });
 

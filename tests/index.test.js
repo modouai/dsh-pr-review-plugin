@@ -3427,6 +3427,45 @@ test('a model that never returns JSON fails the analysis instead of degrading', 
   }
 });
 
+test('the refuter receives the evidence cited by confirmed claims', async () => {
+  const prompts = [];
+  const answers = llmSequence([
+    {
+      claims: [{ id: 'C1', statement: '空指针风险', status: 'investigating' }],
+      queries: [{ op: 'read', path: 'src/a.js' }],
+    },
+    {
+      claims: [{ id: 'C1', statement: '空指针风险', status: 'confirmed', reason: '文件里没有判空', evidence: ['E1'] }],
+      final: {
+        verdict: 'suggest',
+        summary: '讲解',
+        logic: '逻辑',
+        changes: '改动',
+        issues: [{ severity: 'block', point: '空指针风险', suggestion: '先判空再取值', line: 2, claim: 'C1' }],
+        previousVerdicts: [],
+      },
+    },
+    { results: [{ claim: 'C1', decision: 'keep', reason: '证据成立' }] },
+  ]);
+  const plugin = await setup({
+    fetch: batchFetch,
+    refuteLevel: 'block',
+    llm: (options) => {
+      prompts.push(promptTextOf(options));
+      return answers();
+    },
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    assert.equal(prompts.length, 3, 'claim step + final step + refuter step');
+    assert.match(prompts[2], /## 引用的证据/);
+    assert.match(prompts[2], /## E1 · read/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 /** One fake LLM answer: triage for the first call, verifier output for the second. */
 function llmTriageThenVerify(triage, verify) {
   let call = 0;
