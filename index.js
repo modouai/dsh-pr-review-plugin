@@ -92,11 +92,6 @@ const DEFAULTS = {
   maxDiffCharsPerFile: 14000,
   commentLanguage: 'zh',
   autoReconclude: false,
-  // Two-pass review: triage proposes concerns, the host collects evidence, a verifier scores
-  // them. On by default (quality first); turn it off to spend one call per file as before.
-  evidenceVerify: true,
-  evidenceMaxFiles: 6,
-  evidenceMaxChars: 6000,
   investigationMaxSteps: 8,
   investigationMaxFiles: 12,
   investigationMaxChars: 4000,
@@ -137,9 +132,13 @@ export const Config = Schema.object({
   maxDiffCharsPerFile: Schema.number().min(1000).default(DEFAULTS.maxDiffCharsPerFile),
   commentLanguage: Schema.union(['zh', 'en']).default(DEFAULTS.commentLanguage),
   autoReconclude: Schema.boolean().default(DEFAULTS.autoReconclude),
-  evidenceVerify: Schema.boolean().default(DEFAULTS.evidenceVerify),
-  evidenceMaxFiles: Schema.number().min(1).max(20).default(DEFAULTS.evidenceMaxFiles),
-  evidenceMaxChars: Schema.number().min(500).default(DEFAULTS.evidenceMaxChars),
+  investigationMaxSteps: Schema.number().min(2).max(20).default(DEFAULTS.investigationMaxSteps),
+  investigationMaxFiles: Schema.number().min(1).max(30).default(DEFAULTS.investigationMaxFiles),
+  investigationMaxChars: Schema.number().min(500).default(DEFAULTS.investigationMaxChars),
+  investigationMaxTotalChars: Schema.number().min(2000).default(DEFAULTS.investigationMaxTotalChars),
+  investigationTimeoutMs: Schema.number().min(60000).default(DEFAULTS.investigationTimeoutMs),
+  refuteLevel: Schema.union(['block', 'all', 'off']).default(DEFAULTS.refuteLevel),
+  refuteMaxQueries: Schema.number().min(0).max(10).default(DEFAULTS.refuteMaxQueries),
 });
 
 /** Stable tool failure codes: the tool registry keeps `error.code` for HarnessError only. */

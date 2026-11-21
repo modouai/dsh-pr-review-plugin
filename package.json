@@ -1,6 +1,6 @@
 {
   "name": "@modouai/dsh-pr-review",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "main": "index.js",
   "description": "Review pull requests from GitHub, GitLab, Gitea/Forgejo/Codeberg, Gitee, GitCode, AtomGit and Codeup in the DeepSeek Harness Web UI: automatic rounds, per-file analysis, conclusion history, and chat-integrated review tools.",
@@ -62,6 +62,8 @@
     "diff.js",
     "llm.js",
     "prompts.js",
+    "investigation.js",
+    "evidence.js",
     "prompts/**/*.md",
     "cordis.patch.yml",
     "locale/*.json",

@@ -20,6 +20,8 @@
 - **发布**：在结论页条目上直接勾选「纳入发布」，评论预览按勾选实时生成；发布弹窗只做最终确认（全文与冲突提示）。评论只追加、不覆盖，并标注被审 commit、轮次、结论版本与覆盖率。
 - **对话集成**：主对话通过 `review_*` 工具读取和修改审查数据，面板实时刷新——说「第 1 条风险不成立」「把第 2 条建议改成阻塞项」，审查数据直接更新。
 
+每个文件与整份 PR 都由一次调查会话完成：模型提出可证伪的断言并申请证据（定义、调用方、测试、diff、整文件），宿主取回证据，循环直到每条断言被确认或证伪。确认的断言才成为审查意见，证伪的只留内部审计。没有证据引用的确认不会发布，也不再有「未验证项」。
+
 ### 对话工具
 
 读取：`review_list_prs`、`review_get`、`review_get_report`、`review_list_files`、`review_get_analysis`、`review_get_diff`、`review_get_file`、`review_list_rounds`、`review_get_round`、`review_get_comments`
@@ -106,9 +108,13 @@ dsh --profile <name>
     autoReview: true
     autoAnalyze: true
     autoReconclude: false
-    evidenceVerify: true
-    evidenceMaxFiles: 6
-    evidenceMaxChars: 6000
+    investigationMaxSteps: 8
+    investigationMaxFiles: 12
+    investigationMaxChars: 4000
+    investigationMaxTotalChars: 24000
+    investigationTimeoutMs: 600000
+    refuteLevel: block
+    refuteMaxQueries: 3
     commentLanguage: zh
     provider: ''
     model: ''
@@ -153,7 +159,6 @@ dsh --profile <name> --dump-config
 | `autoReview` | 布尔 | `true` | PR 首次出现或 head sha 变化时自动开启一轮审查。设为 `false` 后只在点「立即审查」时审查。失败的轮次 5 分钟后重试。 |
 | `autoAnalyze` | 布尔 | `true` | 每轮审查完成后在后台逐个分析全部变更文件，每个文件一次模型调用，调用次数等于变更文件数（例如 100 个文件就是 100 次）。设为 `false` 后点开文件才分析，也可在文件列表点「全部分析」一次补齐。自动分析不重试失败的文件；「全部分析」会重试，调用量约等于未完成与失败的文件数。开始新一轮会取消上一轮未跑完的批次。失败的文件在文件详情里显示错误，成功前不计入「已分析」覆盖率。 |
 | `autoReconclude` | 布尔 | `false` | 报告或逐文件分析在结论之后更新时自动重新生成结论。5 分钟内最多一次，审查进行中不触发，结论未过期不触发。 |
-| `evidenceVerify` | 布尔 | `true` | 两轮审查：第一轮只产出候选问题和所需证据，宿主读取调用方、定义处、测试等文件后，第二轮按证据给每条候选打分（≥ 80 才算审查意见，25–79 进「未验证项」，< 25 丢弃）。没有候选问题时仍只调用一次；有候选时每个文件多一次复审调用。设为 `false` 退回单轮，候选问题直接作为审查意见。 |
 | `commentLanguage` | `zh`、`en` | `zh` | 发布评论的语言（固定标签、标题、附录、署名行），也是内置提示词要求模型使用的输出语言：逐文件分析、最终结论、讨论回答、反馈解析。默认 `zh`，英文仓库需要显式设置 `commentLanguage: en`。语言只在生成时生效，已生成的内容不会被重写。 |
 
 ### 模型与上限
@@ -162,8 +167,13 @@ dsh --profile <name> --dump-config
 |---|---|---|---|
 | `provider` / `model` | 字符串或空 | 空 | 两个都填才生效；否则用 Harness 当前默认模型。只填一个也回落到默认模型。 |
 | `reasoningEffort` | `off`、`low`、`high`、`max` | `off` | 报告、逐文件分析与结论调用的思考档位。模型不支持该档位时，插件去掉档位重试。 |
-| `evidenceMaxFiles` | 数字，1–20 | `6` | 复审取证时最多读取的文件数；超出部分记入「未验证项」。 |
-| `evidenceMaxChars` | 数字，≥ 500 | `6000` | 单个证据文件的字符上限，超出按行截断。 |
+| `investigationMaxSteps` | 数字，2–20 | `8` | 单次调查会话最多模型步数；用尽后发一次强制收口调用，只能用已有证据给每条断言终态。 |
+| `investigationMaxFiles` | 数字，1–30 | `12` | 单次调查最多读取的不同文件数；超出会被拒绝并作为预算说明返回给模型。 |
+| `investigationMaxChars` | 数字 ≥ 500 | `4000` | 单个证据块的字符上限。 |
+| `investigationMaxTotalChars` | 数字 ≥ 2000 | `24000` | 单次会话的证据累计字符上限。 |
+| `investigationTimeoutMs` | 数字 ≥ 60000 | `600000` | 单次会话的墙钟上限。 |
+| `refuteLevel` | `block \| all \| off` | `block` | 哪些已确认意见进入反驳复核；`off` 关闭。 |
+| `refuteMaxQueries` | 数字，0–10 | `3` | 反驳者可以申请的补充查询数。 |
 | `maxDiffCharsPerFile` | 数字，≥ 1000 | `14000` | 单个文件送入模型的最大 diff 字符数。报告调用每文件最多用 2,200 字符，摘录合计最多 120,000 字符。 |
 
 ### token 读取顺序
@@ -214,9 +224,13 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     autoReview: true
     autoAnalyze: true
     autoReconclude: false
-    evidenceVerify: true
-    evidenceMaxFiles: 6
-    evidenceMaxChars: 6000
+    investigationMaxSteps: 8
+    investigationMaxFiles: 12
+    investigationMaxChars: 4000
+    investigationMaxTotalChars: 24000
+    investigationTimeoutMs: 600000
+    refuteLevel: block
+    refuteMaxQueries: 3
     commentLanguage: zh
     provider: ''
     model: ''
@@ -284,9 +298,13 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     autoReview: true
     autoAnalyze: true
     autoReconclude: false
-    evidenceVerify: true
-    evidenceMaxFiles: 6
-    evidenceMaxChars: 6000
+    investigationMaxSteps: 8
+    investigationMaxFiles: 12
+    investigationMaxChars: 4000
+    investigationMaxTotalChars: 24000
+    investigationTimeoutMs: 600000
+    refuteLevel: block
+    refuteMaxQueries: 3
     commentLanguage: zh
     provider: ''
     model: ''
