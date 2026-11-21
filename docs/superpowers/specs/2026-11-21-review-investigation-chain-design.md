@@ -163,7 +163,7 @@ src/handlers/a.js:12
 | `find` | `symbol`, `scope: changed\|repo\|tests` | workspace `git grep -l -F` | 在 `record.diffFiles` 文本中查包含符号的变更文件 |
 | `grep` | `pattern`, 可选 `pathGlob`, `scope` | workspace `git grep -n -E -- <glob>` | 仅对变更文件的 diff 文本做行匹配 |
 | `tests` | `symbol` | workspace 中按测试路径约定 + 符号引用检索 | 仅变更文件中的测试路径 |
-| `diff` | 可选 `path` | `record.diffFiles` | 不适用 |
+| `diff` | `path`（必填） | `record.diffFiles` | 不适用 |
 
 ### 6.2 路径与安全
 

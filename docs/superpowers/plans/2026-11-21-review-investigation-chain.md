@@ -2395,9 +2395,13 @@ And the Chinese table:
 | `refuteMaxQueries` | 数字，0–10 | `3` | 反驳者可以申请的补充查询数。 |
 ```
 
-- [ ] **Step 3: 版本号**
+- [ ] **Step 3: 版本号与发布白名单**
 
 In `package.json`, change `"version": "0.3.0"` to `"version": "0.4.0"`.
+
+Add the new runtime modules to the `files` allowlist (otherwise a published install importing `index.js` fails with `ERR_MODULE_NOT_FOUND`): include `"investigation.js"` and `"evidence.js"` alongside `"diff.js"`, `"llm.js"`, `"prompts.js"`.
+
+Run: `npm pack --dry-run` and confirm the file list includes `investigation.js` and `evidence.js`.
 
 Run: `node scripts/stamp.js --check`
 Expected: PASS（若 stamp 记录版本，按脚本提示更新）。
