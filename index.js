@@ -1689,10 +1689,14 @@ export function apply(ctx, config) {
       }
       record.files = [...fileMap.values()];
     }
-    const prompt = buildReportPrompt(pull, record.files, record.diffFiles, settings);
-    let answer;
+    const opening = buildReportOpening(pull, record.files, record.diffFiles, settings);
+    let investigated;
     try {
-      answer = await callModelJson(prompt, undefined, answerHasContent);
+      investigated = await runInvestigation(
+        record,
+        { opening, mode: 'report' },
+        undefined,
+      );
     } catch (error) {
       record.status = 'error';
       record.error = error instanceof Error ? error.message : String(error);
@@ -1701,48 +1705,36 @@ export function apply(ctx, config) {
       scheduleSave();
       return;
     }
-    const parsed = answer.parsed;
-    if (parsed === null || !answerHasContent(parsed)) {
-      record.status = 'error';
-      record.error = `模型没有返回完整的报告 JSON。原始输出：${answer.raw.slice(0, 400)}`;
-      record.finishedAt = Date.now();
-      currentRoundEntry(record).finishedAt = record.finishedAt;
-      scheduleSave();
-      return;
+    if (investigated.discarded === true) return;
+    const final = investigated.final;
+    let risks = investigated.issues;
+    let refuted = investigated.refuted;
+    if (risks.length > 0) {
+      const refutation = await refuteFindings(record, {
+        opening,
+        findings: risks,
+        claims: investigated.claims,
+        startIndex: investigated.evidenceCount,
+        evidence: citedEvidenceOf(investigated.trace, investigated.claims),
+      }, undefined);
+      risks = refutation.kept;
+      refuted = [...refuted, ...refutation.refuted];
     }
-    const order = Array.isArray(files) ? files.map((file) => file.path) : [];
-    const draft = normalizeReportDraft(parsed, order);
-    let risks = [];
-    let unverified = [];
-    let discarded = 0;
-    if (draft.concerns.length > 0) {
-      if (settings.evidenceVerify === false) {
-        risks = draft.concerns.map((item) => ({ severity: item.severity, file: item.file, point: item.point }));
-      } else {
-        const verdicts = await verifyConcerns(
-          record,
-          draft.concerns,
-          parsed.evidenceNeeds,
-          (evidence, missing) => buildReportVerifyPrompt(pull, draft.concerns, evidence, missing, { language: commentLanguage() }),
-          null,
-        );
-        risks = verdicts.issues.map((item) => ({ severity: item.severity, file: item.file, point: item.point }));
-        unverified = verdicts.unverified;
-        discarded = verdicts.dropped ?? 0;
-      }
-    }
-    // A confirmed blocker outranks the triage verdict; a confirmed finding never leaves a "pass".
     const verdict = risks.some((risk) => risk.severity === 'block')
       ? 'block'
-      : (risks.length > 0 && draft.verdict === 'pass' ? 'suggest' : draft.verdict);
+      : (risks.length === 0 ? 'pass' : (final.verdict === 'block' ? 'suggest' : normalizeVerdict(final.verdict)));
+    const order = Array.isArray(files) ? files.map((file) => file.path) : [];
+    // The investigation final owns the reading order; the file list only backfills it when
+    // the model omitted order entirely.
+    const fallbackOrder = Array.isArray(final.order) && final.order.length > 0 ? [] : order;
     record.report = normalizeReport({
-      ...draft,
       verdict,
+      summary: final.summary,
       risks,
-      unverified,
-      raised: draft.concerns.length,
-      discarded,
-    }, order);
+      refuted,
+      order: final.order,
+      focus: final.focus,
+    }, fallbackOrder);
     record.reportUpdatedAt = 0;
     record.status = 'done';
     record.finishedAt = Date.now();

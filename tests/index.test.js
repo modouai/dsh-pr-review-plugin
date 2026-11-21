@@ -4521,3 +4521,58 @@ test('the tool creating an entry for an unanalyzed file never resolves baselines
     await plugin.dispose();
   }
 });
+
+test('the report investigates its own claims before publishing risks', async () => {
+  const plugin = await setup({
+    fetch: roundReviewFetch,
+    reviews: { 1: unanalyzedReview() },
+    llm: llmSequence([
+      {
+        claims: [{ id: 'C1', statement: '并发写入同一个 Map', status: 'investigating' }],
+        queries: [{ op: 'diff', path: 'src/a.js' }],
+      },
+      {
+        claims: [{ id: 'C1', statement: '并发写入同一个 Map', status: 'confirmed', reason: 'diff 中两个入口都写', evidence: ['E1'] }],
+        final: {
+          verdict: 'suggest',
+          summary: '报告',
+          risks: [{ severity: 'block', file: 'src/a.js', point: '并发写入同一个 Map', claim: 'C1' }],
+          order: [{ file: 'src/a.js', reason: '入口' }],
+          focus: [{ file: 'src/a.js', point: '写入顺序' }],
+        },
+      },
+    ]),
+  });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const review = await plugin.waitFor(1, (current) => current.status === 'done' && current.report !== null);
+    assert.deepEqual(review.report.risks, [{ severity: 'block', file: 'src/a.js', point: '并发写入同一个 Map' }]);
+    assert.equal(review.report.verdict, 'block');
+    assert.deepEqual(review.report.order, [{ file: 'src/a.js', reason: '入口' }]);
+    assert.deepEqual(review.report.focus, { 'src/a.js': '写入顺序' });
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a report investigation that cannot close marks the review as error', async () => {
+  const plugin = await setup({
+    fetch: roundReviewFetch,
+    reviews: { 1: unanalyzedReview() },
+    investigationMaxSteps: 2,
+    llm: llmSequence([
+      {
+        claims: [{ id: 'C1', statement: '无法闭合的断言', status: 'investigating' }],
+        queries: [{ op: 'diff', path: 'src/a.js' }],
+      },
+      { final: { verdict: 'pass', summary: '', risks: [], order: [], focus: [] } },
+    ]),
+  });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const review = await plugin.waitFor(1, (current) => current.status === 'error');
+    assert.match(review.error, /调查未能闭合/);
+  } finally {
+    await plugin.dispose();
+  }
+});
