@@ -98,7 +98,7 @@ fragment(name)              // 读取 prompts/fragments/<name>.md
 
 按任务文件分别定义，包括但不限于：
 
-- `report.md`：`{{platform}}`、`{{repo}}`、`{{pullNumber}}`、`{{title}}`、`{{author}}`、`{{headRef}}`、`{{baseRef}}`、`{{changedFiles}}`、`{{additions}}`、`{{deletions}}`、`{{body}}`、`{{fileLines}}`、`{{order}}`、`{{excerpts}}`
+- `report.md`：`{{platform}}`、`{{repo}}`、`{{pullNumber}}`、`{{title}}`、`{{author}}`、`{{headRef}}`、`{{baseRef}}`、`{{changedFiles}}`、`{{additions}}`、`{{deletions}}`、`{{bodySection}}`、`{{fileLines}}`、`{{order}}`、`{{excerpts}}`
 - `explain.md`：PR 元信息、`{{filePath}}`、`{{fileStatus}}`、`{{additions}}`、`{{deletions}}`、`{{focus}}`、`{{reportLine}}`、`{{diff}}`、`{{fileContent}}`、`{{baselineSection}}`、`{{previousVerdictsField}}`
 - `verify.md`：`{{header}}`、`{{candidates}}`、`{{evidence}}`、`{{missing}}`、`{{diffSection}}`、`{{verifyLanguageRule}}`
 - `chat.md`：PR 元信息、`{{scopeLabel}}`、`{{reportLine}}`、`{{explanation}}`、`{{scopeSection}}`、`{{transcript}}`、`{{question}}`、`{{outputContract}}`
