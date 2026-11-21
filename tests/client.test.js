@@ -2786,12 +2786,15 @@ test('file detail no longer renders an unverified section', () => {
         logic: '',
         changes: '',
         issues: [],
+        unverified: [{ point: '可疑调用方', missing: '缺少 callers 证据' }],
         refuted: [{ point: '内部审计项', reason: '已证伪' }],
       },
     },
     onExplain: () => {},
   }));
   assert.doesNotMatch(textOnly, /未验证项/);
+  assert.doesNotMatch(textOnly, /可疑调用方/);
+  assert.doesNotMatch(textOnly, /缺少证据/);
   assert.doesNotMatch(textOnly, /内部审计项/);
   assert.ok(!elements.some((node) => String(node.props?.className ?? '').includes('prr-unverified')));
 });
