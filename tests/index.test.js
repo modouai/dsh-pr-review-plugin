@@ -2454,7 +2454,10 @@ test('duplicate explain requests for one file share a single model call', async 
       await delay(60);
       yield {
         type: 'text-delta',
-        text: JSON.stringify({ verdict: 'suggest', summary: '讲解', logic: '逻辑', issues: [], suggestions: [] }),
+        text: JSON.stringify({
+          claims: [],
+          final: { verdict: 'pass', summary: '讲解', logic: '逻辑', changes: '', issues: [], previousVerdicts: [] },
+        }),
       };
       yield { type: 'finish', reason: { kind: 'stop' } };
     })();
@@ -2531,13 +2534,10 @@ async function batchFetch(url) {
   throw new Error(`unexpected fetch in test: ${target}`);
 }
 
+// The investigation protocol's one-call answer: no claims, so the final closes at once.
 const BATCH_EXPLANATION = JSON.stringify({
-  verdict: 'suggest',
-  summary: '讲解',
-  logic: '逻辑',
-  changes: '改动',
-  issues: [],
-  suggestions: [],
+  claims: [],
+  final: { verdict: 'pass', summary: '讲解', logic: '逻辑', changes: '改动', issues: [], previousVerdicts: [] },
 });
 
 /** Fetch fake for tests that force a new round: detail, files, diff and file contents. */
@@ -2767,11 +2767,14 @@ test('a new round cancels the batch and drops its in-flight answer', async () =>
 
 test('a fresh explain for the new round does not join the stale in-flight call', async () => {
   const reportReply = JSON.stringify({
-    verdict: 'suggest',
-    summary: '第二轮报告',
-    risks: [],
-    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
-    focus: {},
+    claims: [],
+    final: {
+      verdict: 'pass',
+      summary: '第二轮报告',
+      risks: [],
+      order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+      focus: {},
+    },
   });
   let explains = 0;
   const llm = (options) => {
@@ -2880,11 +2883,14 @@ test('a manual explain in flight is discarded when a new round starts', async ()
 
 test('a new round reads the new head instead of the cached file content', async () => {
   const reportReply = JSON.stringify({
-    verdict: 'suggest',
-    summary: '第二轮报告',
-    risks: [],
-    order: [{ file: 'src/a.js', reason: '' }],
-    focus: {},
+    claims: [],
+    final: {
+      verdict: 'pass',
+      summary: '第二轮报告',
+      risks: [],
+      order: [{ file: 'src/a.js', reason: '' }],
+      focus: {},
+    },
   });
   const prompts = [];
   const fetchHandler = async (url) => {
@@ -3186,11 +3192,14 @@ test('failed batches release their analysis slots for later batches', async () =
 
 test('aborted batches release their analysis slots for later batches', async () => {
   const reportReply = JSON.stringify({
-    verdict: 'suggest',
-    summary: '报告',
-    risks: [],
-    order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
-    focus: {},
+    claims: [],
+    final: {
+      verdict: 'pass',
+      summary: '报告',
+      risks: [],
+      order: [{ file: 'src/a.js', reason: '' }, { file: 'src/b.js', reason: '' }],
+      focus: {},
+    },
   });
   let analyzeThird = false;
   const llm = (options) => {
@@ -3694,111 +3703,6 @@ function llmTriageThenVerify(triage, verify) {
   };
 }
 
-test('a concern becomes a finding only after the verifier scores it against evidence', async () => {
-  const prompts = [];
-  const answers = llmTriageThenVerify({
-    verdict: 'suggest',
-    summary: '讲解',
-    logic: '逻辑',
-    changes: '改动',
-    concerns: [
-      { severity: 'block', point: '空指针风险', suggestion: '先判空再取值', line: 2 },
-      { severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 },
-    ],
-    evidenceNeeds: [
-      { concern: 1, kind: 'file', path: 'src/a.js' },
-      { concern: 2, kind: 'file', path: 'src/a.js' },
-    ],
-  }, {
-    results: [
-      { index: 1, confidence: 90, severity: 'block', point: '空指针风险', line: 2, suggestion: '取值前加空值检查' },
-      { index: 2, confidence: 85, point: '命名不清', line: 4 },
-    ],
-    extraIssues: [],
-  });
-  const recording = (options) => {
-    prompts.push(promptTextOf(options));
-    return answers(options);
-  };
-  const plugin = await setup({ fetch: batchFetch, llm: recording });
-  try {
-    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
-    assert.equal(result.status, 200);
-    // The verifier's suggestion rewrite wins; a result without one falls back to the candidate's.
-    assert.deepEqual(result.json.explanation.issues, [
-      { severity: 'block', point: '空指针风险', suggestion: '取值前加空值检查', line: 2 },
-      { severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 },
-    ]);
-    assert.deepEqual(result.json.explanation.unverified, []);
-    assert.equal(prompts.length, 2, 'triage + verifier');
-    assert.match(prompts[1], /## 候选问题/);
-    assert.match(prompts[1], /## 证据 1：src\/a\.js/);
-  } finally {
-    await plugin.dispose();
-  }
-});
-
-test('a verifier that returns junk turns every concern into an unverified note', async () => {
-  const plugin = await setup({
-    fetch: batchFetch,
-    llm: llmTriageThenVerify({
-      verdict: 'suggest',
-      summary: '讲解',
-      logic: '逻辑',
-      changes: '改动',
-      concerns: [{ severity: 'block', point: '可疑空指针', line: 3 }],
-      evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
-      suggestions: [],
-    }, 'not json at all'),
-  });
-  try {
-    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
-    assert.equal(result.status, 200);
-    assert.deepEqual(result.json.explanation.issues, []);
-    assert.deepEqual(result.json.explanation.unverified, [
-      { point: '可疑空指针', missing: '复审未完成：模型没有返回可解析的 JSON' },
-    ]);
-  } finally {
-    await plugin.dispose();
-  }
-});
-
-test('evidenceVerify off keeps the single-pass contract', async () => {
-  let calls = 0;
-  const plugin = await setup({
-    fetch: batchFetch,
-    llm: () => (async function* () {
-      calls += 1;
-      yield {
-        type: 'text-delta',
-        text: JSON.stringify({
-          verdict: 'suggest',
-          summary: '讲解',
-          logic: '逻辑',
-          changes: '改动',
-          concerns: [{ severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 }],
-          evidenceNeeds: [],
-          // A model that has not caught up with the merged prompt still answers with the
-          // legacy suggestions list; it folds into the tail of issues.
-          suggestions: ['补一条测试'],
-        }),
-      };
-      yield { type: 'finish', reason: { kind: 'stop' } };
-    })(),
-  });
-  try {
-    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
-    assert.equal(calls, 1, 'no verifier call when evidenceVerify is off');
-    assert.deepEqual(result.json.explanation.issues, [
-      { severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 },
-      { severity: 'suggest', point: '补一条测试', suggestion: '', line: 0 },
-    ]);
-    assert.deepEqual(result.json.explanation.unverified, []);
-  } finally {
-    await plugin.dispose();
-  }
-});
-
 test('the report verifier decides risks; unconfirmed points stay out of risks', async () => {
   const plugin = await setup({
     fetch: roundReviewFetch,
@@ -3847,13 +3751,8 @@ test('an answer in prose is retried once as JSON instead of failing the round', 
         const text = calls === 1
           ? '## 审查结论\n\n这是一段分析，不是 JSON。'
           : JSON.stringify({
-              verdict: 'suggest',
-              summary: '讲解',
-              logic: '逻辑',
-              changes: '改动',
-              concerns: [],
-              evidenceNeeds: [],
-              suggestions: [],
+              claims: [],
+              final: { verdict: 'suggest', summary: '讲解', logic: '逻辑', changes: '改动', issues: [], previousVerdicts: [] },
             });
         yield { type: 'text-delta', text };
         yield { type: 'finish', reason: { kind: 'stop' } };
@@ -3898,124 +3797,30 @@ test('a stub report JSON is retried, then fails the round instead of showing an 
   }
 });
 
-test('the report records how many triage concerns the verifier discarded', async () => {
-  const plugin = await setup({
-    fetch: roundReviewFetch,
-    reviews: { 1: unanalyzedReview() },
-    llm: llmTriageThenVerify({
-      verdict: 'suggest',
-      summary: '报告',
-      concerns: [{ severity: 'suggest', file: 'src/a.js', point: '可能是误报' }],
-      evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
-      order: [],
-      focus: [],
-    }, {
-      results: [{ index: 1, confidence: 10, point: '可能是误报' }],
-      extraIssues: [],
-    }),
-  });
-  try {
-    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
-    const review = await plugin.waitFor(1, (current) => current.status === 'done' && current.report !== null);
-    assert.deepEqual(review.report.risks, []);
-    assert.equal(review.report.raised, 1);
-    assert.equal(review.report.discarded, 1);
-  } finally {
-    await plugin.dispose();
-  }
-});
-
-test('evidence blocks say which lines they show', async () => {
-  const longFile = Array.from({ length: 300 }, (_, index) => `line ${index + 1}`).join('\n');
-  const fetchHandler = async (url) => {
-    const target = String(url);
-    if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
-    if (target.includes('/pulls/1.diff')) return textResponse(200, BATCH_DIFF);
-    if (target.includes('/contents/')) {
-      return jsonResponse(200, {
-        encoding: 'base64',
-        content: Buffer.from(longFile, 'utf8').toString('base64'),
-        size: longFile.length,
-      });
-    }
-    throw new Error(`unexpected fetch in test: ${target}`);
-  };
-  const prompts = [];
-  const answers = llmTriageThenVerify({
-    verdict: 'suggest',
-    summary: '讲解',
-    logic: '逻辑',
-    changes: '改动',
-    concerns: [{ severity: 'suggest', point: '长文件里的问题', line: 250 }],
-    evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
-    suggestions: [],
-  }, {
-    results: [{ index: 1, confidence: 85, point: '长文件里的问题', line: 250 }],
-    extraIssues: [],
-  });
-  const plugin = await setup({
-    fetch: fetchHandler,
-    llm: (options) => {
-      prompts.push(promptTextOf(options));
-      return answers(options);
-    },
-  });
-  try {
-    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
-    assert.equal(result.status, 200);
-    assert.match(prompts[1], /前 200 行（共 300 行）/);
-  } finally {
-    await plugin.dispose();
-  }
-});
-
-test('a suggestion the diff already implements is dropped by the verifier', async () => {
-  const plugin = await setup({
-    fetch: batchFetch,
-    llm: llmTriageThenVerify({
-      verdict: 'suggest',
-      summary: '讲解',
-      logic: '逻辑',
-      changes: '改动',
-      // Pure-improvement noise now travels as a suggest-level concern carrying its own
-      // suggestion; the verifier's confidence scoring is what filters it out.
-      concerns: [{ severity: 'suggest', point: '补齐三行配置', suggestion: '在配置里补齐三行', line: 3 }],
-      evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
-    }, {
-      results: [{ index: 1, confidence: 10, point: '补齐三行配置' }],
-      extraIssues: [],
-    }),
-  });
-  try {
-    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
-    assert.equal(result.status, 200);
-    assert.deepEqual(result.json.explanation.issues, []);
-    assert.deepEqual(result.json.explanation.unverified, []);
-    // 空意见即通过：复审把模型的候选全数否决后，一个 suggest 判定失去了依据。
-    assert.equal(result.json.explanation.verdict, 'pass');
-  } finally {
-    await plugin.dispose();
-  }
-});
-
 test('a confirmed blocker raises the file verdict', async () => {
   const plugin = await setup({
     fetch: batchFetch,
-    llm: llmTriageThenVerify({
-      verdict: 'pass',
-      summary: '讲解',
-      logic: '逻辑',
-      changes: '改动',
-      concerns: [{ severity: 'suggest', point: '空指针风险', line: 2 }],
-      evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
-      suggestions: [],
-    }, {
-      results: [{ index: 1, confidence: 90, severity: 'block', point: '空指针风险', line: 2 }],
-      extraIssues: [],
-    }),
+    llm: llmSequence([
+      {
+        claims: [{ id: 'C1', statement: '空指针风险', status: 'investigating' }],
+        queries: [{ op: 'read', path: 'src/a.js' }],
+      },
+      {
+        claims: [{ id: 'C1', statement: '空指针风险', status: 'confirmed', reason: '文件里没有判空', evidence: ['E1'] }],
+        final: {
+          verdict: 'pass',
+          summary: '讲解',
+          logic: '逻辑',
+          changes: '改动',
+          issues: [{ severity: 'block', point: '空指针风险', suggestion: '', line: 2, claim: 'C1' }],
+          previousVerdicts: [],
+        },
+      },
+    ]),
   });
   try {
     const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
     assert.equal(result.json.explanation.verdict, 'block');
   } finally {
     await plugin.dispose();
@@ -4023,17 +3828,23 @@ test('a confirmed blocker raises the file verdict', async () => {
 });
 
 test('verdict reconciliation: suggest findings respect the model, a bare block degrades', async () => {
-  const build = (modelVerdict, resultSeverity) => llmTriageThenVerify({
-    verdict: modelVerdict,
-    summary: '讲解',
-    logic: '逻辑',
-    changes: '改动',
-    concerns: [{ severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4 }],
-    evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
-  }, {
-    results: [{ index: 1, confidence: 90, severity: resultSeverity, point: '命名不清', line: 4 }],
-    extraIssues: [],
-  });
+  const build = (modelVerdict) => llmSequence([
+    {
+      claims: [{ id: 'C1', statement: '命名不清', status: 'investigating' }],
+      queries: [{ op: 'read', path: 'src/a.js' }],
+    },
+    {
+      claims: [{ id: 'C1', statement: '命名不清', status: 'confirmed', reason: '确实不清楚', evidence: ['E1'] }],
+      final: {
+        verdict: modelVerdict,
+        summary: '讲解',
+        logic: '逻辑',
+        changes: '改动',
+        issues: [{ severity: 'suggest', point: '命名不清', suggestion: '改成 camelCase', line: 4, claim: 'C1' }],
+        previousVerdicts: [],
+      },
+    },
+  ]);
   const run = async (llm) => {
     const plugin = await setup({ fetch: batchFetch, llm });
     try {
@@ -4044,35 +3855,11 @@ test('verdict reconciliation: suggest findings respect the model, a bare block d
     }
   };
   // 纯优化/非阻塞意见不阻碍合并：模型的 pass 保留（Approve-with-comments 语义）。
-  assert.equal(await run(build('pass', 'suggest')), 'pass');
+  assert.equal(await run(build('pass')), 'pass');
   // 模型的 suggest 保留。
-  assert.equal(await run(build('suggest', 'suggest')), 'suggest');
+  assert.equal(await run(build('suggest')), 'suggest');
   // 裸 block（无确认的阻断项却喊阻塞）降为 suggest。
-  assert.equal(await run(build('block', 'suggest')), 'suggest');
-});
-
-test('a verifier reply with no results leaves every candidate visible', async () => {
-  const plugin = await setup({
-    fetch: batchFetch,
-    llm: llmTriageThenVerify({
-      verdict: 'suggest',
-      summary: '讲解',
-      logic: '逻辑',
-      changes: '改动',
-      concerns: [{ severity: 'suggest', point: '空指针风险', line: 2 }],
-      evidenceNeeds: [{ concern: 1, kind: 'file', path: 'src/a.js' }],
-      suggestions: [],
-    }, {}),
-  });
-  try {
-    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
-    assert.deepEqual(result.json.explanation.issues, []);
-    assert.deepEqual(result.json.explanation.unverified, [
-      { point: '空指针风险', missing: '复审未返回该候选的判定' },
-    ]);
-  } finally {
-    await plugin.dispose();
-  }
+  assert.equal(await run(build('block')), 'suggest');
 });
 
 test('concluding a round freezes its findings snapshot as the next baseline', async () => {
