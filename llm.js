@@ -388,15 +388,6 @@ export function buildExplainVerifyPrompt(pull, file, concerns, evidence, missing
 
 /** Follow-up conversation about one file (or the whole PR when file is null). */
 export function buildChatPrompt(pull, file, explanation, report, history, question, conclusion, options = {}) {
-  const contextLines = [
-    `平台：${platformLabel(pull.platform)}；仓库：${pull.repo}`,
-    `PR #${pull.number}：${pull.title}`,
-    file === null ? '讨论范围：整个 PR（总览）' : `讨论文件：${file.path}`,
-    report === null || report === undefined ? '' : `PR 总体结论：${report.verdict ?? ''}；${report.summary ?? ''}`,
-    explanation === null || explanation === undefined
-      ? ''
-      : `已有文件分析：\n${JSON.stringify(explanation).slice(0, 8000)}`,
-  ].filter((line) => line !== '');
   const transcript = history
     .slice(-8)
     .map((turn) => `${turn.role === 'assistant' ? '助手' : '用户'}：${String(turn.text).slice(0, 3000)}`)
@@ -432,47 +423,21 @@ export function buildChatPrompt(pull, file, explanation, report, history, questi
     ? `## 该文件当前的审查意见（编号从 1 开始，用于这次讨论的增删改）\n${numbered(currentFindings, (item, i) => `${i + 1}. [${item.severity}] ${item.point}${item.line > 0 ? `（行 ${item.line}）` : ''}${item.suggestion === '' ? '' : `\n   —— 建议：${item.suggestion}`}`)}`
     : overviewLines();
 
-  const outputLines = isFileScope
-    ? [
-        '"findingOps": [',
-        '  { "op": "remove", "index": 1 },',
-        '  { "op": "update", "index": 2, "point": "改写后的问题与影响", "suggestion": "改写后的具体修法（可选）", "severity": "block | suggest", "line": 12 },',
-        '  { "op": "add", "point": "新意见的问题与影响", "suggestion": "可选：具体修法", "severity": "suggest", "line": 0 }',
-        ']',
-        'findingOps 只用于按这次讨论修改「该文件当前的审查意见」：某条不成立就 remove 对应编号；要改写就 update（只给要改的字段：point 写问题与影响，suggestion 写具体做法，severity/line 可一并改）；讨论出新意见就 add。没有要改的就输出空数组。不要通过 answer 代替操作。',
-      ]
-    : [
-        '"suggestionOps": [',
-        '  { "op": "remove", "target": "risk", "index": 1 },',
-        '  { "op": "update", "target": "risk", "index": 1, "text": "改写后的风险描述" },',
-        '  { "op": "add", "target": "risk", "text": "新增风险", "file": "路径或空串", "severity": "block | suggest" },',
-        '  { "op": "remove", "target": "suggestion", "index": 2 },',
-        '  { "op": "update", "target": "blocker", "index": 1, "text": "改写后的阻塞项" },',
-        '  { "op": "add", "target": "nextStep", "text": "新增的下一步" }',
-        ']',
-        'suggestionOps 直接修改总览里已存在的内容：target 取 risk（总体初筛风险）、blocker（最终结论的阻塞项）、suggestion（最终结论的修改建议）、nextStep（下一步）。用户说某条不成立就 remove 对应编号；说要改写就 update；讨论出新内容就 add（add risk/suggestion 时用 file 标注涉及文件，未涉及写空串；add blocker/nextStep 不需要 file）。没有要改的就输出空数组。不要通过 answer 代替操作。',
-      ];
-
-  const user = [
-    ...contextLines,
-    '',
+  const user = renderPrompt('chat', {
+    platform: platformLabel(pull.platform),
+    repo: pull.repo,
+    pullNumber: pull.number,
+    title: pull.title,
+    scopeLabel: file === null ? '讨论范围：整个 PR（总览）' : `讨论文件：${file.path}`,
+    reportLine: report === null || report === undefined ? '' : `PR 总体结论：${report.verdict ?? ''}；${report.summary ?? ''}`,
+    explanation: explanation === null || explanation === undefined
+      ? ''
+      : `已有文件分析：\n${JSON.stringify(explanation).slice(0, 8000)}`,
     scopeSection,
-    '',
-    transcript === '' ? '' : `## 已有对话\n${transcript}`,
-    '',
-    '## 新问题',
+    transcriptSection: transcript === '' ? '' : `## 已有对话\n${transcript}`,
     question,
-    '',
-    '不要重复整个报告；需要时引用文件、函数与行号。',
-    '',
-    '严格输出 JSON（不要 JSON 之外的文字）：',
-    '{',
-    '  "answer": "给你的回答正文",',
-    ...outputLines.map((line) => (line.startsWith('"') ? `  ${line}` : line)),
-    '}',
-  ]
-    .filter((line) => line !== '')
-    .join('\n');
+    outputContract: fragment(isFileScope ? 'chat-file-contract' : 'chat-overview-contract'),
+  });
   return {
     system: reviewerSystem(languageOf(options)),
     messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
