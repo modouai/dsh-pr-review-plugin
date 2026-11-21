@@ -3361,7 +3361,7 @@ test('gitea is an alias for the Forgejo adapter and keeps the same cache slug', 
   }
 });
 
-// ---------- evidence verification (two-pass review) ----------
+// ---------- investigation protocol ----------
 
 /** Prompt text of one model request, however many content blocks it carries. */
 function promptTextOf(options) {
@@ -3706,7 +3706,7 @@ test('all refutation also drops confirmed suggestions', async () => {
   }
 });
 
-test('the report verifier decides risks; unconfirmed points stay out of risks', async () => {
+test('the report investigation decides risks; unconfirmed points stay out of risks', async () => {
   const plugin = await setup({
     fetch: roundReviewFetch,
     reviews: { 1: unanalyzedReview() },
@@ -3742,7 +3742,6 @@ test('the report verifier decides risks; unconfirmed points stay out of risks', 
     await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
     const review = await plugin.waitFor(1, (current) => current.status === 'done' && current.report !== null);
     assert.deepEqual(review.report.risks, [{ severity: 'block', file: 'src/a.js', point: '并发写入' }]);
-    assert.equal(review.report.risks.some((risk) => risk.point === '命名不清'), false, 'an unconfirmed point never enters risks');
     assert.equal(review.report.verdict, 'block', 'a confirmed blocker outranks the investigation verdict');
   } finally {
     await plugin.dispose();
@@ -3786,6 +3785,7 @@ test('an answer in prose is retried once as JSON instead of failing the round', 
 
 test('a stub report JSON is retried, then fails the round instead of showing an empty report', async () => {
   let calls = 0;
+  const prompts = [];
   const stub = JSON.stringify({ verdict: 'suggest' });
   const plugin = await setup({
     fetch: roundReviewFetch,
@@ -3795,6 +3795,7 @@ test('a stub report JSON is retried, then fails the round instead of showing an 
     investigationMaxSteps: 2,
     llm: (options) => {
       calls += 1;
+      prompts.push(promptTextOf(options));
       return llmFromText(stub)(options);
     },
   });
@@ -3803,7 +3804,9 @@ test('a stub report JSON is retried, then fails the round instead of showing an 
     const review = await plugin.waitFor(1, (current) => current.status === 'error');
     assert.match(review.error, /调查未能闭合：final 必须是对象/);
     assert.equal(review.report, null, 'the failed round does not show an empty report');
-    assert.ok(calls >= 2, 'the corrective turn ran at least once');
+    assert.equal(calls, 4, 'each of the two steps called the model twice (answer + corrective retry)');
+    assert.match(prompts[1], /上一次的输出不是合法的、完整的 JSON/, 'the normal step retried the stub');
+    assert.match(prompts[3], /上一次的输出不是合法的、完整的 JSON/, 'the closing step retried the stub');
   } finally {
     await plugin.dispose();
   }
@@ -4004,7 +4007,7 @@ test('a per-file analysis re-judges the baseline findings one by one', async () 
   }
 });
 
-test('a carry-over finding skips verification while new concerns go through it', async () => {
+test('a carry-over finding skips re-investigation while new concerns go through it', async () => {
   const carryConclusion = { verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] };
   const carryBaseline = [
     { index: 1, file: 'src/a.js', severity: 'suggest', point: '上一轮意见', line: 3, suggestion: '' },

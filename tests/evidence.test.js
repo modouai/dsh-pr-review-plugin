@@ -37,6 +37,25 @@ test('read returns a numbered evidence block and slices around a symbol', async 
   assert.match(result.block, /第 1–6 行（共 6 行）/);
 });
 
+test('a default read shows the first 200 lines with a line-count note', async () => {
+  const content = Array.from({ length: 250 }, (_, index) => `line${index + 1}`).join('\n');
+  const evidence = executor({ readFile: async () => content });
+  const result = await evidence.execute(normalizeQuery({ op: 'read', path: 'src/x.js' }));
+  assert.equal(result.id, 'E1');
+  assert.match(result.block, /前 200 行（共 250 行）/);
+  const body = result.block
+    .split('<<<EVIDENCE E1 START>>>\n')[1]
+    .split('\n<<<EVIDENCE E1 END>>>')[0];
+  assert.equal(body.split('\n').length, 200, 'the default read is capped at 200 lines');
+});
+
+test('a read over 200 KB notes the file-size truncation', async () => {
+  const evidence = executor({ readFile: async () => 'x'.repeat(200_001) });
+  const result = await evidence.execute(normalizeQuery({ op: 'read', path: 'src/x.js' }));
+  assert.equal(result.id, 'E1');
+  assert.match(result.block, /（文件超过 200 KB，已截断读取）/);
+});
+
 test('a repeated query reuses the same evidence id', async () => {
   const evidence = executor();
   const query = normalizeQuery({ op: 'diff', path: 'src/a.js' });
