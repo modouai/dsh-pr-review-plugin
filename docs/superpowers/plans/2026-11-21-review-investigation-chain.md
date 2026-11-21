@@ -2410,7 +2410,7 @@ git commit -m "refactor(review): remove the unverified verification pass"
 ## Task 9: 配置、README 与版本
 
 **Files:**
-- Modify: `index.js`（Config schema）、`package.json`、`README.md`、`README.zh-CN.md`
+- Modify: `index.js`（Config schema）、`package.json`、`cordis.patch.yml`、`README.md`、`README.zh-CN.md`
 
 - [ ] **Step 1: 更新 Config schema**
 
@@ -2491,6 +2491,8 @@ And the Chinese table:
 In `package.json`, change `"version": "0.3.0"` to `"version": "0.4.0"`.
 
 Add the new runtime modules to the `files` allowlist (otherwise a published install importing `index.js` fails with `ERR_MODULE_NOT_FOUND`): include `"investigation.js"` and `"evidence.js"` alongside `"diff.js"`, `"llm.js"`, `"prompts.js"`.
+
+Also update `cordis.patch.yml` (the bundle's shipped config) from the three `evidence*` keys to the seven investigation/refute keys, matching the README examples.
 
 Run: `npm pack --dry-run` and confirm the file list includes `investigation.js` and `evidence.js`.
 
