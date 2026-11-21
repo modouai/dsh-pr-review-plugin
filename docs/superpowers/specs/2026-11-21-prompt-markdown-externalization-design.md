@@ -64,18 +64,19 @@ prompts/
 新文件 `prompts.js`（ESM，无第三方依赖，不导入 `llm.js` 以避免循环引用）：
 
 ```js
-loadPrompt(name)            // 读取 prompts/<name>.md，模块初始化时缓存
-renderPrompt(name, values)  // 替换 {{key}}，缺值抛错，检测残留占位符，trimEnd
+loadPrompt(name)            // 读取 prompts/<name>.md，模块初始化时读取并缓存
+renderTemplate(template, name, values) // 纯函数：替换占位符、校验、trimEnd
+renderPrompt(name, values)  // loadPrompt(name) + renderTemplate(...)
 fragment(name)              // 读取 prompts/fragments/<name>.md
 ```
 
 规则：
 
 - 同步 `readFileSync(new URL('./prompts/<name>.md', import.meta.url), 'utf8')`。
+- `prompts.js` 导出 `PROMPT_NAMES` 与 `FRAGMENT_NAMES`，模块初始化时遍历读取全部文件；缺文件在 import 期失败。
 - `{{key}}` 只匹配 `[A-Za-z][A-Za-z0-9_]*`。
-- `values` 缺少某个占位符对应的键 → 抛出 `Missing prompt value: <file>#<key>`。
+- `values` 缺少某个占位符对应的键、或值为 `null`/`undefined` → 抛出 `Missing prompt value: <file>#<key>`。显式空字符串 `''` 合法（用于 `{{previousVerdictsField}}`）。
 - 替换前检查模板：把合法占位符去掉后模板里仍有 `{{` → 抛出 `Malformed placeholder: <file>`。该检查只看模板，不看替换值，避免 diff 等动态内容里出现 `{{` 时误报。
-- 文件读取失败直接抛出，让插件在加载期快速失败。
 - 返回值做 `trimEnd()`，不加尾随换行。
 
 `llm.js` 与 `index.js` 都从 `prompts.js` 导入。

@@ -40,7 +40,8 @@
 
 **Files:**
 - Create: `prompts.js`
-- Test: `tests/prompts.test.js`
+- Create: `tests/prompts.test.js`
+- Modify: `package.json`（`files`）
 
 - [ ] **Step 1: 写失败测试**
 
@@ -55,23 +56,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
+import { sep } from 'node:path';
 
-import { fragment, loadPrompt, renderPrompt } from '../prompts.js';
-
-const PROMPTS = [
-  'reviewer', 'reviewer-compact', 'verifier',
-  'report', 'explain', 'verify', 'chat', 'conclude', 'feedback',
-  'review-data',
-];
-const FRAGMENTS = [
-  'review-framework', 'previous-verdicts',
-  'language-zh', 'language-en', 'verify-language-zh', 'verify-language-en',
-  'chat-file-contract', 'chat-overview-contract',
-];
+import {
+  FRAGMENT_NAMES,
+  PROMPT_NAMES,
+  fragment,
+  loadPrompt,
+  renderPrompt,
+  renderTemplate,
+} from '../prompts.js';
 
 test('prompts: every prompt and fragment file loads and is non-empty', () => {
-  for (const name of PROMPTS) assert.notEqual(loadPrompt(name).trim(), '', name);
-  for (const name of FRAGMENTS) assert.notEqual(fragment(name).trim(), '', name);
+  for (const name of PROMPT_NAMES) assert.notEqual(loadPrompt(name).trim(), '', name);
+  for (const name of FRAGMENT_NAMES) assert.notEqual(fragment(name).trim(), '', name);
 });
 
 test('prompts: renderPrompt fills placeholders and rejects missing values', () => {
@@ -87,20 +85,44 @@ test('prompts: renderPrompt fills placeholders and rejects missing values', () =
 test('prompts: dynamic values containing braces do not trip the template check', () => {
   const text = renderPrompt('reviewer', { reviewFramework: '{{not-a-placeholder}}', languageRule: '' });
   assert.match(text, /\{\{not-a-placeholder\}\}/);
+  assert.doesNotMatch(text, /\{\{languageRule\}\}/);
+});
+
+test('prompts: renderTemplate rejects malformed placeholders and nullish values', () => {
+  assert.throws(
+    () => renderTemplate('a {{ bad }} b', 'x', {}),
+    /Malformed placeholder: x/,
+  );
+  assert.throws(
+    () => renderTemplate('{{a}}', 'x', { a: undefined }),
+    /Missing prompt value: x#a/,
+  );
+  assert.throws(
+    () => renderTemplate('{{a}}', 'x', { a: null }),
+    /Missing prompt value: x#a/,
+  );
+  assert.equal(renderTemplate('pre{{a}}post', 'x', { a: '' }), 'prepost');
 });
 
 test('prompts: every Markdown file on disk is covered by the test lists', () => {
   const root = new URL('../prompts/', import.meta.url);
-  const top = readdirSync(root)
-    .filter((file) => file.endsWith('.md'))
+  const files = readdirSync(root, { recursive: true })
+    .map((file) => file.split(sep).join('/'))
+    .filter((file) => file.endsWith('.md'));
+  const top = files
+    .filter((file) => !file.includes('/'))
     .map((file) => file.slice(0, -3))
     .sort();
-  assert.deepEqual(top, [...PROMPTS].sort());
-  const fragments = readdirSync(new URL('fragments/', root))
-    .filter((file) => file.endsWith('.md'))
-    .map((file) => file.slice(0, -3))
+  const fragments = files
+    .filter((file) => file.startsWith('fragments/'))
+    .map((file) => file.slice('fragments/'.length, -3))
     .sort();
-  assert.deepEqual(fragments, [...FRAGMENTS].sort());
+  const stray = files
+    .filter((file) => file.includes('/') && !file.startsWith('fragments/'))
+    .sort();
+  assert.deepEqual(top, [...PROMPT_NAMES].sort());
+  assert.deepEqual(fragments, [...FRAGMENT_NAMES].sort());
+  assert.deepEqual(stray, []);
 });
 
 test('prompts: package files ship prompts.js and the Markdown tree', () => {
@@ -125,8 +147,12 @@ Expected: FAIL，`Cannot find module '../prompts.js'`。
  * Prompt loading and rendering.
  *
  * Every static prompt text lives in `prompts/*.md`. Builders pass the dynamic values and
- * this module substitutes them. A missing value is an error, not an empty string: a prompt
- * that silently loses its diff or its candidates is worse than a failed review.
+ * this module substitutes them. A missing value — absent, `null`, or `undefined` — is an
+ * error, not an empty string: a prompt that silently loses its diff or its candidates is
+ * worse than a failed review. An explicit empty string is valid.
+ *
+ * All prompt and fragment files are read once at import time, so a missing file fails fast
+ * instead of surfacing on the first request.
  */
 
 import { readFileSync } from 'node:fs';
@@ -140,6 +166,20 @@ function read(relativePath) {
   return cache.get(relativePath);
 }
 
+/** Prompt file stems; `reviewer` loads `prompts/reviewer.md`. */
+export const PROMPT_NAMES = [
+  'reviewer', 'reviewer-compact', 'verifier',
+  'report', 'explain', 'verify', 'chat', 'conclude', 'feedback',
+  'review-data',
+];
+
+/** Shared fragment file stems; `language-zh` loads `prompts/fragments/language-zh.md`. */
+export const FRAGMENT_NAMES = [
+  'review-framework', 'previous-verdicts',
+  'language-zh', 'language-en', 'verify-language-zh', 'verify-language-en',
+  'chat-file-contract', 'chat-overview-contract',
+];
+
 /** Load one task/system prompt by file stem (`report` → `prompts/report.md`). */
 export function loadPrompt(name) {
   return read(`./prompts/${name}.md`);
@@ -150,11 +190,17 @@ export function fragment(name) {
   return read(`./prompts/fragments/${name}.md`);
 }
 
+// Read every shipped file now so a missing one fails at import time.
+for (const name of PROMPT_NAMES) loadPrompt(name);
+for (const name of FRAGMENT_NAMES) fragment(name);
+
 const PLACEHOLDER = /\{\{([A-Za-z][A-Za-z0-9_]*)\}\}/g;
 
-/** Fill `{{key}}` placeholders; a missing key throws. */
-export function renderPrompt(name, values) {
-  const template = loadPrompt(name);
+/**
+ * Fill `{{key}}` placeholders in `template`; a missing or nullish key throws, and a
+ * leftover `{{` that is not a valid placeholder throws as malformed.
+ */
+export function renderTemplate(template, name, values) {
   const given = values !== null && typeof values === 'object' ? values : {};
   // Check the template, not the result: dynamic values may legitimately contain `{{`.
   if (template.replace(PLACEHOLDER, '').includes('{{')) {
@@ -164,8 +210,17 @@ export function renderPrompt(name, values) {
     if (!Object.prototype.hasOwnProperty.call(given, key)) {
       throw new Error(`Missing prompt value: ${name}#${key}`);
     }
-    return String(given[key]);
+    const value = given[key];
+    if (value === null || value === undefined) {
+      throw new Error(`Missing prompt value: ${name}#${key}`);
+    }
+    return String(value);
   }).trimEnd();
+}
+
+/** Fill `{{key}}` placeholders in a named prompt; a missing value throws. */
+export function renderPrompt(name, values) {
+  return renderTemplate(loadPrompt(name), name, values);
 }
 ```
 
@@ -186,16 +241,25 @@ done
 
 `prompts/reviewer.md` 必须同时包含 `{{reviewFramework}}` 与 `{{languageRule}}`，否则 Step 1 的渲染断言会失败。
 
-- [ ] **Step 5: 运行测试确认通过**
+- [ ] **Step 5: 把提示词文件加入打包清单**
+
+在 `package.json` 的 `files` 数组中 `"llm.js",` 之后加入：
+
+```json
+    "prompts.js",
+    "prompts/**/*.md",
+```
+
+- [ ] **Step 6: 运行测试确认通过**
 
 Run: `node --test tests/prompts.test.js`
 
-Expected: 5 个测试全部 PASS。
+Expected: 6 个测试全部 PASS。
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 7: 提交**
 
 ```bash
-git add prompts.js prompts/ tests/prompts.test.js
+git add prompts.js prompts/ package.json tests/prompts.test.js
 git commit -m "feat(prompts): add the Markdown prompt loader"
 ```
 
