@@ -37,24 +37,16 @@ import {
   ensureConclusionIds,
   parseChatReply,
   parseFeedbackReply,
-  buildExplainPrompt,
-  buildExplainVerifyPrompt,
-  buildReportPrompt,
-  buildReportVerifyPrompt,
   callModel,
   extractJson,
   findingsOf,
   itemId,
   mergeConclusion,
-  normalizeConcerns,
   normalizeConclusion,
-  normalizeEvidenceNeeds,
   normalizeExplanation,
   normalizePreviousVerdicts,
   normalizeReport,
-  normalizeReportDraft,
   normalizeVerdict,
-  partitionVerdicts,
 } from './llm.js';
 import {
   buildExplainOpening,
@@ -62,7 +54,6 @@ import {
   buildRefuterSystem,
   buildRefuteStepPrompt,
   buildReportOpening,
-  normalizeRefuted,
 } from './llm.js';
 import { createEvidenceExecutor } from './evidence.js';
 import { normalizeClaims, normalizeQueries, validateFinal } from './investigation.js';
@@ -203,6 +194,17 @@ function parseBody(text) {
   }
 }
 
+/**
+ * Drop the internal `refuted` audit from a report/explanation before it reaches the
+ * browser payload. Every other field is passed through unchanged.
+ */
+function withoutRefuted(value) {
+  if (value === null || value === undefined || typeof value !== 'object') return value;
+  const rest = { ...value };
+  delete rest.refuted;
+  return rest;
+}
+
 /** Serialize one review record for the browser half (no diff text, no Maps, no abort handles). */
 function serializeReview(record) {
   if (record === undefined) return null;
@@ -224,12 +226,12 @@ function serializeReview(record) {
           failed: record.analyzing.failed,
           current: record.analyzing.current,
         },
-    report: record.report,
+    report: withoutRefuted(record.report),
     explanations: [...record.explanations.entries()].map(([filePath, entry]) => ({
       file: filePath,
       status: entry.status,
       error: entry.error,
-      explanation: entry.explanation,
+      explanation: withoutRefuted(entry.explanation),
       chat: entry.chat,
       updatedAt: entry.updatedAt ?? 0,
       baselineVerdicts: Array.isArray(entry.baselineVerdicts) ? entry.baselineVerdicts : null,
@@ -1210,27 +1212,7 @@ export function apply(ctx, config) {
     return result;
   }
 
-  // ---------- evidence for the verifier ----------
-
-  /** Run one git command in the workspace; evidence lookup only, so failures read as null. */
-  function runGit(cwd, args) {
-    return new Promise((resolve) => {
-      const attempt = (at) => {
-        if (at >= GIT_CANDIDATES.length) {
-          resolve(null);
-          return;
-        }
-        execFile(GIT_CANDIDATES[at], ['-C', cwd, ...args], { timeout: 5000, maxBuffer: 512 * 1024 }, (error, stdout) => {
-          if (error !== null && error !== undefined && error.code === 'ENOENT') {
-            attempt(at + 1);
-            return;
-          }
-          resolve(error === null ? String(stdout) : null);
-        });
-      };
-      attempt(0);
-    });
-  }
+  // ---------- workspace evidence ----------
 
   /**
    * Workspace directory whose origin is the repository under review, or '' when unusable.
@@ -1242,192 +1224,6 @@ export function apply(ctx, config) {
     const known = repoByCwd.get(cwd);
     if (known === undefined || known.supported !== true) return '';
     return known.repo === provider.repo && known.platform === provider.platform ? cwd : '';
-  }
-
-  /** Candidate paths: files in the workspace that contain the symbol. */
-  async function grepWorkspaceSymbol(cwd, symbol, limit) {
-    // --full-name keeps paths repo-root-relative even when the workspace is a subdirectory.
-    const stdout = await runGit(cwd, ['grep', '--full-name', '-l', '-F', '-e', symbol]);
-    if (stdout === null) return [];
-    return stdout
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line !== '')
-      .slice(0, limit);
-  }
-
-  /** Fallback candidates: changed files whose diff mentions the symbol. */
-  function diffSymbolCandidates(record, symbol) {
-    const paths = [];
-    for (const [filePath, diff] of record.diffFiles ?? new Map()) {
-      if (typeof diff?.text === 'string' && diff.text.includes(symbol)) paths.push(filePath);
-    }
-    return paths.slice(0, 3);
-  }
-
-  function describeNeed(need) {
-    const target = need.path !== '' ? need.path : (need.symbol !== '' ? need.symbol : '?');
-    return `${need.kind} ${target}${need.reason === '' ? '' : `（${need.reason}）`}`;
-  }
-
-  /**
-   * Around the first symbol occurrence when there is one, else the file's head. The note
-   * states which lines were shown: a verifier that sees only part of a file must know it,
-   * or it will report "this file lacks X" from a truncated view.
-   */
-  function sliceEvidence(content, symbol, maxChars) {
-    const text = String(content ?? '');
-    const lines = text.split('\n');
-    const total = lines.length;
-    let start = 0;
-    let end = total;
-    let note = '';
-    if (symbol !== '') {
-      const at = text.indexOf(symbol);
-      if (at !== -1) {
-        const lineIndex = text.slice(0, at).split('\n').length - 1;
-        start = Math.max(0, lineIndex - 40);
-        end = Math.min(total, lineIndex + 41);
-        note = `第 ${start + 1}–${end} 行（共 ${total} 行）`;
-      } else {
-        end = Math.min(total, 200);
-        note = `未找到 ${symbol}，显示前 ${end} 行（共 ${total} 行）`;
-      }
-    } else if (total > 200) {
-      end = 200;
-      note = `前 ${end} 行（共 ${total} 行）`;
-    }
-    let chunk = lines.slice(start, end).join('\n');
-    if (chunk.length > maxChars) {
-      chunk = `${chunk.slice(0, maxChars)}\n…（已按字符上限截断）`;
-      note = note === '' ? '内容超过字符上限，已截断' : `${note}，且超过字符上限已截断`;
-    }
-    return { text: chunk, note };
-  }
-
-  /** A fence longer than any backtick run inside the evidence, so Markdown cannot close it. */
-  function fenceFor(text) {
-    const runs = String(text).match(/`{3,}/g);
-    const longest = runs === null ? 0 : Math.max(...runs.map((run) => run.length));
-    return '`'.repeat(Math.max(3, longest + 1));
-  }
-
-  function evidenceBlock(index, need, filePath, content, maxChars) {
-    const meta = [need.kind, need.symbol === '' ? '' : `symbol=${need.symbol}`].filter((item) => item !== '').join(' · ');
-    const sliced = sliceEvidence(content, need.symbol, maxChars);
-    const scope = sliced.note === '' ? '' : `；${sliced.note}`;
-    const fence = fenceFor(sliced.text);
-    return `## 证据 ${index}：${filePath}（${meta}${scope}）\n\n${fence}text\n${sliced.text}\n${fence}`;
-  }
-
-  /**
-   * Fetch what the triage pass asked for. Local files only nominate candidates; the bytes in
-   * the prompt always come from the PR head, so a stale worktree can never turn into evidence.
-   */
-  async function collectEvidence(record, needs, maxFiles, maxChars) {
-    const blocks = [];
-    const missing = [];
-    const used = new Set();
-    const cwd = evidenceWorkspace();
-    let index = 0;
-    for (const need of needs) {
-      if (blocks.length >= maxFiles) {
-        missing.push(`${describeNeed(need)}：证据超过上限（${maxFiles} 个文件），未读取`);
-        continue;
-      }
-      const candidates = [];
-      if (need.path !== '') candidates.push(need.path);
-      if (need.symbol !== '') {
-        if (cwd !== '') candidates.push(...await grepWorkspaceSymbol(cwd, need.symbol, 3));
-        if (candidates.length === 0) candidates.push(...diffSymbolCandidates(record, need.symbol));
-      }
-      if (candidates.length === 0) {
-        missing.push(`${describeNeed(need)}：没有可读取的文件路径`);
-        continue;
-      }
-      let covered = false;
-      for (const candidate of candidates) {
-        // Dedupe per (file, symbol): the same file can hold several symbols, and each
-        // needs its own window. An existing key still covers this need; keep trying later
-        // candidates because one may offer a better match.
-        const cacheKey = `${candidate}::${need.symbol}`;
-        if (used.has(cacheKey)) {
-          covered = true;
-          continue;
-        }
-        try {
-          const content = await ensureFileContent(record, candidate);
-          index += 1;
-          blocks.push(evidenceBlock(index, need, candidate, content.content, maxChars));
-          used.add(cacheKey);
-          covered = true;
-          break;
-        } catch (error) {
-          console.warn('[pr-review] 读取证据失败:', candidate, error);
-        }
-      }
-      if (!covered) missing.push(`${describeNeed(need)}：无法读取 ${candidates[0]}`);
-    }
-    return { blocks: blocks.join('\n\n'), missing };
-  }
-
-  /**
-   * Score the triage pass's concerns against the evidence. A verifier failure never fails the
-   * review: the candidates become unverified notes instead of findings.
-   */
-  async function verifyConcerns(record, concerns, rawNeeds, buildPrompt, epoch, signal) {
-    const needs = normalizeEvidenceNeeds(rawNeeds);
-    const evidence = await collectEvidence(
-      record,
-      needs,
-      settings.evidenceMaxFiles ?? DEFAULTS.evidenceMaxFiles,
-      settings.evidenceMaxChars ?? DEFAULTS.evidenceMaxChars,
-    );
-    if (epoch !== null && (record.analysisEpoch ?? 0) !== epoch) {
-      return { discarded: true, issues: [], unverified: [] };
-    }
-    if (signal !== undefined && signal !== null && signal.aborted) {
-      return { discarded: true, issues: [], unverified: [] };
-    }
-    let answer;
-    try {
-      answer = await callModelJson(
-        buildPrompt(evidence.blocks, evidence.missing),
-        signal,
-        // A reply without a results array is a stub, not a verdict.
-        (value) => value !== null && typeof value === 'object' && Array.isArray(value.results),
-      );
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      // A cancelled batch must not persist its cancellation as "unverified" findings.
-      if ((signal !== undefined && signal !== null && signal.aborted) || reason.includes('已取消')) {
-        return { discarded: true, issues: [], unverified: [] };
-      }
-      console.warn('[pr-review] 复审调用失败，候选问题转入未验证项：', error);
-      return {
-        discarded: false,
-        issues: [],
-        unverified: concerns.map((item) => ({ point: item.point, missing: `复审未完成：${reason}` })),
-        dropped: 0,
-        raw: null,
-      };
-    }
-    if (answer.parsed === null) {
-      return {
-        discarded: false,
-        issues: [],
-        unverified: concerns.map((item) => ({ point: item.point, missing: '复审未完成：模型没有返回可解析的 JSON' })),
-        dropped: 0,
-        raw: null,
-      };
-    }
-    const verdicts = partitionVerdicts(answer.parsed, concerns);
-    // Dropped candidates are neither findings nor unverified notes; keep the count visible
-    // so a model that stopped answering in range does not look like "no problems found".
-    if (verdicts.dropped > 0) {
-      console.warn(`[pr-review] 复审丢弃 ${verdicts.dropped} 条候选（无法归位或置信度 < 25）`);
-    }
-    return { discarded: false, raw: answer.parsed, ...verdicts };
   }
 
   // ---------- pull list ----------
@@ -1644,18 +1440,6 @@ export function apply(ctx, config) {
     };
     const retried = await callModel(ctx, settings, signal === undefined || signal === null ? correction : { ...correction, signal });
     return { raw: retried, parsed: extractJson(retried) };
-  }
-
-  /**
-   * Both the report and the per-file prompt require a summary or at least one candidate
-   * concern; an answer with neither is a stub, not a review. Shared so the two paths cannot
-   * drift apart.
-   */
-  function answerHasContent(value) {
-    if (value === null || typeof value !== 'object') return false;
-    const summary = typeof value.summary === 'string' ? value.summary.trim() : '';
-    const concerns = Array.isArray(value.concerns) ? value.concerns : [];
-    return summary !== '' || concerns.length > 0;
   }
 
   /** Fetch one pull request and produce the overall report plus reading order. */
@@ -2086,9 +1870,8 @@ export function apply(ctx, config) {
     issues = [...carried, ...issues];
     // Verdict reconciliation (semantic contract):
     // - any confirmed blocker -> block: never "pass" a file with confirmed blockers;
-    // - no confirmed findings -> pass: an all-dropped triage is a pass, since a "suggest"
-    //   verdict without a surviving finding is an unanchored judgment (the dropped
-    //   candidates and unverified notes stay visible in their own sections);
+    // - no confirmed findings -> pass: a "suggest" verdict without a surviving finding
+    //   is an unanchored judgment;
     // - only suggest findings -> the model's verdict stands, except a bare "block"
     //   (a blocked call with no confirmed blocker degrades to suggest).
     const rawVerdict = ['block', 'suggest', 'pass'].includes(parsed.verdict) ? parsed.verdict : 'suggest';
@@ -3569,7 +3352,7 @@ export function apply(ctx, config) {
           const before = entry.explanation ?? null;
           // Normalize the merged explanation through the single shape point: issues become
           // four-key findings (suggestion inlined), any legacy `suggestions` key is dropped,
-          // and fields the call omits (walkthrough/changes/unverified) survive the edit.
+          // and fields the call omits (walkthrough/changes/refuted) survive the edit.
           const next = normalizeExplanation({
             verdict: args.verdict ?? before?.verdict,
             summary: args.summary ?? before?.summary,
@@ -3577,7 +3360,7 @@ export function apply(ctx, config) {
             walkthrough: before?.walkthrough,
             changes: before?.changes,
             issues: issues ?? before?.issues,
-            unverified: before?.unverified,
+            refuted: before?.refuted,
           });
           if (JSON.stringify(next).length > 12_000) {
             throw toolError(TOOL_ERROR.limitExceeded, '该文件分析超过 12000 字符，请精简 issues 后重试。');

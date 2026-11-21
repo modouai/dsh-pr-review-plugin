@@ -402,88 +402,6 @@ export function buildRefuteStepPrompt({ opening, system, findings, claims, trace
   return { system, messages: [{ role: 'user', content: [{ type: 'text', text }] }], maxTokens: 4000, timeoutMs: 300_000 };
 }
 
-/**
- * The verifier's system prompt: it is a judge, not a second reviewer. Scoring is the only job,
- * and the evidence block is its only source of truth.
- */
-function verifierSystem(language) {
-  return renderPrompt('verifier', {
-    languageRule: languageRule(language),
-  });
-}
-
-/** Shared body for both verifier prompts: candidates, collected evidence, unreadable items. */
-function verifyPromptBody(header, concerns, evidence, missing, language, extra = {}) {
-  const list = Array.isArray(concerns) ? concerns : [];
-  const missingList = Array.isArray(missing) ? missing : [];
-  const diffText = typeof extra.diffText === 'string' ? extra.diffText.trim() : '';
-  const candidateLines = list.length === 0
-    ? ['（无候选问题）']
-    : list.map((item, index) => {
-        const where = item.file === '' ? '' : ` [${item.file}${item.line > 0 ? `:${item.line}` : ''}]`;
-        const advice = typeof item.suggestion === 'string' && item.suggestion !== ''
-          ? `\n   —— ${language === 'en' ? 'Suggestion: ' : '建议：'}${item.suggestion}`
-          : '';
-        return `${index + 1}. [${item.severity}]${where} ${item.point}${advice}`;
-      });
-  const missingLines = missingList.length === 0 ? ['（无）'] : missingList.map((item) => `- ${item}`);
-  return renderPrompt('verify', {
-    header,
-    candidates: candidateLines.join('\n'),
-    evidence: String(evidence ?? '').trim() === '' ? '（没有取到任何证据）' : String(evidence).trim(),
-    missing: missingLines.join('\n'),
-    diffSection: diffText === '' ? '' : `## 该文件的 diff（用来判断候选是否已经实现）\n\n${diffText}`,
-    verifyLanguageRule: fragment(language === 'en' ? 'verify-language-en' : 'verify-language-zh'),
-  });
-}
-
-/** Verifier for the whole-PR report: turns report concerns into risks or unverified notes. */
-export function buildReportVerifyPrompt(pull, concerns, evidence, missing, options = {}) {
-  const language = languageOf(options);
-  return {
-    system: verifierSystem(language),
-    messages: [{
-      role: 'user',
-      content: [{
-        type: 'text',
-        text: verifyPromptBody(
-          `平台：${platformLabel(pull?.platform)}；仓库：${pull?.repo ?? ''}\nPR #${pull?.number ?? 0}：${pull?.title ?? ''}`,
-          concerns,
-          evidence,
-          missing,
-          language,
-        ),
-      }],
-    }],
-    maxTokens: 8000,
-    timeoutMs: 300_000,
-  };
-}
-
-/** Verifier for one file: turns file concerns into findings or unverified notes. */
-export function buildExplainVerifyPrompt(pull, file, concerns, evidence, missing, options = {}) {
-  const language = languageOf(options);
-  return {
-    system: verifierSystem(language),
-    messages: [{
-      role: 'user',
-      content: [{
-        type: 'text',
-        text: verifyPromptBody(
-          `平台：${platformLabel(pull?.platform)}；仓库：${pull?.repo ?? ''}\nPR #${pull?.number ?? 0}：${pull?.title ?? ''}\n正在复审文件：${file?.path ?? ''}（${file?.status ?? ''}，+${file?.additions ?? 0} / -${file?.deletions ?? 0}）`,
-          concerns,
-          evidence,
-          missing,
-          language,
-          { diffText: options.diffText },
-        ),
-      }],
-    }],
-    maxTokens: 8000,
-    timeoutMs: 300_000,
-  };
-}
-
 /** Follow-up conversation about one file (or the whole PR when file is null). */
 export function buildChatPrompt(pull, file, explanation, report, history, question, conclusion, options = {}) {
   const transcript = history
@@ -492,6 +410,13 @@ export function buildChatPrompt(pull, file, explanation, report, history, questi
     .join('\n');
   const isFileScope = file !== null && file !== undefined;
   const currentFindings = findingsOf(explanation);
+  const explanationView = explanation === null || explanation === undefined ? null : {
+    verdict: explanation.verdict,
+    summary: explanation.summary,
+    logic: explanation.logic,
+    changes: explanation.changes,
+    issues: explanation.issues,
+  };
 
   const numbered = (items, mapper) => (items.length === 0 ? '（无）' : items.map(mapper).join('\n'));
   const overviewLines = () => {
@@ -528,9 +453,7 @@ export function buildChatPrompt(pull, file, explanation, report, history, questi
     title: pull.title,
     scopeLabel: file === null ? '讨论范围：整个 PR（总览）' : `讨论文件：${file.path}`,
     reportLine: report === null || report === undefined ? '' : `PR 总体结论：${report.verdict ?? ''}；${report.summary ?? ''}`,
-    explanation: explanation === null || explanation === undefined
-      ? ''
-      : `已有文件分析：\n${JSON.stringify(explanation).slice(0, 8000)}`,
+    explanation: explanationView === null ? '' : `已有文件分析：\n${JSON.stringify(explanationView).slice(0, 8000)}`,
     scopeSection,
     transcriptSection: transcript === '' ? '' : `## 已有对话\n${transcript}`,
     question,
@@ -572,7 +495,8 @@ export function buildConcludePrompt(pull, report, explanations, currentConclusio
   const humanItemIds = (Array.isArray(options.humanItemIds) ? options.humanItemIds : []).filter((id) => typeof id === 'string' && id !== '');
   const feedback = options.feedback === null || options.feedback === undefined ? null : options.feedback;
   const pullChat = Array.isArray(options.pullChat) ? options.pullChat : [];
-  const reportLine = report === null || report === undefined ? '' : `总体报告：${truncateWithMarker(JSON.stringify(report), 5000)}`;
+  const reportView = report === null || report === undefined ? null : { verdict: report.verdict, summary: report.summary, risks: report.risks };
+  const reportLine = reportView === null ? '' : `总体报告：${truncateWithMarker(JSON.stringify(reportView), 5000)}`;
 
   const coverageSection = coverage === null ? '' : (() => {
     const analyzed = Number.isFinite(coverage.analyzed) ? coverage.analyzed : 0;
@@ -682,47 +606,6 @@ export function normalizePreviousVerdicts(raw, baselineCount) {
   return verdicts;
 }
 
-/** Candidate problems from the triage pass; none of them is a finding until the verifier scores it. */
-export function normalizeConcerns(raw) {
-  return (Array.isArray(raw) ? raw : [])
-    .filter((item) => item !== null && typeof item === 'object')
-    .map((item) => ({
-      severity: item.severity === 'block' ? 'block' : 'suggest',
-      file: typeof item.file === 'string' ? item.file : '',
-      point: typeof item.point === 'string' ? item.point.trim() : '',
-      suggestion: typeof item.suggestion === 'string' ? item.suggestion.trim() : '',
-      // Same hardening as findingsOf: only positive finite line numbers survive.
-      line: typeof item.line === 'number' && Number.isFinite(item.line) && item.line > 0 ? Math.floor(item.line) : 0,
-    }))
-    .filter((item) => item.point !== '');
-}
-
-/** Evidence the triage pass wants before a concern can become a finding. */
-export function normalizeEvidenceNeeds(raw) {
-  const kinds = new Set(['callers', 'definition', 'callee', 'schema', 'test', 'file']);
-  return (Array.isArray(raw) ? raw : [])
-    .filter((item) => item !== null && typeof item === 'object')
-    .map((item) => ({
-      concern: Number.isInteger(item.concern) && item.concern > 0 ? item.concern : 0,
-      kind: kinds.has(item.kind) ? item.kind : 'file',
-      path: typeof item.path === 'string' ? item.path.trim() : '',
-      symbol: typeof item.symbol === 'string' ? item.symbol.trim() : '',
-      reason: typeof item.reason === 'string' ? item.reason.trim() : '',
-    }))
-    .filter((item) => item.path !== '' || item.symbol !== '');
-}
-
-/** Points the verifier could not confirm; shown broken out, never as a finding. */
-export function normalizeUnverified(raw) {
-  return (Array.isArray(raw) ? raw : [])
-    .filter((item) => item !== null && typeof item === 'object')
-    .map((item) => ({
-      point: typeof item.point === 'string' ? item.point.trim() : '',
-      missing: typeof item.missing === 'string' ? item.missing.trim() : '',
-    }))
-    .filter((item) => item.point !== '');
-}
-
 /** Confirmed-then-dropped claims: internal audit only, never rendered. */
 export function normalizeRefuted(raw) {
   return (Array.isArray(raw) ? raw : [])
@@ -735,137 +618,7 @@ export function normalizeRefuted(raw) {
     .slice(0, 20);
 }
 
-/** Confidence thresholds shared by the candidate and extra-issue paths. */
-export const CONFIDENCE_FINDING = 80;
-export const CONFIDENCE_UNVERIFIED = 25;
-
-/** Wording that means the model itself did not verify the claim, whatever score it gave. */
-const DOUBT_PATTERNS = [
-  /无法确认/, /无法核实/, /无法判断/, /未能确认/, /证据不足/, /证据被截断/, /不足以确认/, /不确定/,
-  /could not (?:confirm|verify)/i,
-  /cannot (?:confirm|verify)/i,
-  /unable to (?:confirm|verify)/i,
-  /insufficient evidence/i,
-  /not (?:been )?verified/i,
-  /\buncertain\b/i,
-];
-
-function selfReportedDoubt(point) {
-  return DOUBT_PATTERNS.some((pattern) => pattern.test(point));
-}
-
-/**
- * Turn the verifier's confidence scores into publishable findings and unverified notes.
- * 80+ is a finding, 25-79 is kept as an unverified note, below 25 is a false positive.
- */
-export function partitionVerdicts(raw, concerns) {
-  const candidates = Array.isArray(concerns) ? concerns : [];
-  const issues = [];
-  const unverified = [];
-  const seen = new Set();
-  let dropped = 0;
-  const severityOf = (item, fallback) => {
-    if (item !== null && item !== undefined) {
-      if (item.severity === 'block') return 'block';
-      if (item.severity === 'suggest') return 'suggest';
-    }
-    return fallback?.severity === 'block' ? 'block' : 'suggest';
-  };
-  const addIssue = (item, fallback) => {
-    const point = typeof item?.point === 'string' && item.point.trim() !== ''
-      ? item.point.trim()
-      : (fallback?.point ?? '');
-    if (point === '' || seen.has(point)) return;
-    seen.add(point);
-    // One suggestion per finding: the verifier's rewrite wins, else the candidate's own.
-    const modelSuggestion = typeof item?.suggestion === 'string' ? item.suggestion.trim() : '';
-    const fallbackSuggestion = typeof fallback?.suggestion === 'string' ? fallback.suggestion.trim() : '';
-    const suggestion = modelSuggestion !== '' ? modelSuggestion : fallbackSuggestion;
-    issues.push({
-      severity: severityOf(item, fallback),
-      point,
-      suggestion,
-      line: typeof item?.line === 'number' && Number.isFinite(item.line)
-        ? Math.floor(item.line)
-        : (fallback?.line ?? 0),
-      file: typeof item?.file === 'string' ? item.file : (fallback?.file ?? ''),
-    });
-  };
-  const results = (Array.isArray(raw?.results) ? raw.results : []).filter((item) => item !== null && typeof item === 'object');
-  // The contract numbers candidates from 1; a reply numbered from 0 is a common slip and
-  // is shifted as a whole rather than mis-attributed one slot down.
-  const zeroBased = results.some((item) => item.index === 0) && !results.some((item) => item.index === 1);
-  const answered = new Set();
-  for (const item of results) {
-    const rawIndex = Number.isInteger(item.index) ? item.index : -1;
-    const index = zeroBased ? rawIndex + 1 : rawIndex;
-    // An out-of-range result cannot be attached to a candidate. The prompt promises such
-    // results are dropped; publishing an unanchored finding would break that promise.
-    if (index < 1 || index > candidates.length) {
-      dropped += 1;
-      continue;
-    }
-    answered.add(index);
-    const concern = candidates[index - 1] ?? null;
-    const point = typeof item.point === 'string' && item.point.trim() !== ''
-      ? item.point.trim()
-      : (concern?.point ?? '');
-    if (point === '') {
-      dropped += 1;
-      continue;
-    }
-    const confidence = typeof item.confidence === 'number' && Number.isFinite(item.confidence)
-      ? Math.max(0, Math.min(100, item.confidence))
-      : 0;
-    // A high score cannot override the model's own wording: "I could not confirm" is an
-    // unverified note even if it also said 90.
-    const doubt = selfReportedDoubt(point);
-    if (confidence >= CONFIDENCE_FINDING && !doubt) {
-      addIssue({ ...item, point }, concern);
-    } else if (confidence >= CONFIDENCE_UNVERIFIED || doubt) {
-      unverified.push({
-        point,
-        missing: typeof item.missing === 'string' && item.missing.trim() !== ''
-          ? item.missing.trim()
-          : (doubt ? '模型自述证据不足' : '证据不足以确认'),
-      });
-    } else {
-      dropped += 1;
-    }
-  }
-  // A candidate the verifier never answered must not vanish: an empty or partial reply
-  // would otherwise look like "raised 3, filtered 0, nothing found".
-  candidates.forEach((concern, offset) => {
-    if (answered.has(offset + 1)) return;
-    const point = typeof concern?.point === 'string' ? concern.point.trim() : '';
-    if (point === '') return;
-    unverified.push({ point, missing: '复审未返回该候选的判定' });
-  });
-  for (const item of Array.isArray(raw?.extraIssues) ? raw.extraIssues : []) {
-    if (item === null || typeof item !== 'object') continue;
-    // Evidence-triggered findings skip the candidate index but not the confidence bar;
-    // a model that omits the score still gets the benefit of the doubt.
-    const confidence = typeof item.confidence === 'number' && Number.isFinite(item.confidence)
-      ? Math.max(0, Math.min(100, item.confidence))
-      : CONFIDENCE_FINDING;
-    const point = typeof item.point === 'string' ? item.point.trim() : '';
-    if (point === '') {
-      dropped += 1;
-      continue;
-    }
-    const doubt = selfReportedDoubt(point);
-    if (confidence >= CONFIDENCE_FINDING && !doubt) {
-      addIssue(item, null);
-    } else if (confidence >= CONFIDENCE_UNVERIFIED || doubt) {
-      unverified.push({ point, missing: doubt ? '模型自述证据不足' : '证据不足以确认' });
-    } else {
-      dropped += 1;
-    }
-  }
-  return { issues, unverified, dropped };
-}
-
-/** The triage pass output: display fields plus candidate problems, before any verification. */
+/** The triage pass output: display fields, before any investigation. */
 export function normalizeReportDraft(raw, fallbackOrder) {
   const verdict = ['block', 'suggest', 'pass'].includes(raw?.verdict) ? raw.verdict : 'suggest';
   const seen = new Set();
@@ -895,7 +648,6 @@ export function normalizeReportDraft(raw, fallbackOrder) {
     summary: typeof raw?.summary === 'string' ? raw.summary : '',
     order,
     focus: Object.fromEntries(focus.entries()),
-    concerns: normalizeConcerns(raw?.concerns),
   };
 }
 
@@ -906,7 +658,6 @@ export function normalizeReportDraft(raw, fallbackOrder) {
  */
 export function normalizeReport(raw, fallbackOrder) {
   const draft = normalizeReportDraft(raw, fallbackOrder);
-  const countOf = (value) => (typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0);
   const risks = Array.isArray(raw?.risks)
     ? raw.risks.filter((risk) => risk !== null && typeof risk === 'object').map((risk) => ({
         severity: risk.severity === 'block' ? 'block' : 'suggest',
@@ -918,11 +669,6 @@ export function normalizeReport(raw, fallbackOrder) {
     verdict: draft.verdict,
     summary: draft.summary,
     risks,
-    unverified: normalizeUnverified(raw?.unverified),
-    // Triage volume and how many candidates the verifier threw away: the panel uses these
-    // to tell "nothing was raised" from "everything raised was judged a false positive".
-    raised: countOf(raw?.raised),
-    discarded: countOf(raw?.discarded),
     refuted: normalizeRefuted(raw?.refuted),
     order: draft.order,
     focus: draft.focus,
@@ -994,7 +740,6 @@ export function normalizeExplanation(raw) {
     walkthrough,
     changes: typeof raw?.changes === 'string' ? raw.changes : '',
     issues: findingsOf(raw),
-    unverified: normalizeUnverified(raw?.unverified),
     refuted: normalizeRefuted(raw?.refuted),
   };
 }

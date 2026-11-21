@@ -1586,7 +1586,7 @@ test('review_update_analysis writes with an optimistic lock and records audit', 
             summary: '文件分析',
             logic: '读取后逐段处理',
             issues: [{ severity: 'suggest', point: '注意', line: 1 }],
-            unverified: [{ point: '未能核实的说法', missing: '缺少证据' }],
+            refuted: [{ point: '未能核实的说法', reason: '缺少证据' }],
           },
           chat: [],
           updatedAt: 150,
@@ -1629,9 +1629,8 @@ test('review_update_analysis writes with an optimistic lock and records audit', 
       { severity: 'block', point: '人写的问题', suggestion: '人写的修法', line: 3 },
     ]);
     assert.ok(!('suggestions' in explanation), 'no legacy suggestions key is written');
-    // A human edit used to drop the unverified list; the write goes through
-    // normalizeExplanation now and keeps it.
-    assert.deepEqual(explanation.unverified, [{ point: '未能核实的说法', missing: '缺少证据' }]);
+    // The refuted audit is internal: a human edit keeps it, but the browser payload omits it.
+    assert.equal('refuted' in explanation, false);
     assert.equal(stored.audit.length, 1);
     assert.equal(stored.audit[0].tool, 'review_update_analysis');
     assert.match(stored.audit[0].summary, /src\/a\.js/);
@@ -1794,7 +1793,7 @@ test('review_update_analysis writes with an optimistic lock and records audit', 
             summary: '文件分析',
             logic: '读取后逐段处理',
             issues: [{ severity: 'suggest', point: '注意', line: 1 }],
-            unverified: [{ point: '未能核实的说法', missing: '缺少证据' }],
+            refuted: [{ point: '未能核实的说法', reason: '缺少证据' }],
           },
           chat: [],
           updatedAt: 150,
@@ -1837,9 +1836,8 @@ test('review_update_analysis writes with an optimistic lock and records audit', 
       { severity: 'block', point: '人写的问题', suggestion: '人写的修法', line: 3 },
     ]);
     assert.ok(!('suggestions' in explanation), 'no legacy suggestions key is written');
-    // A human edit used to drop the unverified list; the write goes through
-    // normalizeExplanation now and keeps it.
-    assert.deepEqual(explanation.unverified, [{ point: '未能核实的说法', missing: '缺少证据' }]);
+    // The refuted audit is internal: a human edit keeps it, but the browser payload omits it.
+    assert.equal('refuted' in explanation, false);
     assert.equal(stored.audit.length, 1);
     assert.equal(stored.audit[0].tool, 'review_update_analysis');
     assert.match(stored.audit[0].summary, /src\/a\.js/);
@@ -3038,7 +3036,6 @@ test('restored legacy cache folds suggestions into suggest findings', async () =
         summary: '旧分析',
         issues: [{ severity: 'block', point: '旧问题', line: 1 }],
         suggestions: [{ text: '旧的独立建议', line: 4 }],
-        unverified: [],
       },
       chat: [],
       updatedAt: 150,
@@ -3728,7 +3725,6 @@ test('evidenceVerify off keeps the single-pass contract', async () => {
   let calls = 0;
   const plugin = await setup({
     fetch: batchFetch,
-    evidenceVerify: false,
     llm: () => (async function* () {
       calls += 1;
       yield {
@@ -4042,7 +4038,6 @@ test('concluding a round freezes its findings snapshot as the next baseline', as
   // 生成结论时，该轮明细冻结为下一轮的对比基准（全局编号，经 findingsOf 归一）。
   const plugin = await setup({
     fetch: batchFetch,
-    evidenceVerify: false,
     llm: llmFromText(JSON.stringify({ verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] })),
   });
   try {
@@ -4122,7 +4117,6 @@ test('a per-file analysis re-judges the baseline findings one by one', async () 
   const plugin = await setup({
     reviews: { 1: legacyReview({ roundHistory: roundOneHistory, conclusion: roundOneConclusion, conclusionAt: 300 }) },
     fetch: roundReviewFetch,
-    evidenceVerify: false,
     llm: (streamOptions) => {
       const promptText = JSON.stringify(streamOptions.messages);
       recordedPrompts.push(promptText);
@@ -4394,7 +4388,6 @@ test('a cross-file claim is not stored when the owning file is analyzed this rou
       }),
     },
     fetch: roundReviewFetch,
-    evidenceVerify: false,
     llm: (streamOptions) => {
       const promptText = JSON.stringify(streamOptions.messages);
       const res = promptText.includes('基准轮审查意见') ? reply
@@ -4585,7 +4578,6 @@ test('the analysis pipeline drops a fresh concern that repeats a still-open verd
       }),
     },
     fetch: roundReviewFetch,
-    evidenceVerify: false,
     llm: (streamOptions) => {
       const promptText = JSON.stringify(streamOptions.messages);
       const reply = promptText.includes('基准轮审查意见')
@@ -4753,7 +4745,7 @@ test('a report investigation that cannot close marks the review as error', async
   }
 });
 
-test('a report risk dropped by the refuter leaves a pass and an audit entry', async () => {
+test('a report risk dropped by the refuter leaves a pass and keeps the audit internal', async () => {
   const plugin = await setup({
     fetch: roundReviewFetch,
     reviews: { 1: unanalyzedReview() },
@@ -4782,7 +4774,7 @@ test('a report risk dropped by the refuter leaves a pass and an audit entry', as
     assert.deepEqual(review.report.risks, []);
     assert.equal(review.report.verdict, 'pass');
     assert.equal(review.report.summary, '报告');
-    assert.deepEqual(review.report.refuted, [{ point: '并发写入', reason: '实际有锁' }]);
+    assert.equal('refuted' in review.report, false, 'the internal audit stays out of the browser payload');
   } finally {
     await plugin.dispose();
   }

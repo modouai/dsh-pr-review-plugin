@@ -15,14 +15,12 @@ import {
   buildConcludePrompt,
   buildExplainOpening,
   buildExplainPrompt,
-  buildExplainVerifyPrompt,
   buildFeedbackPrompt,
   buildInvestigationStepPrompt,
   buildRefuteStepPrompt,
   buildRefuterSystem,
   buildReportOpening,
   buildReportPrompt,
-  buildReportVerifyPrompt,
   calibrateVerdict,
   callModel,
   commentItems,
@@ -32,16 +30,12 @@ import {
   findingsOf,
   itemId,
   mergeConclusion,
-  normalizeConcerns,
   normalizeConclusion,
-  normalizeEvidenceNeeds,
   normalizeExplanation,
   normalizeFindingOps,
   normalizePreviousVerdicts,
   normalizeReport,
-  normalizeUnverified,
   normalizeVerdict,
-  partitionVerdicts,
   parseChatReply,
   parseFeedbackReply,
   platformLabel,
@@ -842,143 +836,36 @@ test('index.js re-exports buildCommentMarkdown from llm.js', async () => {
   assert.equal(actual.split(' · ')[0], expected.split(' · ')[0]);
 });
 
-test('normalizeConcerns / normalizeEvidenceNeeds drop malformed entries', () => {
-  assert.deepEqual(
-    normalizeConcerns([{ point: '  p  ', severity: 'block', file: 'a.js' }, { point: '   ' }, null]),
-    [{ severity: 'block', file: 'a.js', point: 'p', suggestion: '', line: 0 }],
-  );
-  // suggestion 归一：trim 处理，缺失或空白补空串。
-  const concerns = normalizeConcerns([
-    { severity: 'block', point: ' p ', suggestion: ' 修法 ', line: 2 },
-    { severity: 'suggest', point: 'q', suggestion: '   ' },
-    { point: 'no-suggestion' },
-  ]);
-  assert.deepEqual(concerns, [
-    { severity: 'block', file: '', point: 'p', suggestion: '修法', line: 2 },
-    { severity: 'suggest', file: '', point: 'q', suggestion: '', line: 0 },
-    { severity: 'suggest', file: '', point: 'no-suggestion', suggestion: '', line: 0 },
-  ]);
-  assert.deepEqual(
-    normalizeEvidenceNeeds([
-      { concern: 2, kind: 'callers', path: '  x.js  ' },
-      { kind: 'not-a-kind' },
-      { concern: 1, kind: 'definition', symbol: ' startReview ' },
-    ]),
-    [
-      { concern: 2, kind: 'callers', path: 'x.js', symbol: '', reason: '' },
-      { concern: 1, kind: 'definition', path: '', symbol: 'startReview', reason: '' },
-    ],
-  );
-});
-
-test('normalizeConcerns hardens lines like findingsOf: only positive finite integers survive', () => {
-  const concerns = normalizeConcerns([
-    { point: 'a', line: NaN },
-    { point: 'b', line: -3 },
-    { point: 'c', line: 7.9 },
-    { point: 'd', line: 4 },
-  ]);
-  assert.deepEqual(concerns.map((item) => item.line), [0, 0, 7, 4]);
-});
-
-test('normalizeUnverified keeps only points with text', () => {
-  assert.deepEqual(
-    normalizeUnverified([{ point: ' a ', missing: ' m ' }, { point: '   ' }, null]),
-    [{ point: 'a', missing: 'm' }],
-  );
-});
-
-test('partitionVerdicts: 80 is a finding, 25-79 is unverified, below 25 is dropped', () => {
-  const concerns = [
-    { severity: 'block', file: 'a.js', point: 'A', line: 3 },
-    { severity: 'suggest', file: 'b.js', point: 'B', line: 0 },
-    { severity: 'suggest', file: 'c.js', point: 'C', line: 1 },
-  ];
-  const raw = {
-    results: [
-      { index: 1, confidence: 80, severity: 'block', point: 'A2', line: 5 },
-      { index: 2, confidence: 79, point: 'B2', missing: '缺调用方' },
-      { index: 3, confidence: 24, point: 'C2' },
-    ],
-    extraIssues: [{ severity: 'suggest', point: 'D', line: 9 }],
-  };
-  const { issues, unverified, dropped } = partitionVerdicts(raw, concerns);
-  assert.deepEqual(issues.map((item) => item.point), ['A2', 'D']);
-  // Missing fields fall back to the candidate the verifier was scoring.
-  assert.equal(issues[0].file, 'a.js');
-  assert.equal(issues[0].severity, 'block');
-  assert.deepEqual(unverified, [{ point: 'B2', missing: '缺调用方' }]);
-  assert.equal(dropped, 1, 'below-25 scores are dropped and counted');
-});
-
-test('partitionVerdicts keeps the suggestion the model rewrote, else carries the candidate one', () => {
-  const kept = partitionVerdicts(
-    { results: [{ index: 1, confidence: 90, point: '重写后的问题', suggestion: '重写后的修法', line: 7 }] },
-    [{ severity: 'block', file: '', point: '候选', suggestion: '候选修法', line: 0 }],
-  );
-  assert.equal(kept.issues[0].suggestion, '重写后的修法');
-  // 模型没给 suggestion 时沿用候选的修法。
-  const carried = partitionVerdicts(
-    { results: [{ index: 1, confidence: 85, point: 'x' }] },
-    [{ severity: 'suggest', file: '', point: '候选', suggestion: '候选修法', line: 0 }],
-  );
-  assert.equal(carried.issues[0].suggestion, '候选修法');
-});
-
-test('partitionVerdicts falls back to the candidate suggestion when the model\'s suggestion is whitespace-only', () => {
-  // whitespace-only fallback 属于 partitionVerdicts（llm.js addIssue）：
-  // 模型给 suggestion: '   '（纯空白）时应沿用候选的 suggestion。
-  const verdicts = partitionVerdicts(
-    { results: [{ index: 1, confidence: 85, point: 'x', suggestion: '   ' }] },
-    [{ severity: 'suggest', file: '', point: '候选', suggestion: '候选修法', line: 0 }],
-  );
-  assert.equal(verdicts.issues[0].suggestion, '候选修法');
-});
-
-test('partitionVerdicts dedupes confirmed points and tolerates junk', () => {
-  const concerns = [{ severity: 'suggest', file: '', point: 'same', line: 0 }];
-  const { issues, unverified } = partitionVerdicts({
-    results: [{ index: 1, confidence: 90 }, { index: 9, confidence: 90, point: 'same' }],
-    extraIssues: [{ point: 'same' }, null, { point: '   ' }],
-  }, concerns);
-  assert.deepEqual(issues.map((item) => item.point), ['same']);
-  assert.deepEqual(unverified, []);
-});
-
-test('normalizeReport and normalizeExplanation keep unverified notes', () => {
+test('normalizeReport and normalizeExplanation expose only refuted audit entries', () => {
   const report = normalizeReport({
-    verdict: 'suggest',
-    summary: 's',
-    risks: [],
-    unverified: [{ point: 'x', missing: 'y' }],
-    raised: 3,
-    discarded: 2,
+    verdict: 'suggest', summary: 's',
+    refuted: [{ point: ' x ', reason: ' y ' }, { point: '' }, null],
+    unverified: [{ point: '旧字段', missing: '旧证据' }],
+    raised: 3, discarded: 1,
   }, []);
-  assert.deepEqual(report.unverified, [{ point: 'x', missing: 'y' }]);
-  assert.equal(report.raised, 3);
-  assert.equal(report.discarded, 2);
-  const explanation = normalizeExplanation({ issues: [], unverified: [{ point: 'z', missing: '' }] });
-  assert.deepEqual(explanation.unverified, [{ point: 'z', missing: '' }]);
+  assert.deepEqual(report.refuted, [{ point: 'x', reason: 'y' }]);
+  assert.equal('unverified' in report, false);
+  assert.equal('raised' in report, false);
+  assert.equal('discarded' in report, false);
+  const explanation = normalizeExplanation({
+    issues: [], refuted: [{ point: 'z', reason: '' }],
+    unverified: [{ point: '旧字段', missing: '' }],
+  });
+  assert.deepEqual(explanation.refuted, [{ point: 'z', reason: '' }]);
+  assert.equal('unverified' in explanation, false);
 });
 
-test('the verifier prompt carries candidates and evidence, not a second review', () => {
-  const prompt = buildExplainVerifyPrompt(
-    { repo: 'group/project', number: 1, title: 't', platform: 'github' },
-    { path: 'a.js', status: 'changed', additions: 1, deletions: 2 },
-    [{ severity: 'block', file: 'a.js', point: 'A', line: 3 }],
-    '## 证据 1：x.js（callers）\n\n```\nstartReview()\n```',
-    ['callers y.js：无法读取'],
-    { language: 'zh' },
+test('the conclusion prompt omits the internal refuted audit', () => {
+  const prompt = buildConcludePrompt(
+    { platform: 'github', repo: 'acme/demo', number: 1, title: 't', headRef: 'f', baseRef: 'm' },
+    { verdict: 'suggest', summary: 's', risks: [{ severity: 'block', file: 'a.js', point: '风险' }],
+      refuted: [{ point: '审计项', reason: '已证伪' }], order: [], focus: {} },
+    new Map(), null,
+    { coverage: null, previousItems: [], humanItemIds: [], feedback: null, pullChat: [], language: 'zh' },
   );
   const text = prompt.messages[0].content[0].text;
-  assert.match(prompt.system, /裁判/);
-  assert.match(text, /## 候选问题（index 从 1 开始）/);
-  assert.match(text, /1\. \[block\] \[a\.js:3\] A/);
-  assert.match(text, /## 证据 1/);
-  assert.match(text, /无法读取/);
-  assert.doesNotMatch(text, /walkthrough/);
-  assert.doesNotMatch(prompt.system, /六个维度/);
-  assert.match(buildReportVerifyPrompt({ repo: 'r', number: 2, title: 't' }, [], '', [], { language: 'en' }).system, /English/);
+  assert.ok(text.includes('风险'));
+  assert.ok(!text.includes('审计项'));
 });
 
 test('the review framework states the exclusion list and the call-chain rule', () => {
@@ -990,117 +877,6 @@ test('the review framework states the exclusion list and the call-chain rule', (
   assert.match(system, /本次未修改行/);
   assert.match(system, /调用链/);
   assert.match(system, /queries/);
-});
-
-test('a self-reported doubt is never a finding, whatever the score', () => {
-  const { issues, unverified, dropped } = partitionVerdicts({
-    results: [
-      { index: 1, confidence: 95, point: '无法确认该调用方是否兼容' },
-      { index: 2, confidence: 95, point: '缺测试' },
-    ],
-    extraIssues: [
-      { confidence: 95, point: '证据不足，无法判断' },
-      { confidence: 10, point: '低置信' },
-      { point: '缺 confidence 但引用证据' },
-    ],
-  }, [
-    { severity: 'suggest', file: 'a.js', point: 'A', line: 0 },
-    { severity: 'suggest', file: 'b.js', point: 'B', line: 0 },
-  ]);
-  assert.deepEqual(issues.map((item) => item.point), ['缺测试', '缺 confidence 但引用证据']);
-  assert.deepEqual(unverified.map((item) => item.point), ['无法确认该调用方是否兼容', '证据不足，无法判断']);
-  assert.equal(dropped, 1);
-});
-
-test('normalizeEvidenceNeeds accepts every documented kind', () => {
-  for (const kind of ['callers', 'definition', 'callee', 'schema', 'test', 'file']) {
-    const [need] = normalizeEvidenceNeeds([{ kind, path: 'a.js' }]);
-    assert.equal(need.kind, kind);
-  }
-});
-
-test('the verifier prompt keeps the diff for implemented-checks and asks for a suggestion field', () => {
-  const prompt = buildExplainVerifyPrompt(
-    { platform: 'github', repo: 'o/r', number: 1, title: 't' },
-    { path: 'a.js', status: 'modified', additions: 2, deletions: 1 },
-    [{ severity: 'suggest', file: '', point: '抽 helper', suggestion: '抽成函数', line: 0 }],
-    '证据',
-    [],
-    { diffText: '@@ -1 +1,2 @@\n+2' },
-  );
-  const text = prompt.messages[0].content[0].text;
-  assert.ok(text.includes('## 该文件的 diff'));
-  assert.ok(!text.includes('候选改进建议'));
-  assert.ok(text.includes('抽成函数'));
-  assert.ok(text.includes('"suggestion"'));
-  assert.ok(!text.includes('suggestionResult'));
-});
-
-test('verifier prompt tells the model to score already-implemented candidates low', () => {
-  const prompt = buildExplainVerifyPrompt(
-    { platform: 'github', repo: 'o/r', number: 1, title: 't' },
-    { path: 'a.js', status: 'modified', additions: 0, deletions: 0 },
-    [{ severity: 'suggest', file: '', point: '纯改进点', suggestion: '', line: 0 }],
-    '证据',
-    [],
-    {},
-  );
-  const text = prompt.messages[0].content[0].text;
-  assert.ok(text.includes('已实现'));
-  assert.ok(!text.includes('suggestionResult'));
-});
-
-test('the report verifier prompt keeps the implemented-candidate rule as documentation', () => {
-  // verifyPromptBody 是 explain/report 两个 verifier 共用的；规则行（已实现候选打低分）对
-  // report 侧同样适用（diff 子句 inert）。用一条断言把这一共享语义钉住。
-  const prompt = buildReportVerifyPrompt(
-    { platform: 'github', repo: 'o/r', number: 1, title: 't' },
-    [{ severity: 'suggest', file: '', point: '候选', line: 0 }],
-    '证据',
-    [],
-    {},
-  );
-  const text = prompt.messages[0].content[0].text;
-  assert.ok(text.includes('已实现'));
-  assert.ok(!text.includes('suggestionResult'));
-});
-
-test('a candidate the verifier did not answer becomes an unverified note', () => {
-  const { issues, unverified } = partitionVerdicts({
-    results: [{ index: 1, confidence: 90, point: 'A2' }],
-  }, [
-    { severity: 'suggest', file: 'a.js', point: 'A', line: 0 },
-    { severity: 'suggest', file: 'b.js', point: 'B', line: 0 },
-  ]);
-  assert.deepEqual(issues.map((item) => item.point), ['A2']);
-  assert.deepEqual(unverified, [{ point: 'B', missing: '复审未返回该候选的判定' }]);
-});
-
-test('a zero-based results array is shifted instead of misattributed', () => {
-  const { issues } = partitionVerdicts({
-    results: [{ index: 0, confidence: 90, point: 'A2' }],
-  }, [{ severity: 'block', file: 'a.js', point: 'A', line: 0 }]);
-  assert.equal(issues[0].file, 'a.js');
-  assert.equal(issues[0].severity, 'block');
-});
-
-test('an out-of-range result is dropped, not published', () => {
-  const { issues, dropped } = partitionVerdicts({
-    results: [
-      { index: 9, confidence: 95, point: '越界问题' },
-      { index: 1, confidence: 95, point: '正常问题' },
-    ],
-  }, [{ severity: 'suggest', file: 'a.js', point: 'A', line: 0 }]);
-  assert.deepEqual(issues.map((item) => item.point), ['正常问题']);
-  assert.equal(dropped, 1);
-});
-
-test('English self-doubt is treated like Chinese', () => {
-  const { unverified, issues } = partitionVerdicts({
-    results: [{ index: 1, confidence: 95, point: 'Could not verify the caller contract' }],
-  }, [{ severity: 'suggest', file: 'a.js', point: 'A', line: 0 }]);
-  assert.deepEqual(issues, []);
-  assert.equal(unverified.length, 1);
 });
 
 test('normalizeExplanation merges legacy suggestions into suggest findings and drops the field', () => {
