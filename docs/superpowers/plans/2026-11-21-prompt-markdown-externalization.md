@@ -18,7 +18,7 @@
 
 - `prompts.js` — 加载、渲染、占位符校验
 - `prompts/*.md` — 10 份任务/系统提示词
-- `prompts/fragments/*.md` — 8 份共享片段
+- `prompts/fragments/*.md` — 10 份共享片段
 - `tests/prompts.test.js` — 加载器与文件完整性测试
 
 **修改**

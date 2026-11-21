@@ -190,7 +190,6 @@ function languageRule(language, compact = false) {
   return fragment(compact ? `language-compact-${suffix}` : `language-${suffix}`);
 }
 
-
 const FILE_LIST_LIMIT = 80;
 
 /** Report prompt: one call over the whole pull request, with per-file truncation. */

@@ -1,7 +1,7 @@
 # 提示词外置为 Markdown 设计
 
 日期：2026-11-21
-状态：已批准设计，待生成实施计划
+状态：已实现，待合并
 关联：issue #27（审查提示词输出契约手写两遍）
 
 ## 背景
@@ -99,7 +99,7 @@ fragment(name)              // 读取 prompts/fragments/<name>.md
 按任务文件分别定义，包括但不限于：
 
 - `report.md`：`{{platform}}`、`{{repo}}`、`{{pullNumber}}`、`{{title}}`、`{{author}}`、`{{headRef}}`、`{{baseRef}}`、`{{changedFiles}}`、`{{additions}}`、`{{deletions}}`、`{{bodySection}}`、`{{fileLines}}`、`{{order}}`、`{{excerpts}}`
-- `explain.md`：PR 元信息、`{{filePath}}`、`{{fileStatus}}`、`{{additions}}`、`{{deletions}}`、`{{focus}}`、`{{reportLine}}`、`{{diff}}`、`{{fileContent}}`、`{{baselineSection}}`、`{{previousVerdictsField}}`
+- `explain.md`：PR 元信息、`{{filePath}}`、`{{fileStatus}}`、`{{additions}}`、`{{deletions}}`、`{{focus}}`、`{{reportLine}}`、`{{diff}}`、`{{fileContentSection}}`、`{{baselineSection}}`、`{{previousVerdictsField}}`
 - `verify.md`：`{{header}}`、`{{candidates}}`、`{{evidence}}`、`{{missing}}`、`{{diffSection}}`、`{{verifyLanguageRule}}`
 - `chat.md`：PR 元信息、`{{scopeLabel}}`、`{{reportLine}}`、`{{explanation}}`、`{{scopeSection}}`、`{{transcriptSection}}`、`{{question}}`、`{{outputContract}}`
 - `conclude.md`：PR 元信息、`{{reportLine}}`、`{{entryCount}}`、`{{entries}}`、`{{coverageSection}}`、`{{previousItemsSection}}`、`{{humanItemIdsSection}}`、`{{feedbackSection}}`、`{{chatSection}}`、`{{currentConclusionSection}}`
@@ -122,8 +122,7 @@ builder 的职责收敛为三步：
 
 ## index.js 注入
 
-- 模块作用域 `const REVIEW_DATA_SECTION = loadPrompt('review-data')`。
-- `systemPrompt.section({ name: 'pr-review: review-data', order: 60, text: REVIEW_DATA_SECTION })`。
+- `systemPrompt.section({ name: 'pr-review: review-data', order: 60, text: loadPrompt('review-data') })`（在 `apply` 内调用一次）。
 - `systemPrompt.context({ ... text: (context) => reviewContextText(...) })` 保持不变。运行时快照本身是动态数据，不走 Markdown 模板；它已经是正确的动态注入形态。
 
 ## 错误处理
