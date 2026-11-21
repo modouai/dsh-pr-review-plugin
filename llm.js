@@ -956,22 +956,12 @@ export function buildFeedbackPrompt(pull, items, comments, options = {}) {
   const commentLines = (Array.isArray(comments) ? comments : [])
     .map((comment) => `--- ${comment.author} @ ${comment.createdAt}\n${String(comment.body ?? '').slice(0, 4000)}`)
     .join('\n\n');
-  const user = [
-    `PR #${pull?.number ?? ''}：${pull?.title ?? ''}`,
-    '',
-    '## 我们已发布的审查意见（编号）',
-    itemLines === '' ? '（无）' : itemLines,
-    '',
-    '## PR 实现者/其他人在评论区的回复（按时间）',
-    commentLines === '' ? '（无）' : commentLines,
-    '',
-    '请判断每条审查意见在回复中的处置情况，严格输出 JSON：',
-    '{',
-    '  "items": [{ "index": 1, "status": "fixed-claimed | disputed | accepted | question", "reason": "引用回复原话，简要说明" }],',
-    '  "notes": ["无法对应到具体编号的其他重要反馈"]',
-    '}',
-    'status 含义：fixed-claimed=作者表示已修复或已改；disputed=作者认为不成立/误报；accepted=作者认可但尚未修复；question=作者在询问澄清。只输出回复中确实提到的条目；没有提到的条目不要出现在 items 里。',
-  ].join('\n');
+  const user = renderPrompt('feedback', {
+    pullNumber: pull?.number ?? '',
+    title: pull?.title ?? '',
+    itemLines: itemLines === '' ? '（无）' : itemLines,
+    commentLines: commentLines === '' ? '（无）' : commentLines,
+  });
   return { system: compactSystem(languageOf(options)), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 3000, timeoutMs: 300_000, temperature: 0.1 };
 }
 
