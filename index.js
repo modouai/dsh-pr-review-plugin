@@ -1674,7 +1674,8 @@ export function apply(ctx, config) {
   }
 
   async function refuteFindings(record, options, signal) {
-    const level = settings.refuteLevel ?? DEFAULTS.refuteLevel;
+    const configured = settings.refuteLevel;
+    const level = configured === 'all' || configured === 'off' ? configured : 'block';
     if (level === 'off') return { kept: options.findings, refuted: [] };
     const targets = options.findings.filter((item) => typeof item.claim === 'string' && item.claim !== ''
       && item.roundItem === undefined && (level === 'all' || item.severity === 'block'));

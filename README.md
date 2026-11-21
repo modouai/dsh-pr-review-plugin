@@ -12,7 +12,7 @@ AI-assisted pull request review for the DeepSeek Harness Web UI. The plugin watc
 
 - **Workspace aware**: each session's workspace `git origin` selects the repository and platform (GitHub; GitLab; Gitea / Forgejo / Codeberg; Gitee / GitCode / AtomGit; Codeup); the panel only shows pull requests from that repository, and switching workspaces switches reviews with it.
 - **Automatic rounds**: the plugin polls for open pull requests and starts a new review round whenever new commits land (`autoReview` can be turned off).
-- **Batch analysis**: every finished round analyzes all changed files in the background, one file at a time, so a round costs one model call per changed file (`autoAnalyze` can be turned off). With it off, a file is analyzed when you open it, or all at once with **Analyze all** in the file column.
+- **Batch analysis**: every finished round analyzes all changed files in the background, one file at a time; each file is one analysis job spanning up to `investigationMaxSteps` model steps, plus up to `1 + refuteMaxQueries` refutation calls when it yields block findings (`autoAnalyze` can be turned off). With it off, a file is analyzed when you open it, or all at once with **Analyze all** in the file column.
 - **Review panel**: a right-sidebar panel inside the session — overview / changed files / conclusion three-page navigation. The overview shows the conversation state (author replies with cross-round comparison), a changes summary, the single review findings list, and review completeness; click a file to enter the diff with per-file analysis; the conclusion page carries the final conclusion, publish composing, and published records. Columns are resizable.
 - **Final conclusion**: generated in the background with visible stages and cancel support; carries review coverage (X of Y files analyzed) and a version number, and flags itself for regeneration when outdated (automatic with `autoReconclude`). It is the only decision surface in the panel — the overview no longer shows a preliminary verdict.
 - **Version history**: every conclusion version is kept, and each review round gets its own tab, so older rounds and versions stay readable.
@@ -20,7 +20,7 @@ AI-assisted pull request review for the DeepSeek Harness Web UI. The plugin watc
 - **Publishing**: check "include in publish" directly on conclusion-page items, and the comment preview regenerates live from the selection; the publish dialog only does the final confirmation (full text and conflict notices). Comments are appended (never overwritten), tagged with the reviewed commit, round, conclusion version, and coverage.
 - **Chat integration**: the main conversation can read and update review data through the `review_*` tools, and the panel refreshes live — ask "risk 1 doesn't hold" or "rewrite suggestion 2" and the review updates in place.
 
-Every file and the whole PR are reviewed by an investigation session: the model proposes falsifiable claims and asks for evidence (definitions, callers, tests, diffs, whole files), the host fetches it, and the loop runs until every claim is confirmed or refuted. Confirmed claims become findings; refuted ones are kept only for internal audit. A confirmed finding is never published without citing evidence, and there is no "unverified" bucket.
+Every file and the whole PR are reviewed by an investigation session: the model proposes falsifiable claims and asks for evidence (definitions, callers, tests, diffs, whole files), the host fetches it, and the loop runs until every claim is confirmed or refuted (or the session fails and can be retried). Claims confirmed with valid evidence become findings; refuted ones are kept only for internal audit. A confirmed finding is never published without citing evidence, and there is no "unverified" bucket.
 
 ### Chat tools
 
@@ -157,7 +157,7 @@ A workspace that is not a git repository activates no repository: the panel show
 |---|---|---|---|
 | `pollSeconds` | number ≥ 15 | `60` | How often the plugin polls for open pull requests. It also bounds how quickly new commits are noticed; the minimum is 15 seconds. |
 | `autoReview` | boolean | `true` | Start a round automatically when a pull request first appears or its head SHA changes. Set `false` to review only when you click **Review now**. A failed round is retried after 5 minutes. |
-| `autoAnalyze` | boolean | `true` | Analyze every changed file of a finished round in the background, one model call per file, so a round costs one call per changed file (100 files, 100 calls). Set `false` to analyze a file only when you open it, or on demand with **Analyze all**. The automatic pass does not retry failed files; **Analyze all** does, costing about one call per unfinished or failed file. Starting a new round cancels a batch still running from the previous one. A failed file shows its error in the file panel and stays out of the analyzed coverage until it succeeds. |
+| `autoAnalyze` | boolean | `true` | Analyze every changed file of a finished round in the background, one file at a time; each file is one analysis job spanning up to `investigationMaxSteps` model steps, plus up to `1 + refuteMaxQueries` refutation calls when it yields block findings. Set `false` to analyze a file only when you open it, or on demand with **Analyze all**. The automatic pass does not retry failed files; **Analyze all** does, running the same multi-step investigation for each unfinished or failed file. Starting a new round cancels a batch still running from the previous one. A failed file shows its error in the file panel and stays out of the analyzed coverage until it succeeds. |
 | `autoReconclude` | boolean | `false` | Regenerate the conclusion when the report or per-file analysis changes after it. Runs at most once every 5 minutes, never during a running round, and only while the conclusion is stale. |
 | `commentLanguage` | `zh`, `en` | `zh` | Language of the published comment (labels, headings, appendix, footer) and the language the built-in prompts ask the model to write in: per-file analysis, conclusion, discussion answers and feedback parsing. It defaults to `zh`, so an English repository needs `commentLanguage: en` explicitly. The setting applies when text is generated; content generated earlier is not rewritten. |
 
@@ -168,11 +168,11 @@ A workspace that is not a git repository activates no repository: the panel show
 | `provider` / `model` | strings, or empty | empty | Both must be set to take effect. Otherwise the plugin uses the current Harness default model. Setting only one falls back to the default. |
 | `reasoningEffort` | `off`, `low`, `high`, `max` | `off` | Reasoning effort for report, per-file, and conclusion calls. If the selected model rejects the level, the plugin retries the call without it. |
 | `investigationMaxSteps` | number, 2-20 | `8` | Most model steps per investigation session. When exhausted, one closure call must resolve every claim from existing evidence. |
-| `investigationMaxFiles` | number, 1-30 | `12` | Most distinct files an investigation may read. Overflow is refused and reported to the model as a budget note. |
+| `investigationMaxFiles` | number, 1-30 | `12` | Most distinct files an investigation may fetch with the `read` op (`find`, `grep`, tests, and diffs are not counted). Overflow is refused and reported to the model as a budget note. |
 | `investigationMaxChars` | number ≥ 500 | `4000` | Character cap per evidence block. |
 | `investigationMaxTotalChars` | number ≥ 2000 | `24000` | Cumulative evidence budget per session. |
 | `investigationTimeoutMs` | number ≥ 60000 | `600000` | Wall-clock cap per investigation session. |
-| `refuteLevel` | `block \| all \| off` | `block` | Which confirmed findings get the adversarial re-check. `off` disables it. |
+| `refuteLevel` | `block \| all \| off` | `block` | Which confirmed findings get the adversarial re-check: `block` re-checks only block-severity findings, `all` re-checks every confirmed finding, `off` disables it. |
 | `refuteMaxQueries` | number, 0-10 | `3` | Extra evidence queries the refuter may issue. |
 | `maxDiffCharsPerFile` | number ≥ 1000 | `14000` | Maximum diff characters per file sent to the model. The report call uses at most 2,200 characters per file and 120,000 characters of excerpts in total. |
 
@@ -353,6 +353,7 @@ Review results are cached per repository under `~/.dsh/pr-review/<platform>-<rep
 
 ## Notes
 
+- **Upgrading to 0.4.0**: `evidenceVerify`, `evidenceMaxFiles`, and `evidenceMaxChars` were removed; the investigation budgets replace them. Old keys are ignored silently.
 - Upgrading the plugin: the browser side (`client.js` and its `client.<area>.js` chunks) hot-reloads; the host side (`index.js` / `providers.js` / `llm.js`) requires restarting Harness. After editing a chunk, run `pnpm stamp` before testing (see [Development](#development)).
 - The pull request list shows the 20 most recently updated open pull requests; the panel says so when older ones exist.
 - Cache writes are atomic (temp file + rename). If the cache cannot be read, the plugin moves it aside as `<name>.corrupt-<timestamp>` instead of overwriting it, and shows a warning in the panel.

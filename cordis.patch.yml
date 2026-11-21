@@ -18,7 +18,7 @@
         autoReview: true
         # 每轮审查完成后自动逐个分析全部变更文件；关闭后只在点开文件或点「全部分析」时分析。
         # 单 PR 内逐个分析，跨 PR 最多 2 个并发；应用重启后打开面板会续跑。
-        # 每个文件一次模型调用，注意配额与限流。
+        # 每个文件是一个多步调查任务（最多 investigationMaxSteps 步，产生阻塞意见时再加反驳调用），注意配额与限流。
         autoAnalyze: true
         provider: ''
         model: ''
@@ -27,7 +27,8 @@
         commentLanguage: 'zh'
         autoReconclude: false
         # 调查链路预算：模型提出可证伪的断言并申请证据，宿主取证，循环到每条断言被确认或证伪。
-        # 步数/文件数/字符数/墙钟任一用尽即强制收口；refuteLevel 控制已确认意见是否进入反驳复核。
+        # 步数或墙钟用尽即强制收口；文件数/字符数用尽只拒绝后续查询并返回预算说明，循环继续。
+        # refuteLevel 控制已确认意见是否进入反驳复核。
         investigationMaxSteps: 8
         investigationMaxFiles: 12
         investigationMaxChars: 4000
