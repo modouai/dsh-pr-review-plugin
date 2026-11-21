@@ -31,7 +31,8 @@ export const PROMPT_NAMES = [
 /** Shared fragment file stems; `language-zh` loads `prompts/fragments/language-zh.md`. */
 export const FRAGMENT_NAMES = [
   'review-framework', 'previous-verdicts',
-  'language-zh', 'language-en', 'verify-language-zh', 'verify-language-en',
+  'language-zh', 'language-en', 'language-compact-zh', 'language-compact-en',
+  'verify-language-zh', 'verify-language-en',
   'chat-file-contract', 'chat-overview-contract',
 ];
 

@@ -688,6 +688,7 @@ test('the feedback prompt uses the compact system, not the full framework', () =
   assert.doesNotMatch(compact, /化简审查/);
   assert.doesNotMatch(compact, /六个维度/);
   assert.doesNotMatch(buildFeedbackPrompt(pull, [], [], { language: 'en' }).system, /使用简体中文/);
+  assert.match(buildFeedbackPrompt(pull, [], [], { language: 'en' }).system, /quoted text verbatim/);
 });
 
 test('conclude prompt: names residual risks and follows the comment language', () => {

@@ -8,6 +8,7 @@
  */
 
 import { heuristicOrder, diffExcerpts } from './diff.js';
+import { fragment, renderPrompt } from './prompts.js';
 
 /**
  * Human-readable platform names for prompts. Keep the keys in sync with the
@@ -150,42 +151,12 @@ export async function callModel(ctx, config, request) {
   }
 }
 
-/**
- * Review framework shared by every prompt: severity, the six axes, evidence rules and the
- * simplification pass. Wording is stack-agnostic on purpose — the plugin reviews any repository,
- * so the project shape is inferred from the PR's file list and diff.
- */
-const REVIEW_FRAMEWORK = [
-  '严重度只有两档：',
-  '- block（阻塞）：必须修复才能合并，例如安全漏洞、数据丢失、功能损坏、明确的逻辑错误。',
-  '- suggest（建议）：可以不修，例如缺失测试、抽象不当、错误处理薄弱、命名或风格问题。',
-  '从六个维度看代码（按 PR 的文件清单与 diff 推断技术栈，不要预设框架）：',
-  '1. 正确性：是否匹配 PR 描述与需求；空值与边界、错误路径、状态流转是否完整（多个布尔位拼一个逻辑状态时应改为显式状态机）；用户数据/配置格式变更是否走迁移。',
-  '2. 可读性：命名与控制流是否直接；嵌套是否过深；注释解释 WHY 而不是复述 WHAT。',
-  '3. 架构与一致性：是否遵循仓库既有模式；跨层契约（类型、协议、注册表、配置）是否同步；是否有单次使用的包装层或过早抽象。',
-  '4. 安全：外部输入是否校验；是否引入注入/XSS 面；密钥与令牌是否硬编码；权限与沙箱边界是否被绕过。',
-  '5. 性能：循环内同步 IO 或逐条查询；N+1；列表是否缺分页或无界加载。',
-  '6. 跨平台：路径分隔符与大小写、换行符与编码、平台分支是否三态齐全且有兜底。',
-  '常见缺陷专项：静默吞错（空 catch 或丢掉错误）必须指出；多布尔位状态堆积；格式变更未迁移；无分页/无界加载。',
-  '证据要求：报阻塞前先自问是否已有证据（调用方、基类或 wrapper、常量、schema 与数据库约束、测试）；只依据给出的 diff 与上下文，不臆测未提供的文件。无法验证的怀疑不得写进 issues/risks：候选问题放进 concerns，并在 evidenceNeeds 里写明还需要哪份证据；复审时按证据给出 confidence，证据不足的写进 unverified。',
-  '调用链：判断改动影响前，先列举「谁调用它、它调用了谁、哪些状态被读写」；列不出的写进 evidenceNeeds，不得据此报 block。',
-  '误报排除（命中任一条就不要输出）：本次改动之前就存在的问题；看起来像 bug 实际不是；资深工程师不会在评审里提的挑剔；linter、类型检查或编译器能直接抓到的（缺 import、类型错误、格式）；泛泛的质量问题（缺测试、缺文档、泛泛的安全担忧），除非仓库规范明确要求；被 lint-ignore 之类注释显式压制的问题；明显是本次有意为之的行为变更；落在本次未修改行上的真实问题。',
-  '每条问题写清「问题 + 影响 + 修法」，一条只写一个核心问题；不要凑数，也不要只写「建议检查 X」。',
-  '先做一轮化简审查：重复分支、兼容回退、单次使用的包装层、过早抽象是否可删；规模超标时提出拆分（软阈值：单函数 > 80 行、组件 > 300 行、文件 > 500 行、嵌套 > 3 层）。不理解旧代码为何存在前不要建议删除。',
-];
-
 /** The shared system prompt, with the output language the comment language asks for. */
 function reviewerSystem(language) {
-  return [
-    '你是一名资深代码审查员与代码分析者，负责审查拉取请求；技术栈以 PR 的实际文件与 diff 为准。',
-    ...REVIEW_FRAMEWORK,
-    '分析代码逻辑时要说清来龙去脉：这段代码原来做什么、现在改成怎样、被谁调用、影响哪些数据与状态。',
-    '不要讨论与本次改动无关的既有问题，除非这次改动会触发或放大它。',
-    '输出格式：任务要求 JSON 时，只输出一个 JSON 对象，不要 markdown 标题、代码块或任何解释。',
-    language === 'en'
-      ? 'Write every human-readable field in English; keep code identifiers, paths and quoted code verbatim.'
-      : '所有输出（代码标识符、路径与原文引用除外）使用简体中文。',
-  ].join('\n');
+  return renderPrompt('reviewer', {
+    reviewFramework: fragment('review-framework'),
+    languageRule: languageRule(language),
+  });
 }
 
 /**
@@ -193,14 +164,9 @@ function reviewerSystem(language) {
  * states; the six axes and the simplification pass would add tokens without changing the answer.
  */
 function compactSystem(language) {
-  return [
-    '你是一名资深代码审查员，只做结构化判定，不重新审查代码。',
-    '严重度只有两档：block（必须修复才能合并）与 suggest（可以不修）。',
-    '只依据给出的审查意见与评论回复判断，不臆测未提供的信息；不确定时选最保守的状态并写明依据。',
-    language === 'en'
-      ? 'Write every human-readable field in English; keep code identifiers and quoted text verbatim.'
-      : '所有输出（代码标识符与原文引用除外）使用简体中文。',
-  ].join('\n');
+  return renderPrompt('reviewer-compact', {
+    languageRule: languageRule(language, true),
+  });
 }
 
 /**
@@ -216,6 +182,12 @@ function normalizeLanguage(value) {
 /** Builder options carry the comment language; anything else keeps the Chinese default. */
 function languageOf(options) {
   return normalizeLanguage(options !== null && typeof options === 'object' ? options.language : undefined);
+}
+
+/** Output-language rule; the compact prompt keeps its narrower "quoted text" wording. */
+function languageRule(language, compact = false) {
+  const suffix = language === 'en' ? 'en' : 'zh';
+  return fragment(compact ? `language-compact-${suffix}` : `language-${suffix}`);
 }
 
 
@@ -369,13 +341,9 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
  * and the evidence block is its only source of truth.
  */
 function verifierSystem(language) {
-  return [
-    '你是一名代码审查裁判：只根据给出的候选问题与证据判断，不重新审查代码，不臆测证据之外的内容。',
-    '证据不足时给低置信度并写明缺什么，不要为了凑数给出高分。',
-    language === 'en'
-      ? 'Write every human-readable field in English; keep code identifiers, paths and quoted code verbatim.'
-      : '所有输出（代码标识符、路径与原文引用除外）使用简体中文。',
-  ].join('\n');
+  return renderPrompt('verifier', {
+    languageRule: languageRule(language),
+  });
 }
 
 /** Shared body for both verifier prompts: candidates, collected evidence, unreadable items. */
