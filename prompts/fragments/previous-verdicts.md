@@ -1,1 +1,1 @@
-  "previousVerdicts": [{ "index": 1, "status": "fixed | still-open", "point": "still-open 时：当前代码的表述（可省略沿用原文）", "line": 0, "severity": "block | suggest", "suggestion": "可省略沿用原建议" }],
+终稿的 final 还必须包含 `previousVerdicts` 数组：按上面每条基准轮意见的序号逐条给出 `{ "index": 1, "status": "fixed | still-open", "point": "still-open 时填当前代码的表述，可省略沿用原文", "line": 0, "severity": "block | suggest", "suggestion": "可省略沿用原建议" }`。仍存在的问题由宿主依据 still-open 自动延续，不需要写进 issues。

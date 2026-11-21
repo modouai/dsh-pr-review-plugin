@@ -20,11 +20,11 @@
 
 ## 证据要求
 
-报阻塞前先自问是否已有证据（调用方、基类或 wrapper、常量、schema 与数据库约束、测试）；只依据给出的 diff 与上下文，不臆测未提供的文件。无法验证的怀疑不得写进 issues/risks：候选问题放进 concerns，并在 evidenceNeeds 里写明还需要哪份证据；复审时按证据给出 confidence，证据不足的写进 unverified。
+报阻塞前先自问是否已有证据（调用方、基类或 wrapper、常量、schema 与数据库约束、测试）；只依据给出的 diff、上下文与宿主取回的证据，不臆测未提供的文件。无法验证的怀疑先作为 claim 提出，用 queries 取回证据；证据不足或证伪就标记 refuted，不得写进 issues/risks。
 
 ## 调用链
 
-判断改动影响前，先列举「谁调用它、它调用了谁、哪些状态被读写」；列不出的写进 evidenceNeeds，不得据此报 block。
+判断改动影响前，先列举「谁调用它、它调用了谁、哪些状态被读写」；列不出的用 find / tests / read 查询取证，不得据此报 block。
 
 ## 误报排除
 

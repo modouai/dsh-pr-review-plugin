@@ -13,9 +13,14 @@ import {
   buildCommentAppendix,
   buildCommentMarkdown,
   buildConcludePrompt,
+  buildExplainOpening,
   buildExplainPrompt,
   buildExplainVerifyPrompt,
   buildFeedbackPrompt,
+  buildInvestigationStepPrompt,
+  buildRefuteStepPrompt,
+  buildRefuterSystem,
+  buildReportOpening,
   buildReportPrompt,
   buildReportVerifyPrompt,
   calibrateVerdict,
@@ -582,7 +587,7 @@ test('prompts: one stack-agnostic review framework, language follows the comment
 });
 
 test('explain prompt: test gaps, adaptive length and the issue shape', () => {
-  const prompt = buildExplainPrompt(
+  const opening = buildExplainOpening(
     {
       repo: 'group/project', number: 1, title: 't', author: 'a',
       headRef: 'h', baseRef: 'b', changedFiles: 1, additions: 1, deletions: 0, body: '',
@@ -590,7 +595,17 @@ test('explain prompt: test gaps, adaptive length and the issue shape', () => {
     { path: 'a.js', status: 'modified', additions: 1, deletions: 0 },
     '', null, '', '', { language: 'zh' },
   );
-  const text = prompt.messages[0].content[0].text;
+  // The opening carries the per-file guidance; the step prompt adds the shared protocol.
+  const step = buildInvestigationStepPrompt({
+    opening: opening.text,
+    system: opening.system,
+    claims: [],
+    trace: [],
+    step: 1,
+    budgetLine: '',
+    instruction: '',
+  });
+  const text = step.messages[0].content[0].text;
   assert.match(text, /同时看测试/);
   assert.match(text, /篇幅随改动规模自适应/);
   assert.match(text, /问题 \+ 影响（一条只写一个核心问题）/);
@@ -629,8 +644,12 @@ test('explain prompt carries the baseline findings for per-item verdicts', () =>
   assert.match(text, /1\. \[block\] a\.js 空指针风险（行 2） —— 建议：先判空/);
   assert.match(text, /2\. \[suggest\] b\.js 补测试/);
   assert.match(text, /previousVerdicts 必须恰好包含 2 条判定/);
-  assert.ok(text.includes('"previousVerdicts"'));
-  assert.match(text, /"carryOver"|"roundItem"/);
+  // still-open 由宿主延续，新发现照常调查；不再要求携带 roundItem 引用。
+  assert.match(text, /在 previousVerdicts 输出 "status": "still-open"/);
+  assert.match(text, /宿主会据此延续/);
+  assert.match(text, /不带 roundItem/);
+  // 基准轮字段约定来自 previous-verdicts 片段。
+  assert.match(text, /按上面每条基准轮意见的序号逐条给出/);
 });
 
 test('normalizePreviousVerdicts keeps one valid verdict per baseline index', () => {
@@ -676,21 +695,37 @@ test('prompt language normalizes case and region tags and falls back to Chinese'
 });
 
 test('the report prompt keeps the output contract even though its wording changed', () => {
-  const prompt = buildReportPrompt(
-    {
-      repo: 'group/project', number: 1, title: 't', author: 'a',
-      headRef: 'h', baseRef: 'b', changedFiles: 0, additions: 0, deletions: 0, body: '',
-    },
-    [], new Map(), { maxDiffCharsPerFile: 1000 },
-  );
-  const text = prompt.messages[0].content[0].text;
-  for (const field of ['"verdict"', '"summary"', '"concerns"', '"evidenceNeeds"', '"order"', '"focus"']) {
+  const pull = {
+    repo: 'group/project', number: 1, title: 't', author: 'a',
+    headRef: 'h', baseRef: 'b', changedFiles: 1, additions: 3, deletions: 1, body: '',
+  };
+  const files = [{ path: 'src/a.js', status: 'modified', additions: 3, deletions: 1 }];
+  const diffFiles = new Map([['src/a.js', {
+    path: 'src/a.js', additions: 3, deletions: 1, binary: false, hunkCount: 1,
+    text: 'diff --git a/src/a.js b/src/a.js\n@@ -1 +1,4 @@\n+const a = 1;',
+  }]]);
+  const opening = buildReportOpening(pull, files, diffFiles, { maxDiffCharsPerFile: 1000 });
+  // The opening carries the file list and the per-file diff excerpts.
+  assert.match(opening.text, /- src\/a\.js \| modified \| \+3 \/ -1/);
+  assert.match(opening.text, /const a = 1;/);
+  // The shared protocol keeps the final-report contract.
+  const step = buildInvestigationStepPrompt({
+    opening: opening.text,
+    system: opening.system,
+    claims: [],
+    trace: [],
+    step: 1,
+    budgetLine: '',
+    instruction: '',
+  });
+  const text = step.messages[0].content[0].text;
+  for (const field of ['"risks"', '"order"', '"focus"']) {
     assert.ok(text.includes(field), `missing ${field}`);
   }
   assert.match(text, /block \| suggest \| pass/);
-  // The old "uncertain" escape hatch is gone: unverified points belong in their own field.
+  // The old "uncertain" escape hatch is gone.
   assert.ok(!text.includes('（不确定：'));
-  assert.ok(!prompt.system.includes('（不确定：'));
+  assert.ok(!opening.system.includes('（不确定：'));
 });
 
 test('the feedback prompt uses the compact system, not the full framework', () => {
@@ -954,7 +989,7 @@ test('the review framework states the exclusion list and the call-chain rule', (
   assert.match(system, /误报排除/);
   assert.match(system, /本次未修改行/);
   assert.match(system, /调用链/);
-  assert.match(system, /evidenceNeeds/);
+  assert.match(system, /queries/);
 });
 
 test('a self-reported doubt is never a finding, whatever the score', () => {
@@ -1189,4 +1224,59 @@ test('explain prompt truncates the baseline per file and declares the truncation
   // 显式声明截断，并要求判定数等于下发数。
   assert.match(text, /上一轮意见已截断：另有 3 条未列出/);
   assert.match(text, /previousVerdicts 必须恰好包含 10 条判定/);
+});
+
+test('the investigation step prompt carries the opening, claims and protocol', () => {
+  const prompt = buildInvestigationStepPrompt({
+    opening: '## 开篇资料\n\ndiff 在这里',
+    system: '你是审查员',
+    claims: [{ id: 'C1', statement: '空指针', status: 'investigating', reason: '', evidence: [] }],
+    trace: [{
+      step: 1,
+      claims: [],
+      queries: [{ op: 'read', path: 'src/a.js', symbol: '', pattern: '', pathGlob: '', scope: 'repo', limit: 20, startLine: 0, endLine: 0 }],
+      results: [{ id: 'E1', block: '## E1 · read\n\nconst a = 1;' }],
+      rejected: [],
+    }],
+    step: 2,
+    budgetLine: '已用 1 条证据',
+    instruction: '继续调查。',
+  });
+  const text = prompt.messages[0].content[0].text;
+  assert.match(text, /## 开篇资料/);
+  assert.match(text, /C1/);
+  assert.match(text, /E1 · read/);
+  assert.match(text, /"queries"/);
+  assert.match(text, /"final"/);
+  assert.equal(prompt.system, '你是审查员');
+  assert.ok(prompt.maxTokens >= 8000);
+});
+
+test('the file opening keeps the diff, full file and baseline sections', () => {
+  const pull = { platform: 'github', repo: 'acme/demo', number: 1, title: 't', headRef: 'f', baseRef: 'm' };
+  const file = { path: 'src/a.js', status: 'modified', additions: 1, deletions: 0 };
+  const opening = buildExplainOpening(pull, file, 'diff text', null, '', 'const a = 1;\n', {
+    language: 'zh',
+    baselineFindings: [{ index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', suggestion: '', line: 0 }],
+  });
+  assert.match(opening.text, /diff text/);
+  assert.match(opening.text, /const a = 1;/);
+  assert.match(opening.text, /旧问题/);
+  assert.match(opening.text, /previousVerdicts/);
+});
+
+test('the refuter prompt lists findings and allows bounded queries', () => {
+  const prompt = buildRefuteStepPrompt({
+    opening: '开篇',
+    system: '反驳者',
+    findings: [{ severity: 'block', point: '空指针', claim: 'C1' }],
+    trace: [],
+    queriesLeft: 3,
+    closure: false,
+  });
+  const text = prompt.messages[0].content[0].text;
+  assert.match(text, /C1/);
+  assert.match(text, /3/);
+  assert.match(text, /"results"/);
+  assert.match(buildRefuterSystem('zh'), /反驳/);
 });

@@ -192,8 +192,8 @@ function languageRule(language, compact = false) {
 
 const FILE_LIST_LIMIT = 80;
 
-/** Report prompt: one call over the whole pull request, with per-file truncation. */
-export function buildReportPrompt(pull, files, diffFiles, config) {
+/** Report opening: one call over the whole pull request, with per-file truncation. */
+export function buildReportOpening(pull, files, diffFiles, config) {
   // The report prompt is the only one that receives the settings object, so the language
   // arrives as `commentLanguage` rather than through the builder options.
   const language = normalizeLanguage(config?.commentLanguage);
@@ -205,7 +205,7 @@ export function buildReportPrompt(pull, files, diffFiles, config) {
     .map((file) => `- ${file.path} | ${file.status} | +${file.additions} / -${file.deletions}`)
     .join('\n');
   const excerpts = diffExcerpts(diffFiles, order, reportChars, 120_000);
-  const user = renderPrompt('report', {
+  const text = renderPrompt('report', {
     platform: platformLabel(pull.platform),
     repo: pull.repo,
     pullNumber: pull.number,
@@ -221,7 +221,12 @@ export function buildReportPrompt(pull, files, diffFiles, config) {
     order: order.join('\n'),
     excerpts,
   });
-  return { system: reviewerSystem(language), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 16000, timeoutMs: 600_000 };
+  return { system: reviewerSystem(language), text };
+}
+
+export function buildReportPrompt(pull, files, diffFiles, config) {
+  const opening = buildReportOpening(pull, files, diffFiles, config);
+  return { system: opening.system, messages: [{ role: 'user', content: [{ type: 'text', text: opening.text }] }], maxTokens: 16000, timeoutMs: 600_000 };
 }
 
 
@@ -234,16 +239,16 @@ function numberLines(content, maxLines) {
     .join('\n');
 }
 
-/** Deep one-file explanation: the point is the logic walkthrough, not only findings. */
-export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fileContent, options = {}) {
+/** Deep one-file opening: the point is the logic walkthrough, not only findings. */
+export function buildExplainOpening(pull, file, diffText, report, focusPoint, fileContent, options = {}) {
   const language = languageOf(options);
   const focus = typeof focusPoint === 'string' && focusPoint !== '' ? `\n审查提示：${focusPoint}` : '';
   const reportLine = report === null || report === undefined
     ? ''
     : `\nPR 总体结论：${report.verdict ?? ''}；${report.summary ?? ''}`;
   // Baseline findings (review-delta spec v7): the previous concluded round's findings are
-  // re-judged one by one — "fixed" leaves the issue list, "still-open" re-enters it with
-  // a roundItem reference. The full globally-numbered snapshot goes in so the model can
+  // re-judged one by one — "fixed" leaves the issue list, "still-open" stays open and the
+  // host carries it forward. The full globally-numbered snapshot goes in so the model can
   // carry a finding across a renamed file.
   const baseline = Array.isArray(options.baselineFindings) ? options.baselineFindings : [];
   // 快照全量冻结，但下发按文件截断到 10 条（block 优先、行号升序）：截断部分不下发、
@@ -274,15 +279,15 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
       ? [`（上一轮意见已截断：另有 ${baselineTruncated} 条未列出，未列出的条目不需要判定。）`]
       : []),
     '对上面每一条意见，结合当前代码逐条判定：该问题在本次改动后是否仍存在。',
-    '- 仍存在 → 在 previousVerdicts 输出 "status": "still-open"，并把该问题作为一条审查意见写入 issues（severity/point/line 按当前代码重写），同时带 "roundItem": <上面的序号>；',
+    '- 仍存在 → 在 previousVerdicts 输出 "status": "still-open"（可附更新后的 point/line/severity/suggestion）；宿主会据此延续，不需要再写进 issues。',
     '- 已修复 / 不再存在 → 在 previousVerdicts 输出 "status": "fixed"，不要把它写入 issues；',
     `- previousVerdicts 必须恰好包含 ${baselineShown.length} 条判定，一条都不能少。`,
-    '- 本轮新发现的问题照常写入 issues（不带 roundItem）——不要重复报告：已在 previousVerdicts 中判定 still-open 的问题只写一次，不要同时作为新发现再写一条。',
+    '- 本轮新发现的问题照常作为 claim 调查，确认后写入 issues（不带 roundItem）。',
   ].join('\n');
   const fileContentSection = typeof fileContent === 'string' && fileContent.trim() !== ''
     ? `## 该文件的完整内容（PR head，行号格式为「行号<TAB>代码」，可能被截断）\n${numberLines(fileContent, 3000)}`
     : '## 该文件的完整内容不可用（只有 diff；分析时不要臆测未出现的代码）';
-  const user = renderPrompt('explain', {
+  const text = renderPrompt('explain', {
     platform: platformLabel(pull.platform),
     repo: pull.repo,
     pullNumber: pull.number,
@@ -300,7 +305,84 @@ export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fil
     baselineSection,
     previousVerdictsField: baseline.length > 0 ? fragment('previous-verdicts') : '',
   });
-  return { system: reviewerSystem(language), messages: [{ role: 'user', content: [{ type: 'text', text: user }] }], maxTokens: 12000, timeoutMs: 600_000 };
+  return { system: reviewerSystem(language), text };
+}
+
+export function buildExplainPrompt(pull, file, diffText, report, focusPoint, fileContent, options = {}) {
+  const opening = buildExplainOpening(pull, file, diffText, report, focusPoint, fileContent, options);
+  return { system: opening.system, messages: [{ role: 'user', content: [{ type: 'text', text: opening.text }] }], maxTokens: 12000, timeoutMs: 600_000 };
+}
+
+/** One human-readable line for a query the model asked the host to run. */
+function describeQuery(query) {
+  const parts = [query.op];
+  if (query.path !== '') parts.push(query.path);
+  if (query.symbol !== '') parts.push(`symbol=${query.symbol}`);
+  if (query.pattern !== '') parts.push(`pattern=${query.pattern}`);
+  if (query.pathGlob !== '') parts.push(`glob=${query.pathGlob}`);
+  return parts.join(' ');
+}
+
+/** The whole investigation history: each step's queries, rejections and evidence blocks. */
+function renderTrace(trace) {
+  if (trace.length === 0) return '（尚无查询与证据）';
+  return trace.map((entry) => {
+    if (typeof entry.note === 'string' && entry.note !== '') return `### 第 ${entry.step} 步\n${entry.note}`;
+    const queries = (entry.queries ?? []).map((query) => `- ${describeQuery(query)}`).join('\n');
+    const rejected = (entry.rejected ?? []).map((item) => `- 未执行：${item}`).join('\n');
+    const blocks = (entry.results ?? []).map((result) => result.block).join('\n\n');
+    return `### 第 ${entry.step} 步\n查询：\n${queries || '（无）'}${rejected === '' ? '' : `\n${rejected}`}\n\n${blocks}`;
+  }).join('\n\n');
+}
+
+/** The current claim ledger, one line per claim with its evidence ids and reason. */
+function renderClaims(claims) {
+  if (claims.length === 0) return '（尚未提出 claim）';
+  return claims.map((claim) => {
+    const evidence = Array.isArray(claim.evidence) && claim.evidence.length > 0 ? ` 证据：${claim.evidence.join(', ')}` : '';
+    const reason = claim.reason === '' ? '' : ` 理由：${claim.reason}`;
+    return `- [${claim.id}] ${claim.status}：${claim.statement}${evidence}${reason}`;
+  }).join('\n');
+}
+
+/**
+ * One investigation step: the host keeps no assistant history, so every step carries the
+ * opening context, the whole trace, the claim ledger and the shared protocol.
+ */
+export function buildInvestigationStepPrompt({ opening, system, claims, trace, step, budgetLine, instruction }) {
+  const text = renderPrompt('investigate-step', {
+    opening,
+    step: String(step),
+    budgetLine,
+    trace: renderTrace(trace),
+    claims: renderClaims(claims),
+    protocol: fragment('investigation-protocol'),
+    stepInstruction: instruction,
+  });
+  return { system, messages: [{ role: 'user', content: [{ type: 'text', text }] }], maxTokens: 8000, timeoutMs: 600_000 };
+}
+
+/** The adversarial refuter's system prompt, in the requested output language. */
+export function buildRefuterSystem(language) {
+  return renderPrompt('refuter', { languageRule: languageRule(language) });
+}
+
+/** One refutation step: the confirmed findings, their claims, the trace and the query quota. */
+export function buildRefuteStepPrompt({ opening, system, findings, claims, trace, queriesLeft, closure }) {
+  const list = findings.map((item) => {
+    const where = item.file === undefined || item.file === '' ? '' : ` [${item.file}]`;
+    return `- [${item.claim}]${where} ${item.point}${item.suggestion === '' ? '' : ` —— 建议：${item.suggestion}`}`;
+  }).join('\n');
+  const claimLines = (Array.isArray(claims) ? claims : []).map((claim) => {
+    const evidence = Array.isArray(claim.evidence) && claim.evidence.length > 0 ? ` 证据：${claim.evidence.join(', ')}` : '';
+    const reason = claim.reason === '' ? '' : ` 理由：${claim.reason}`;
+    return `- [${claim.id}] ${claim.statement}${evidence}${reason}`;
+  }).join('\n');
+  const quota = closure || queriesLeft <= 0
+    ? '查询配额已用尽：不得再申请查询，只能输出 results。'
+    : `还可以申请 ${queriesLeft} 条补充查询。`;
+  const text = renderPrompt('refute', { opening, findings: list, claims: claimLines === '' ? '（无）' : claimLines, trace: renderTrace(trace), quota });
+  return { system, messages: [{ role: 'user', content: [{ type: 'text', text }] }], maxTokens: 4000, timeoutMs: 300_000 };
 }
 
 /**
