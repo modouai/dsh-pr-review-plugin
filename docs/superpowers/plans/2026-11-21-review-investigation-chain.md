@@ -1649,6 +1649,7 @@ async function runInvestigation(record, options, signal) {
         instruction: '强制收口：不要再输出 queries；为每个 claim 给出 confirmed 或 refuted，并输出 final。',
       });
       const answer = await callModelJson(prompt, signal, (value) => value !== null && typeof value === 'object' && value.final !== undefined);
+      if (stale()) return { discarded: true };
       const closed = normalizeClaims(answer.parsed?.claims, claims);
       const validated = validateFinal(answer.parsed?.final, closed.claims, executor.evidenceIds(), mode, {
         allowedRoundItems: options.allowedRoundItems,
@@ -1669,6 +1670,7 @@ async function runInvestigation(record, options, signal) {
         : '继续调查。所有 claim 闭合后输出 final；仍缺证据就继续 queries。',
     });
     const answer = await callModelJson(prompt, signal, isInvestigationAnswer);
+    if (stale()) return { discarded: true };
     if (answer.parsed === null) throw new Error(`调查第 ${step} 步没有返回可解析的 JSON。`);
     const normalized = normalizeClaims(answer.parsed.claims, claims);
     claims = normalized.claims;
@@ -1724,6 +1726,9 @@ async function refuteFindings(record, options, signal) {
     });
     const answer = await callModelJson(prompt, signal, (value) => value !== null && typeof value === 'object'
       && (Array.isArray(value.results) || (Array.isArray(value.queries) && closing !== true)));
+    if (typeof options.stale === 'function' && options.stale() === true) {
+      return { discarded: true, kept: options.findings, refuted: [] };
+    }
     if (answer.parsed === null) throw new Error('反驳复核没有返回可解析的 JSON。');
     if (Array.isArray(answer.parsed.results)) {
       const covered = new Map();
@@ -1804,7 +1809,9 @@ async function refuteFindings(record, options, signal) {
         findings: issues,
         claims: investigated.claims,
         startIndex: investigated.evidenceCount,
+        stale: () => (record.analysisEpoch ?? 0) !== epoch,
       }, signal);
+      if (refutation.discarded === true) return { explanation: null, cached: false, discarded: true };
       issues = refutation.kept;
       refuted = [...refuted, ...refutation.refuted];
     }
