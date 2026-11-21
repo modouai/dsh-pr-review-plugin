@@ -6,7 +6,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
-import { sep } from 'node:path';
+import { join, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   FRAGMENT_NAMES,
@@ -16,6 +17,16 @@ import {
   renderPrompt,
   renderTemplate,
 } from '../prompts.js';
+
+function markdownFiles(dir) {
+  const files = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...markdownFiles(full).map((file) => `${entry.name}/${file}`));
+    else if (entry.name.endsWith('.md')) files.push(entry.name);
+  }
+  return files;
+}
 
 test('prompts: every prompt and fragment file loads and is non-empty', () => {
   for (const name of PROMPT_NAMES) assert.notEqual(loadPrompt(name).trim(), '', name);
@@ -56,7 +67,7 @@ test('prompts: renderTemplate rejects malformed placeholders and nullish values'
 
 test('prompts: every Markdown file on disk is covered by the test lists', () => {
   const root = new URL('../prompts/', import.meta.url);
-  const files = readdirSync(root, { recursive: true })
+  const files = markdownFiles(fileURLToPath(root))
     .map((file) => file.split(sep).join('/'))
     .filter((file) => file.endsWith('.md'));
   const top = files

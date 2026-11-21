@@ -481,6 +481,18 @@ test('buildConcludePrompt: coverage, unanalyzed (<=20), previous ids, locked ids
   assert.match(entriesJson, /"suggestion":"加判空"/);
 });
 
+test('buildConcludePrompt renders a partial pull without throwing', () => {
+  const prompt = buildConcludePrompt(
+    { platform: 'github', repo: 'o/r', number: 7, title: 't' },
+    null,
+    new Map(),
+    null,
+  );
+  const text = prompt.messages[0].content[0].text;
+  assert.match(text, /PR #7：t/);
+  assert.match(text, /规模：0 个文件，\+0 \/ -0/);
+});
+
 test('buildConcludePrompt: marks truncated report/explanations explicitly', () => {
   const explanations = new Map([
     ['a.js', { verdict: 'suggest', summary: 'y'.repeat(20000), issues: [] }],
