@@ -3466,6 +3466,103 @@ test('the refuter receives the evidence cited by confirmed claims', async () => 
   }
 });
 
+test('the refuter drops a confirmed blocker when its counter-evidence wins', async () => {
+  const plugin = await setup({
+    fetch: batchFetch,
+    refuteLevel: 'block',
+    llm: llmSequence([
+      {
+        claims: [{ id: 'C1', statement: '空指针风险', status: 'investigating' }],
+        queries: [{ op: 'read', path: 'src/a.js' }],
+      },
+      {
+        claims: [{ id: 'C1', statement: '空指针风险', status: 'confirmed', reason: '读到未判空', evidence: ['E1'] }],
+        final: {
+          verdict: 'suggest',
+          summary: '讲解',
+          logic: '逻辑',
+          changes: '改动',
+          issues: [{ severity: 'block', point: '空指针风险', suggestion: '先判空', line: 2, claim: 'C1' }],
+          previousVerdicts: [],
+        },
+      },
+      { results: [{ claim: 'C1', decision: 'drop', reason: '调用方已保证非空' }] },
+    ]),
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.json.explanation.issues, []);
+    assert.deepEqual(result.json.explanation.refuted, [
+      { point: '空指针风险', reason: '调用方已保证非空' },
+    ]);
+    assert.equal(result.json.explanation.verdict, 'pass');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the refuter can request one query before deciding', async () => {
+  let requests = 0;
+  const plugin = await setup({
+    fetch: batchFetch,
+    refuteLevel: 'block',
+    llm: (options) => {
+      requests += 1;
+      const text = requests === 1
+        ? JSON.stringify({ claims: [{ id: 'C1', statement: '空指针风险', status: 'investigating' }], queries: [{ op: 'read', path: 'src/a.js' }] })
+        : requests === 2
+          ? JSON.stringify({
+              claims: [{ id: 'C1', statement: '空指针风险', status: 'confirmed', reason: 'r', evidence: ['E1'] }],
+              final: { verdict: 'suggest', summary: '讲解', logic: '逻辑', changes: '改动', issues: [{ severity: 'block', point: '空指针风险', suggestion: '', line: 0, claim: 'C1' }], previousVerdicts: [] },
+            })
+          : requests === 3
+            ? JSON.stringify({ queries: [{ op: 'read', path: 'src/a.js', startLine: 1, endLine: 2 }] })
+            : JSON.stringify({ results: [{ claim: 'C1', decision: 'keep', reason: '证据仍成立' }] });
+      return (async function* () {
+        yield { type: 'text-delta', text };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+      })();
+    },
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    assert.equal(requests, 4, 'two investigation steps + one refute query + refute results');
+    assert.deepEqual(result.json.explanation.issues, [
+      { severity: 'block', point: '空指针风险', suggestion: '', line: 0 },
+    ]);
+    assert.deepEqual(result.json.explanation.refuted, []);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a refuter that omits a finding fails the analysis instead of silently keeping it', async () => {
+  const plugin = await setup({
+    fetch: batchFetch,
+    refuteLevel: 'block',
+    llm: llmSequence([
+      {
+        claims: [{ id: 'C1', statement: '空指针风险', status: 'investigating' }],
+        queries: [{ op: 'read', path: 'src/a.js' }],
+      },
+      {
+        claims: [{ id: 'C1', statement: '空指针风险', status: 'confirmed', reason: 'r', evidence: ['E1'] }],
+        final: { verdict: 'suggest', summary: '讲解', logic: '逻辑', changes: '改动', issues: [{ severity: 'block', point: '空指针风险', suggestion: '', line: 0, claim: 'C1' }], previousVerdicts: [] },
+      },
+      { results: [] },
+    ]),
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 500);
+    assert.match(result.json.error.message, /反驳复核遗漏/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 /** One fake LLM answer: triage for the first call, verifier output for the second. */
 function llmTriageThenVerify(triage, verify) {
   let call = 0;
