@@ -1601,7 +1601,9 @@ async function runInvestigation(record, options, signal) {
       });
       const answer = await callModelJson(prompt, signal, (value) => value !== null && typeof value === 'object' && value.final !== undefined);
       const closed = normalizeClaims(answer.parsed?.claims, claims);
-      const validated = validateFinal(answer.parsed?.final, closed.claims, executor.evidenceIds(), mode);
+      const validated = validateFinal(answer.parsed?.final, closed.claims, executor.evidenceIds(), mode, {
+        allowedRoundItems: options.allowedRoundItems,
+      });
       if (!validated.ok) throw new Error(`调查未能闭合：${validated.error}`);
       return { ...validated, final: answer.parsed.final, trace };
     }
@@ -1623,7 +1625,9 @@ async function runInvestigation(record, options, signal) {
     if (normalized.overflow) throw new Error(`claims 超过 ${MAX_CLAIMS} 条上限，调查无法收敛。`);
     claims = normalized.claims;
     if (answer.parsed.final !== undefined) {
-      const validated = validateFinal(answer.parsed.final, claims, executor.evidenceIds(), mode);
+      const validated = validateFinal(answer.parsed.final, claims, executor.evidenceIds(), mode, {
+        allowedRoundItems: options.allowedRoundItems,
+      });
       if (validated.ok) return { ...validated, final: answer.parsed.final, trace };
       trace.push({
         step,
@@ -1727,7 +1731,14 @@ async function refuteFindings(record, options, signal) {
     if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
     const investigated = await runInvestigation(
       record,
-      { opening, mode: 'file', stale: () => (record.analysisEpoch ?? 0) !== epoch },
+      {
+        opening,
+        mode: 'file',
+        stale: () => (record.analysisEpoch ?? 0) !== epoch,
+        // A carry-over item must point at a real baseline entry; a fabricated roundItem
+        // would otherwise bypass evidence validation entirely.
+        allowedRoundItems: new Set(baselineFindings.map((item) => item.index)),
+      },
       signal,
     );
     if (investigated.discarded === true) return { explanation: null, cached: false, discarded: true };
@@ -1858,7 +1869,11 @@ Replace from `const prompt = buildReportPrompt(...)` through the `scheduleSave()
     const opening = buildReportOpening(pull, record.files, record.diffFiles, settings);
     let investigated;
     try {
-      investigated = await runInvestigation(record, { opening, mode: 'report' }, undefined);
+      investigated = await runInvestigation(
+        record,
+        { opening, mode: 'report', allowedRoundItems: new Set() },
+        undefined,
+      );
     } catch (error) {
       record.status = 'error';
       record.error = error instanceof Error ? error.message : String(error);
