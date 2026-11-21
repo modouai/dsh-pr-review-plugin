@@ -1963,6 +1963,8 @@ Replace from `const prompt = buildReportPrompt(...)` through the `scheduleSave()
       ? 'block'
       : (risks.length === 0 ? 'pass' : (final.verdict === 'block' ? 'suggest' : normalizeVerdict(final.verdict)));
     const order = Array.isArray(files) ? files.map((file) => file.path) : [];
+    // 模型给出 order 时以模型为准；只有模型完全省略 order 时才回退到文件清单。
+    const fallbackOrder = Array.isArray(final.order) && final.order.length > 0 ? [] : order;
     record.report = normalizeReport({
       verdict,
       summary: final.summary,
@@ -1970,7 +1972,7 @@ Replace from `const prompt = buildReportPrompt(...)` through the `scheduleSave()
       refuted,
       order: final.order,
       focus: final.focus,
-    }, order);
+    }, fallbackOrder);
     record.reportUpdatedAt = 0;
     record.status = 'done';
     record.finishedAt = Date.now();
@@ -2344,7 +2346,8 @@ export const FRAGMENT_NAMES = [
 - Delete legacy tests in `tests/index.test.js` **or rewrite their fixtures to the claims/final protocol**:
   - the old verifier/prompt tests listed in Task 8 Step 4;
   - the batch/analysis tests whose fakes return `BATCH_EXPLANATION` or other pre-investigation shapes (`duplicate explain requests…`, `autoAnalyze…`, `manual analyze…`, `a fresh explain for the new round…`, `a new round reads the new head…`, `an automatic batch continues…`, `the schema default turns batch analysis on…`, `a restored entry without an explanation…`, `failed/aborted batches release…`, `the analysis slot ceiling…`);
-  - the baseline/delta tests (`a per-file analysis re-judges the baseline findings…`, `a carry-over finding skips verification…`, `a cross-file claim is not stored…`, `the analysis pipeline drops a fresh concern…`).
+  - the baseline/delta tests (`a per-file analysis re-judges the baseline findings…`, `a carry-over finding skips verification…`, `a cross-file claim is not stored…`, `the analysis pipeline drops a fresh concern…`);
+  - the report/round tests whose fake LLM still returns the old report shape: `the report verifier decides risks…`, `a stub report JSON is retried…`, `the report records how many triage concerns the verifier discarded`, `force review opens round 2…`, `a new round cancels the batch…`, `a cancelled call cannot write into the new round…`, `a manual explain in flight is discarded…`, `a stale malformed answer is discarded…`.
   These behavior tests must keep their intent; only the fake model outputs change to the investigation protocol (`claims` + `queries`/`final`). The suite must be fully green at the end of this task.
   - Also remove the now-dead `runGit` helper (only `collectEvidence` used it) and update `review_update_analysis` to preserve `refuted` instead of `unverified`.
 
