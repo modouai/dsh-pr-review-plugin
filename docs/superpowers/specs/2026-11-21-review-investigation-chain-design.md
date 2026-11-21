@@ -122,7 +122,7 @@ file scope:            │  loop:                              │
 
 1. **claim 可证伪**：`statement` 非空、不超过 300 字；模型被要求在提出时写成「谁、在什么条件下、发生什么」的事实断言。改写不了的候选用 `refuted` + `reason: "不可证伪：…"` 结束。
 2. **confirmed 必须引用证据**：至少一个 `evidence` id 存在于本次会话的证据账本；否则宿主把它改为 `refuted`，`reason: "确认缺少证据引用"`。
-3. **issue / risk 必须对应 confirmed claim**：`final.issues[].claim`（报告范围为 `final.risks[].claim`）必须指向一条 confirmed claim；每个 confirmed claim 最多产生一条 issue。调查中才想到的新问题也必须先成为 claim，再走确认。
+3. **issue / risk 必须对应 confirmed claim**：`final.issues[].claim`（报告范围为 `final.risks[].claim`）必须指向一条 confirmed claim；每个 confirmed claim 恰好产生一条 issue。调查中才想到的新问题也必须先成为 claim，再走确认。
    基准轮延续条目由宿主根据 `previousVerdicts` 合成，**模型不得在 final 里写 `roundItem`**；带 `roundItem` 但没有 claim 的条目会被拒绝，避免模型把已判 fixed 或别的文件的条目重新塞回来。
 4. **终稿必须闭合**：存在 `status: "investigating"` 的 claim 时拒绝终稿，退回要求继续（并附当前未闭合清单）。
 5. **额度**：单步 `queries` 最多 4 条；会话 claims 最多 12 条；超出部分拒绝并要求模型收敛（不静默截断 claim）。

@@ -1962,9 +1962,11 @@ Replace from `const prompt = buildReportPrompt(...)` through the `scheduleSave()
     const verdict = risks.some((risk) => risk.severity === 'block')
       ? 'block'
       : (risks.length === 0 ? 'pass' : (final.verdict === 'block' ? 'suggest' : normalizeVerdict(final.verdict)));
-    const order = Array.isArray(files) ? files.map((file) => file.path) : [];
-    // 模型给出 order 时以模型为准；只有模型完全省略 order 时才回退到文件清单。
-    const fallbackOrder = Array.isArray(final.order) && final.order.length > 0 ? [] : order;
+    // 只有模型给出至少一条合法 order 时才以模型为准；否则回退到合并后的文件清单。
+    const validOrder = Array.isArray(final.order)
+      ? final.order.filter((item) => item !== null && typeof item === 'object' && typeof item.file === 'string' && item.file !== '')
+      : [];
+    const fallbackOrder = validOrder.length > 0 ? [] : (Array.isArray(record.files) ? record.files.map((file) => file.path) : []);
     record.report = normalizeReport({
       verdict,
       summary: final.summary,
@@ -2350,6 +2352,7 @@ export const FRAGMENT_NAMES = [
   - the report/round tests whose fake LLM still returns the old report shape: `the report verifier decides risks…`, `a stub report JSON is retried…`, `the report records how many triage concerns the verifier discarded`, `force review opens round 2…`, `a new round cancels the batch…`, `a cancelled call cannot write into the new round…`, `a manual explain in flight is discarded…`, `a stale malformed answer is discarded…`.
   These behavior tests must keep their intent; only the fake model outputs change to the investigation protocol (`claims` + `queries`/`final`). The suite must be fully green at the end of this task.
   - Also remove the now-dead `runGit` helper (only `collectEvidence` used it) and update `review_update_analysis` to preserve `refuted` instead of `unverified`.
+  - In `serializeReview` (the browser snapshot), strip `refuted` from both the report and each explanation so the internal audit never reaches the client payload.
 
 - Delete legacy tests in `tests/llm.test.js`:
   - everything importing or exercising `buildExplainVerifyPrompt` / `buildReportVerifyPrompt` / `normalizeConcerns` / `normalizeEvidenceNeeds` / `normalizeUnverified` / `partitionVerdicts`;
