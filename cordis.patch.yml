@@ -26,8 +26,12 @@
         maxDiffCharsPerFile: 14000
         commentLanguage: 'zh'
         autoReconclude: false
-        # 两轮审查：先产出候选问题与所需证据，宿主取证后再按置信度判定。
-        # 有候选问题时每个文件多一次复审调用；关闭后退回单轮。
-        evidenceVerify: true
-        evidenceMaxFiles: 6
-        evidenceMaxChars: 6000
+        # 调查链路预算：模型提出可证伪的断言并申请证据，宿主取证，循环到每条断言被确认或证伪。
+        # 步数/文件数/字符数/墙钟任一用尽即强制收口；refuteLevel 控制已确认意见是否进入反驳复核。
+        investigationMaxSteps: 8
+        investigationMaxFiles: 12
+        investigationMaxChars: 4000
+        investigationMaxTotalChars: 24000
+        investigationTimeoutMs: 600000
+        refuteLevel: block
+        refuteMaxQueries: 3
