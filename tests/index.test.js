@@ -4576,3 +4576,69 @@ test('a report investigation that cannot close marks the review as error', async
     await plugin.dispose();
   }
 });
+
+test('a report risk dropped by the refuter leaves a pass and an audit entry', async () => {
+  const plugin = await setup({
+    fetch: roundReviewFetch,
+    reviews: { 1: unanalyzedReview() },
+    refuteLevel: 'block',
+    llm: llmSequence([
+      {
+        claims: [{ id: 'C1', statement: '并发写入', status: 'investigating' }],
+        queries: [{ op: 'diff', path: 'src/a.js' }],
+      },
+      {
+        claims: [{ id: 'C1', statement: '并发写入', status: 'confirmed', reason: 'diff 中两个入口都写', evidence: ['E1'] }],
+        final: {
+          verdict: 'suggest',
+          summary: '报告',
+          risks: [{ severity: 'block', file: 'src/a.js', point: '并发写入', claim: 'C1' }],
+          order: [{ file: 'src/a.js', reason: '入口' }],
+          focus: [],
+        },
+      },
+      { results: [{ claim: 'C1', decision: 'drop', reason: '实际有锁' }] },
+    ]),
+  });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const review = await plugin.waitFor(1, (current) => current.status === 'done' && current.report !== null);
+    assert.deepEqual(review.report.risks, []);
+    assert.equal(review.report.verdict, 'pass');
+    assert.equal(review.report.summary, '报告');
+    assert.deepEqual(review.report.refuted, [{ point: '并发写入', reason: '实际有锁' }]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a report final without order falls back to every changed file', async () => {
+  const plugin = await setup({
+    fetch: roundReviewFetch,
+    reviews: { 1: unanalyzedReview() },
+    llm: llmSequence([
+      {
+        claims: [{ id: 'C1', statement: '并发写入同一个 Map', status: 'investigating' }],
+        queries: [{ op: 'diff', path: 'src/a.js' }],
+      },
+      {
+        claims: [{ id: 'C1', statement: '并发写入同一个 Map', status: 'confirmed', reason: 'diff 中两个入口都写', evidence: ['E1'] }],
+        final: {
+          verdict: 'suggest',
+          summary: '报告',
+          risks: [{ severity: 'block', file: 'src/a.js', point: '并发写入同一个 Map', claim: 'C1' }],
+          focus: [],
+        },
+      },
+    ]),
+  });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const review = await plugin.waitFor(1, (current) => current.status === 'done' && current.report !== null);
+    const files = review.report.order.map((item) => item.file);
+    assert.ok(files.includes('src/a.js'), 'the model-ordered file is present');
+    assert.ok(files.includes('src/b.js'), 'the untouched changed file is backfilled');
+  } finally {
+    await plugin.dispose();
+  }
+});

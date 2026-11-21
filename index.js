@@ -1705,6 +1705,8 @@ export function apply(ctx, config) {
       scheduleSave();
       return;
     }
+    // Today's report flow passes no `stale` callback, so runInvestigation never returns
+    // `discarded`. A future stale callback must set a terminal status before returning here.
     if (investigated.discarded === true) return;
     const final = investigated.final;
     let risks = investigated.issues;
@@ -1723,10 +1725,12 @@ export function apply(ctx, config) {
     const verdict = risks.some((risk) => risk.severity === 'block')
       ? 'block'
       : (risks.length === 0 ? 'pass' : (final.verdict === 'block' ? 'suggest' : normalizeVerdict(final.verdict)));
-    const order = Array.isArray(files) ? files.map((file) => file.path) : [];
-    // The investigation final owns the reading order; the file list only backfills it when
-    // the model omitted order entirely.
-    const fallbackOrder = Array.isArray(final.order) && final.order.length > 0 ? [] : order;
+    const validOrder = Array.isArray(final.order)
+      ? final.order.filter((item) => item !== null && typeof item === 'object' && typeof item.file === 'string' && item.file !== '')
+      : [];
+    const fallbackOrder = validOrder.length > 0
+      ? []
+      : (Array.isArray(record.files) ? record.files.map((file) => file.path) : []);
     record.report = normalizeReport({
       verdict,
       summary: final.summary,
