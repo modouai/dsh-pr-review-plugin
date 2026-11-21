@@ -334,3 +334,4 @@ claim: { id, statement, status, reason, evidence: [id] }
 - **本地搜索降级**：workspace 不可用时只能搜 diff；证据块会显式标注降级，模型可因此选择 `read` 具体路径。
 - **模型可能过度证伪**：为满足协议而草率 refute；反驳复核只保护 confirmed，不保护 refuted。以 prompt 规则要求 refuted 必须写明反证或否定理由，并保留内部审计供事后核查。
 - **无二级证据源**：仓库内找不到的答案（运行时、业务意图）不会被强行编造；这类 claim 按不可证伪规则在提出阶段被丢弃，而不是变成用户可见条目。
+- **已知残留（非阻塞，后续可做）**：`baselineSection`、报告 `focus` 文本、报告 `order`/文件清单仍按条数或行数限制而非字符限制；反驳步骤中混合的非法查询不会逐条写进 trace；失败读取的证据块仍使用默认来源标签；`investigationTimeoutMs` 只约束调查主循环，反驳会话按自己的调用超时运行。
