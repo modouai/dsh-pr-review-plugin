@@ -153,7 +153,7 @@ src/handlers/a.js:12
 
 读取类证据沿用现有 `sliceEvidence` 的行范围与截断说明，并额外标注：
 
-- 搜索范围（workspace / diff-only）；
+- 搜索范围（workspace / diff-only）；`read` 的来源标注为 `provider-head`，`diff` 标注为 `diff`；
 - 结果条数与截断情况；
 - 当前是否处于降级模式及原因。
 
@@ -229,7 +229,7 @@ src/handlers/a.js:12
 ```
 
 - `normalizeExplanation` / `normalizeReport`：删除 `unverified`；新增 `refuted`（只保留非空 `point`，`reason` 截断 300 字，最多 20 条）；删除 `raised` / `discarded`。
-- 旧缓存记录里的 `unverified`、`raised`、`discarded` 字段被归一化直接忽略，不报错。
+- 旧缓存记录里的 `unverified`、`raised`、`discarded` 字段被归一化直接忽略，不报错。恢复缓存时 report 走 `normalizeReport`、explanation 走 `normalizeExplanation`，否则旧字段会原样回到浏览器并再次落盘。
 - 调查 trace 与原始证据不持久化，只存在于会话内存。
 - `review_update_analysis` 人工编辑保留现有字段，`refuted` 原样保留。
 - `buildConcludePrompt` 序列化报告时只取 `verdict / summary / risks`，**不包含 `refuted`**；对话与评论的输入同样不包含审计字段。
@@ -260,12 +260,12 @@ claim: { id, statement, status, reason, evidence: [id] }
 **成本上界**（默认值，最坏一步）：
 
 ```
-开篇资料 ≈ 30k 字符（diff ≤14k + 文件全文按 3000 行截断）
+开篇资料 ≤ 40k 字符（文件全文按 30k 字符截断；单文件 diff ≤14k；报告 excerpts ≤40k）
 证据账本 ≤ 24k 字符
-8 步累计输入 ≈ 8 × 54k ≈ 432k 字符（约 11 万 token）
+8 步累计输入 ≤ 8 × 64k ≈ 512k 字符（约 13 万 token）
 ```
 
-实施时用 `investigationMaxSteps` 与累计证据上限控制成本；实测后可在实施计划中调整默认值。
+没有字符上限时，一个 300–400k 字符的大文件会被每一步重发，足以超出模型上下文并让本可分析的文件永久 error；因此开篇的文件内容与报告 excerpts 都必须在字符层面截断并显式标注。实施时用 `investigationMaxSteps` 与累计证据上限控制成本；实测后可在实施计划中调整默认值。
 
 ## 10. 配置变更
 
