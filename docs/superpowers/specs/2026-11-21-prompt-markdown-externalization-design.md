@@ -51,6 +51,8 @@ prompts/
     previous-verdicts.md   # explain 存在基线时才注入的契约字段
     language-zh.md         # system prompt 的输出语言规则
     language-en.md
+    language-compact-zh.md # compact system prompt 专用（保留 quoted text 措辞）
+    language-compact-en.md
     verify-language-zh.md  # 裁判任务的语言相关判定规则
     verify-language-en.md
     chat-file-contract.md  # 对话：文件范围输出的 findingOps 契约
@@ -113,10 +115,10 @@ builder 的职责收敛为三步：
 
 `reviewer.md`、`reviewer-compact.md`、`verifier.md` 末尾注入 `{{languageRule}}`。
 
-- `fragments/language-zh.md`：要求所有输出使用简体中文（代码标识符、路径、原文引用除外）。
-- `fragments/language-en.md`：要求所有人类可读字段使用英文（代码标识符、路径、引用原文除外）。
+- `fragments/language-zh.md` / `language-en.md`：reviewer 与 verifier 的输出语言规则，保护代码标识符、路径与引用原文。
+- `fragments/language-compact-zh.md` / `language-compact-en.md`：compact 专用，沿用原来的「quoted text」措辞（不扩宽为 quoted code），因为反馈任务需要引用开发者回复原话。
 
-不为整份提示词做 zh/en 双版本，避免两份正文长期漂移。
+`llm.js` 用 `languageRule(language, compact = false)` 统一选择片段。不为整份提示词做 zh/en 双版本，避免两份正文长期漂移。
 
 ## index.js 注入
 

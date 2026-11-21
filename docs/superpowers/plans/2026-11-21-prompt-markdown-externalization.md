@@ -176,7 +176,8 @@ export const PROMPT_NAMES = [
 /** Shared fragment file stems; `language-zh` loads `prompts/fragments/language-zh.md`. */
 export const FRAGMENT_NAMES = [
   'review-framework', 'previous-verdicts',
-  'language-zh', 'language-en', 'verify-language-zh', 'verify-language-en',
+  'language-zh', 'language-en', 'language-compact-zh', 'language-compact-en',
+  'verify-language-zh', 'verify-language-en',
   'chat-file-contract', 'chat-overview-contract',
 ];
 
@@ -234,7 +235,7 @@ printf 'PLACEHOLDER {{reviewFramework}} {{languageRule}}\n' > prompts/reviewer.m
 for name in reviewer-compact verifier report explain verify chat conclude feedback review-data; do
   printf 'PLACEHOLDER\n' > "prompts/$name.md"
 done
-for name in review-framework previous-verdicts language-zh language-en verify-language-zh verify-language-en chat-file-contract chat-overview-contract; do
+for name in review-framework previous-verdicts language-zh language-en language-compact-zh language-compact-en verify-language-zh verify-language-en chat-file-contract chat-overview-contract; do
   printf 'PLACEHOLDER\n' > "prompts/fragments/$name.md"
 done
 ```
@@ -271,11 +272,14 @@ git commit -m "feat(prompts): add the Markdown prompt loader"
 - Create: `prompts/fragments/review-framework.md`
 - Create: `prompts/fragments/language-zh.md`
 - Create: `prompts/fragments/language-en.md`
+- Create: `prompts/fragments/language-compact-zh.md`
+- Create: `prompts/fragments/language-compact-en.md`
 - Create: `prompts/reviewer.md`
 - Create: `prompts/reviewer-compact.md`
 - Create: `prompts/verifier.md`
-- Modify: `llm.js:158-204`（`REVIEW_FRAMEWORK` 与三个 system 函数）
-- Test: `tests/llm.test.js`（既有断言，不改动）
+- Modify: `llm.js:158-204`（`REVIEW_FRAMEWORK`、`languageRule` 与三个 system 函数）
+- Modify: `prompts.js`（`FRAGMENT_NAMES` 增加两个 compact 片段）
+- Modify: `tests/llm.test.js`（compact 测试增加一条 `quoted text verbatim` 断言）
 
 - [ ] **Step 1: 建立测试基线**
 
@@ -341,7 +345,19 @@ Expected: 全部 PASS。后续每步只允许在此基线上保持全绿。
 Write every human-readable field in English; keep code identifiers, paths and quoted code verbatim.
 ```
 
-- [ ] **Step 4: 写三个 system prompt**
+`prompts/fragments/language-compact-zh.md`（compact 专用，保留原来的「原文引用」措辞）：
+
+```markdown
+所有输出（代码标识符与原文引用除外）使用简体中文。
+```
+
+`prompts/fragments/language-compact-en.md`（compact 专用，保留 `quoted text`）：
+
+```markdown
+Write every human-readable field in English; keep code identifiers and quoted text verbatim.
+```
+
+- [ ] **Step 4: 写三个系统提示词正文**
 
 `prompts/reviewer.md`：
 
@@ -389,14 +405,20 @@ Write every human-readable field in English; keep code identifiers, paths and qu
 import { fragment, renderPrompt } from './prompts.js';
 ```
 
-删除 `REVIEW_FRAMEWORK` 常量（`llm.js:153-175`），把三个函数替换为：
+删除 `REVIEW_FRAMEWORK` 常量（`llm.js:153-175`）。在 `languageOf` 之后加入语言选择 helper，并把三个函数替换为：
 
 ```js
+/** Output-language rule; the compact prompt keeps its narrower "quoted text" wording. */
+function languageRule(language, compact = false) {
+  const suffix = language === 'en' ? 'en' : 'zh';
+  return fragment(compact ? `language-compact-${suffix}` : `language-${suffix}`);
+}
+
 /** The shared system prompt, with the output language the comment language asks for. */
 function reviewerSystem(language) {
   return renderPrompt('reviewer', {
     reviewFramework: fragment('review-framework'),
-    languageRule: fragment(language === 'en' ? 'language-en' : 'language-zh'),
+    languageRule: languageRule(language),
   });
 }
 
@@ -406,7 +428,7 @@ function reviewerSystem(language) {
  */
 function compactSystem(language) {
   return renderPrompt('reviewer-compact', {
-    languageRule: fragment(language === 'en' ? 'language-en' : 'language-zh'),
+    languageRule: languageRule(language, true),
   });
 }
 
@@ -416,7 +438,7 @@ function compactSystem(language) {
  */
 function verifierSystem(language) {
   return renderPrompt('verifier', {
-    languageRule: fragment(language === 'en' ? 'language-en' : 'language-zh'),
+    languageRule: languageRule(language),
   });
 }
 ```
