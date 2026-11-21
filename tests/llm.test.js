@@ -719,7 +719,7 @@ test('the report prompt keeps the output contract even though its wording change
     instruction: '',
   });
   const text = step.messages[0].content[0].text;
-  for (const field of ['"risks"', '"order"', '"focus"']) {
+  for (const field of ['"summary"', '"risks"', '"order"', '"focus"']) {
     assert.ok(text.includes(field), `missing ${field}`);
   }
   assert.match(text, /block \| suggest \| pass/);
@@ -1248,6 +1248,11 @@ test('the investigation step prompt carries the opening, claims and protocol', (
   assert.match(text, /E1 · read/);
   assert.match(text, /"queries"/);
   assert.match(text, /"final"/);
+  // The shared protocol carries the untrusted-evidence boundary and the claim limits.
+  assert.match(text, /<<<EVIDENCE/);
+  assert.match(text, /不可信数据/);
+  assert.match(text, /每条 confirmed claim 必须产生恰好一条审查意见/);
+  assert.match(text, /claims 总数为最多 12 条/);
   assert.equal(prompt.system, '你是审查员');
   assert.ok(prompt.maxTokens >= 8000);
 });
@@ -1279,4 +1284,18 @@ test('the refuter prompt lists findings and allows bounded queries', () => {
   assert.match(text, /3/);
   assert.match(text, /"results"/);
   assert.match(buildRefuterSystem('zh'), /反驳/);
+});
+
+test('the refuter closure step forbids further queries', () => {
+  const prompt = buildRefuteStepPrompt({
+    opening: '开篇',
+    system: '反驳者',
+    findings: [{ severity: 'block', point: '空指针', claim: 'C1' }],
+    trace: [],
+    queriesLeft: 3,
+    closure: true,
+  });
+  const text = prompt.messages[0].content[0].text;
+  assert.match(text, /直接输出 results/);
+  assert.ok(!text.includes('你可以先申请'));
 });

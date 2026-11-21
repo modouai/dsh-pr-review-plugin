@@ -327,11 +327,11 @@ function describeQuery(query) {
 function renderTrace(trace) {
   if (trace.length === 0) return '（尚无查询与证据）';
   return trace.map((entry) => {
-    if (typeof entry.note === 'string' && entry.note !== '') return `### 第 ${entry.step} 步\n${entry.note}`;
+    if (typeof entry.note === 'string' && entry.note !== '') return `### 第 ${entry.step ?? '?'} 步\n${entry.note}`;
     const queries = (entry.queries ?? []).map((query) => `- ${describeQuery(query)}`).join('\n');
     const rejected = (entry.rejected ?? []).map((item) => `- 未执行：${item}`).join('\n');
     const blocks = (entry.results ?? []).map((result) => result.block).join('\n\n');
-    return `### 第 ${entry.step} 步\n查询：\n${queries || '（无）'}${rejected === '' ? '' : `\n${rejected}`}\n\n${blocks}`;
+    return `### 第 ${entry.step ?? '?'} 步\n查询：\n${queries || '（无）'}${rejected === '' ? '' : `\n${rejected}`}\n\n${blocks}`;
   }).join('\n\n');
 }
 
@@ -340,7 +340,7 @@ function renderClaims(claims) {
   if (claims.length === 0) return '（尚未提出 claim）';
   return claims.map((claim) => {
     const evidence = Array.isArray(claim.evidence) && claim.evidence.length > 0 ? ` 证据：${claim.evidence.join(', ')}` : '';
-    const reason = claim.reason === '' ? '' : ` 理由：${claim.reason}`;
+    const reason = typeof claim.reason === 'string' && claim.reason !== '' ? ` 理由：${claim.reason}` : '';
     return `- [${claim.id}] ${claim.status}：${claim.statement}${evidence}${reason}`;
   }).join('\n');
 }
@@ -359,7 +359,7 @@ export function buildInvestigationStepPrompt({ opening, system, claims, trace, s
     protocol: fragment('investigation-protocol'),
     stepInstruction: instruction,
   });
-  return { system, messages: [{ role: 'user', content: [{ type: 'text', text }] }], maxTokens: 8000, timeoutMs: 600_000 };
+  return { system, messages: [{ role: 'user', content: [{ type: 'text', text }] }], maxTokens: 12000, timeoutMs: 600_000 };
 }
 
 /** The adversarial refuter's system prompt, in the requested output language. */
@@ -370,18 +370,27 @@ export function buildRefuterSystem(language) {
 /** One refutation step: the confirmed findings, their claims, the trace and the query quota. */
 export function buildRefuteStepPrompt({ opening, system, findings, claims, trace, queriesLeft, closure }) {
   const list = findings.map((item) => {
-    const where = item.file === undefined || item.file === '' ? '' : ` [${item.file}]`;
-    return `- [${item.claim}]${where} ${item.point}${item.suggestion === '' ? '' : ` —— 建议：${item.suggestion}`}`;
+    const parts = [];
+    if (typeof item.claim === 'string' && item.claim !== '') parts.push(`[${item.claim}]`);
+    if (typeof item.file === 'string' && item.file !== '') parts.push(`[${item.file}]`);
+    const prefix = parts.length > 0 ? `${parts.join(' ')} ` : '';
+    const suggestion = typeof item.suggestion === 'string' && item.suggestion !== '' ? ` —— 建议：${item.suggestion}` : '';
+    return `- ${prefix}${item.point}${suggestion}`;
   }).join('\n');
   const claimLines = (Array.isArray(claims) ? claims : []).map((claim) => {
     const evidence = Array.isArray(claim.evidence) && claim.evidence.length > 0 ? ` 证据：${claim.evidence.join(', ')}` : '';
-    const reason = claim.reason === '' ? '' : ` 理由：${claim.reason}`;
+    const reason = typeof claim.reason === 'string' && claim.reason !== '' ? ` 理由：${claim.reason}` : '';
     return `- [${claim.id}] ${claim.statement}${evidence}${reason}`;
   }).join('\n');
-  const quota = closure || queriesLeft <= 0
+  const exhausted = closure || queriesLeft <= 0;
+  const quota = exhausted
     ? '查询配额已用尽：不得再申请查询，只能输出 results。'
     : `还可以申请 ${queriesLeft} 条补充查询。`;
-  const text = renderPrompt('refute', { opening, findings: list, claims: claimLines === '' ? '（无）' : claimLines, trace: renderTrace(trace), quota });
+  const resultsBlock = '```json\n{ "results": [{ "claim": "C1", "decision": "keep | drop", "reason": "…" }] }\n```\n\n每条待复核 finding 恰好一条结果；不要输出新 finding。';
+  const outputInstruction = exhausted
+    ? `查询配额已用尽：直接输出 results，不要再申请查询。\n\n${resultsBlock}`
+    : `你可以先申请补充查询（最多 ${queriesLeft} 条）：\n\n\`\`\`json\n{ "queries": [{ "op": "read", "path": "src/a.js", "symbol": "writeCache" }] }\n\`\`\`\n\n查询用尽后必须给出逐条判定：\n\n${resultsBlock}`;
+  const text = renderPrompt('refute', { opening, findings: list, claims: claimLines === '' ? '（无）' : claimLines, trace: renderTrace(trace), quota, outputInstruction });
   return { system, messages: [{ role: 'user', content: [{ type: 'text', text }] }], maxTokens: 4000, timeoutMs: 300_000 };
 }
 
