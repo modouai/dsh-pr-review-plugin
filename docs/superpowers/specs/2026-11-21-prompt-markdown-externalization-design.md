@@ -102,7 +102,7 @@ fragment(name)              // 读取 prompts/fragments/<name>.md
 - `explain.md`：PR 元信息、`{{filePath}}`、`{{fileStatus}}`、`{{additions}}`、`{{deletions}}`、`{{focus}}`、`{{reportLine}}`、`{{diff}}`、`{{fileContent}}`、`{{baselineSection}}`、`{{previousVerdictsField}}`
 - `verify.md`：`{{header}}`、`{{candidates}}`、`{{evidence}}`、`{{missing}}`、`{{diffSection}}`、`{{verifyLanguageRule}}`
 - `chat.md`：PR 元信息、`{{scopeLabel}}`、`{{reportLine}}`、`{{explanation}}`、`{{scopeSection}}`、`{{transcriptSection}}`、`{{question}}`、`{{outputContract}}`
-- `conclude.md`：PR 元信息、`{{report}}`、`{{entries}}`、`{{coverageSection}}`、`{{previousItemsSection}}`、`{{humanItemIdsSection}}`、`{{feedbackSection}}`、`{{chatSection}}`、`{{currentConclusionSection}}`
+- `conclude.md`：PR 元信息、`{{reportLine}}`、`{{entryCount}}`、`{{entries}}`、`{{coverageSection}}`、`{{previousItemsSection}}`、`{{humanItemIdsSection}}`、`{{feedbackSection}}`、`{{chatSection}}`、`{{currentConclusionSection}}`
 - `feedback.md`：`{{pullNumber}}`、`{{title}}`、`{{itemLines}}`、`{{commentLines}}`
 
 builder 的职责收敛为三步：
