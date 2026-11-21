@@ -715,6 +715,18 @@ export function normalizeUnverified(raw) {
     .filter((item) => item.point !== '');
 }
 
+/** Confirmed-then-dropped claims: internal audit only, never rendered. */
+export function normalizeRefuted(raw) {
+  return (Array.isArray(raw) ? raw : [])
+    .filter((item) => item !== null && typeof item === 'object')
+    .map((item) => ({
+      point: typeof item.point === 'string' ? item.point.trim() : '',
+      reason: typeof item.reason === 'string' ? item.reason.trim().slice(0, 300) : '',
+    }))
+    .filter((item) => item.point !== '')
+    .slice(0, 20);
+}
+
 /** Confidence thresholds shared by the candidate and extra-issue paths. */
 export const CONFIDENCE_FINDING = 80;
 export const CONFIDENCE_UNVERIFIED = 25;
@@ -903,6 +915,7 @@ export function normalizeReport(raw, fallbackOrder) {
     // to tell "nothing was raised" from "everything raised was judged a false positive".
     raised: countOf(raw?.raised),
     discarded: countOf(raw?.discarded),
+    refuted: normalizeRefuted(raw?.refuted),
     order: draft.order,
     focus: draft.focus,
   };
@@ -974,6 +987,7 @@ export function normalizeExplanation(raw) {
     changes: typeof raw?.changes === 'string' ? raw.changes : '',
     issues: findingsOf(raw),
     unverified: normalizeUnverified(raw?.unverified),
+    refuted: normalizeRefuted(raw?.refuted),
   };
 }
 

@@ -264,7 +264,12 @@ async function setup(options = {}) {
     pollSeconds: 3600,
     commentLanguage: options.commentLanguage ?? 'zh',
     autoReconclude: options.autoReconclude === true,
-    evidenceVerify: options.evidenceVerify !== false,
+    refuteLevel: options.refuteLevel ?? 'off',
+    investigationMaxSteps: options.investigationMaxSteps ?? 8,
+    investigationMaxFiles: options.investigationMaxFiles ?? 12,
+    investigationMaxChars: options.investigationMaxChars ?? 4000,
+    investigationMaxTotalChars: options.investigationMaxTotalChars ?? 24000,
+    investigationTimeoutMs: options.investigationTimeoutMs ?? 600000,
     // Batch analysis is opt-in per test: its background model calls would otherwise race
     // the assertions of the review/conclusion tests. The schema default is `true`;
     // `useDefaultAutoAnalyze` omits the key to exercise that default end to end.
@@ -3311,6 +3316,116 @@ function promptTextOf(options) {
     .map((block) => String(block.text ?? ''))
     .join('\n');
 }
+
+/** Fake LLM: return one queued answer per call, repeating the last one. */
+function llmSequence(answers) {
+  let index = 0;
+  return () => {
+    const answer = answers[Math.min(index, answers.length - 1)];
+    index += 1;
+    const text = typeof answer === 'string' ? answer : JSON.stringify(answer);
+    return (async function* () {
+      yield { type: 'text-delta', text };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })();
+  };
+}
+
+test('an investigation query is executed and only confirmed claims become findings', async () => {
+  const prompts = [];
+  const answers = llmSequence([
+    {
+      claims: [{ id: 'C1', statement: '空指针风险', status: 'investigating' }],
+      queries: [{ op: 'read', path: 'src/a.js' }],
+    },
+    {
+      claims: [{ id: 'C1', statement: '空指针风险', status: 'confirmed', reason: '文件里没有判空', evidence: ['E1'] }],
+      final: {
+        verdict: 'suggest',
+        summary: '讲解',
+        logic: '逻辑',
+        changes: '改动',
+        issues: [{ severity: 'block', point: '空指针风险', suggestion: '先判空再取值', line: 2, claim: 'C1' }],
+        previousVerdicts: [],
+      },
+    },
+  ]);
+  const plugin = await setup({
+    fetch: batchFetch,
+    llm: (options) => {
+      prompts.push(promptTextOf(options));
+      return answers();
+    },
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.json.explanation.issues, [
+      { severity: 'block', point: '空指针风险', suggestion: '先判空再取值', line: 2 },
+    ]);
+    assert.deepEqual(result.json.explanation.refuted, []);
+    assert.equal(prompts.length, 2, 'claim step + final step');
+    assert.match(prompts[0], /## 调查记录/);
+    assert.match(prompts[1], /## E1 · read/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a confirmed claim that cites unknown evidence cannot publish its finding', async () => {
+  const plugin = await setup({
+    fetch: batchFetch,
+    llm: llmSequence([
+      {
+        claims: [{ id: 'C1', statement: '可疑空指针', status: 'investigating' }],
+        queries: [{ op: 'read', path: 'src/a.js' }],
+      },
+      {
+        claims: [{ id: 'C1', statement: '可疑空指针', status: 'confirmed', reason: '模型说确认', evidence: ['E9'] }],
+        final: {
+          verdict: 'suggest', summary: '讲解', logic: '逻辑', changes: '改动',
+          issues: [{ severity: 'block', point: '可疑空指针', suggestion: '', line: 0, claim: 'C1' }],
+          previousVerdicts: [],
+        },
+      },
+    ]),
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 500);
+    assert.match(result.json.error.message, /未对应已确认 claim/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the closing turn runs out of budget and must still close every claim', async () => {
+  const plugin = await setup({
+    fetch: batchFetch,
+    investigationMaxSteps: 2,
+    llm: llmSequence([
+      { claims: [{ id: 'C1', statement: '可疑行为', status: 'investigating' }], queries: [{ op: 'read', path: 'src/a.js' }] },
+      { final: { verdict: 'pass', summary: '', logic: '', changes: '', issues: [], previousVerdicts: [] } },
+    ]),
+  });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 500);
+    assert.match(result.json.error.message, /调查未能闭合/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a model that never returns JSON fails the analysis instead of degrading', async () => {
+  const plugin = await setup({ fetch: batchFetch, llm: llmSequence(['not json at all']) });
+  try {
+    const result = await plugin.call('/pr-review-api/explain', 'POST', { number: 1, path: 'src/a.js', force: true });
+    assert.equal(result.status, 500);
+  } finally {
+    await plugin.dispose();
+  }
+});
 
 /** One fake LLM answer: triage for the first call, verifier output for the second. */
 function llmTriageThenVerify(triage, verify) {

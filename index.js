@@ -56,6 +56,16 @@ import {
   normalizeVerdict,
   partitionVerdicts,
 } from './llm.js';
+import {
+  buildExplainOpening,
+  buildInvestigationStepPrompt,
+  buildRefuterSystem,
+  buildRefuteStepPrompt,
+  buildReportOpening,
+  normalizeRefuted,
+} from './llm.js';
+import { createEvidenceExecutor } from './evidence.js';
+import { normalizeClaims, normalizeQueries, validateFinal } from './investigation.js';
 import { loadPrompt } from './prompts.js';
 
 /** Cordis function-plugin name. */
@@ -96,6 +106,13 @@ const DEFAULTS = {
   evidenceVerify: true,
   evidenceMaxFiles: 6,
   evidenceMaxChars: 6000,
+  investigationMaxSteps: 8,
+  investigationMaxFiles: 12,
+  investigationMaxChars: 4000,
+  investigationMaxTotalChars: 24000,
+  investigationTimeoutMs: 600000,
+  refuteLevel: 'block',
+  refuteMaxQueries: 3,
 };
 
 /** GUI launches can have a minimal PATH; try the common absolute locations too. */
@@ -1735,6 +1752,187 @@ export function apply(ctx, config) {
     ensureAutoAnalyze(record);
   }
 
+  const MAX_QUERIES_PER_STEP = 4;
+  const MAX_CLAIMS = 12;
+
+  function investigationBudget() {
+    return {
+      maxSteps: settings.investigationMaxSteps ?? DEFAULTS.investigationMaxSteps,
+      maxFiles: settings.investigationMaxFiles ?? DEFAULTS.investigationMaxFiles,
+      maxChars: settings.investigationMaxChars ?? DEFAULTS.investigationMaxChars,
+      maxTotalChars: settings.investigationMaxTotalChars ?? DEFAULTS.investigationMaxTotalChars,
+      timeoutMs: settings.investigationTimeoutMs ?? DEFAULTS.investigationTimeoutMs,
+    };
+  }
+
+  /** Run one git command and keep its exit code: `git grep` uses 1 for "no matches". */
+  function runGitResult(cwd, args) {
+    return new Promise((resolve) => {
+      const attempt = (at) => {
+        if (at >= GIT_CANDIDATES.length) { resolve(null); return; }
+        execFile(GIT_CANDIDATES[at], ['-C', cwd, ...args], { timeout: 5000, maxBuffer: 512 * 1024 }, (error, stdout) => {
+          if (error !== null && error !== undefined && error.code === 'ENOENT') { attempt(at + 1); return; }
+          if (error === null) { resolve({ stdout: String(stdout), code: 0 }); return; }
+          resolve({ stdout: String(stdout ?? ''), code: typeof error.code === 'number' ? error.code : -1 });
+        });
+      };
+      attempt(0);
+    });
+  }
+
+  /** Evidence search runs from the repo toplevel so paths match the diff keys. */
+  async function evidenceRoot() {
+    const cwd = evidenceWorkspace();
+    if (cwd === '') return '';
+    const result = await runGitResult(cwd, ['rev-parse', '--show-toplevel']);
+    return result !== null && result.code === 0 && result.stdout.trim() !== '' ? result.stdout.trim() : cwd;
+  }
+
+  /** Executor-facing git: stdout for success and for grep's "no matches" (code 1). */
+  async function runGitEvidence(cwd, args) {
+    const result = await runGitResult(cwd, args);
+    if (result === null) return null;
+    if (result.code === 0) return result.stdout;
+    if (result.code === 1) return '';
+    return null;
+  }
+
+  async function newEvidenceExecutor(record, startIndex = 0) {
+    const budget = investigationBudget();
+    return createEvidenceExecutor({
+      readFile: async (filePath) => {
+        const content = await ensureFileContent(record, filePath);
+        return content.content;
+      },
+      diffFiles: record.diffFiles,
+      workspace: await evidenceRoot(),
+      runGit: runGitEvidence,
+      startIndex,
+      maxFiles: budget.maxFiles,
+      maxChars: budget.maxChars,
+      maxTotalChars: budget.maxTotalChars,
+    });
+  }
+
+  function isInvestigationAnswer(value) {
+    return value !== null && typeof value === 'object'
+      && (value.final !== undefined || Array.isArray(value.queries) || Array.isArray(value.claims));
+  }
+
+  async function runInvestigation(record, options, signal) {
+    const budget = investigationBudget();
+    const executor = await newEvidenceExecutor(record);
+    const evidenceCount = () => executor.summary().count;
+    const deadline = Date.now() + budget.timeoutMs;
+    const mode = options.mode === 'report' ? 'report' : 'file';
+    const trace = [];
+    let claims = [];
+    let step = 0;
+    let closing = false;
+    const aborted = () => signal !== undefined && signal !== null && signal.aborted;
+    const stale = () => typeof options.stale === 'function' && options.stale() === true;
+    while (true) {
+      if (aborted()) throw new Error('模型请求已取消。');
+      if (stale()) return { discarded: true };
+      if (!closing && (step >= budget.maxSteps - 1 || Date.now() > deadline)) closing = true;
+      if (closing) {
+        const prompt = buildInvestigationStepPrompt({
+          opening: options.opening.text, system: options.opening.system, claims, trace,
+          step: step + 1,
+          budgetLine: '预算已用尽：不得再发起查询，只能用已有证据收口。',
+          instruction: '强制收口：不要再输出 queries；为每个 claim 给出 confirmed 或 refuted，并输出 final。',
+        });
+        const answer = await callModelJson(prompt, signal, (value) => value !== null && typeof value === 'object' && value.final !== undefined);
+        const closed = normalizeClaims(answer.parsed?.claims, claims);
+        const validated = validateFinal(answer.parsed?.final, closed.claims, executor.evidenceIds(), mode, {
+          allowedRoundItems: options.allowedRoundItems,
+        });
+        if (!validated.ok) throw new Error(`调查未能闭合：${validated.error}`);
+        return { ...validated, final: answer.parsed.final, trace, evidenceCount: evidenceCount() };
+      }
+      step += 1;
+      const prompt = buildInvestigationStepPrompt({
+        opening: options.opening.text, system: options.opening.system, claims, trace, step,
+        budgetLine: `已获 ${executor.summary().count} 条证据 / ${executor.summary().files} 个文件；上限 ${budget.maxSteps} 步、${budget.maxFiles} 个文件、${budget.maxTotalChars} 字符`,
+        instruction: step === 1 ? '第一步：先从开篇资料提出可证伪的 claims，再给出需要的证据查询。' : '继续调查。所有 claim 闭合后输出 final；仍缺证据就继续 queries。',
+      });
+      const answer = await callModelJson(prompt, signal, isInvestigationAnswer);
+      if (answer.parsed === null) throw new Error(`调查第 ${step} 步没有返回可解析的 JSON。`);
+      const normalized = normalizeClaims(answer.parsed.claims, claims);
+      claims = normalized.claims;
+      if (normalized.overflow) trace.push({ step, note: `claims 超过 ${MAX_CLAIMS} 条上限，超出部分已忽略；请用已有 claim 收口。` });
+      if (answer.parsed.final !== undefined) {
+        const validated = validateFinal(answer.parsed.final, claims, executor.evidenceIds(), mode, {
+          allowedRoundItems: options.allowedRoundItems,
+        });
+        if (validated.ok) return { ...validated, final: answer.parsed.final, trace, evidenceCount: evidenceCount() };
+        trace.push({ step, note: `终稿被拒绝：${validated.error}\n你上一步给出的 final：${JSON.stringify(answer.parsed.final).slice(0, 4000)}` });
+        continue;
+      }
+      const { accepted, rejected } = normalizeQueries(answer.parsed.queries, MAX_QUERIES_PER_STEP);
+      if (accepted.length === 0) {
+        trace.push({ step, note: `没有可执行的查询：${rejected.join('；') || '模型未给出 queries'}` });
+        continue;
+      }
+      const results = [];
+      for (const query of accepted) results.push(await executor.execute(query));
+      trace.push({ step, queries: accepted, results, rejected });
+    }
+  }
+
+  async function refuteFindings(record, options, signal) {
+    const level = settings.refuteLevel ?? DEFAULTS.refuteLevel;
+    if (level === 'off') return { kept: options.findings, refuted: [] };
+    const targets = options.findings.filter((item) => item.roundItem === undefined && (level === 'all' || item.severity === 'block'));
+    if (targets.length === 0) return { kept: options.findings, refuted: [] };
+    const claimById = new Map((Array.isArray(options.claims) ? options.claims : []).map((claim) => [claim.id, claim]));
+    const targetClaims = targets.map((item) => claimById.get(item.claim)).filter((claim) => claim !== undefined);
+    const executor = await newEvidenceExecutor(record, options.startIndex ?? 0);
+    const trace = [];
+    let remaining = settings.refuteMaxQueries ?? DEFAULTS.refuteMaxQueries;
+    const system = buildRefuterSystem(commentLanguage());
+    const decisions = [];
+    while (true) {
+      if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
+      const closing = remaining <= 0;
+      const prompt = buildRefuteStepPrompt({
+        opening: options.opening.text, system, findings: targets, claims: targetClaims, trace,
+        queriesLeft: remaining, closure: closing,
+      });
+      const answer = await callModelJson(prompt, signal, (value) => value !== null && typeof value === 'object'
+        && (Array.isArray(value.results) || (Array.isArray(value.queries) && closing !== true)));
+      if (answer.parsed === null) throw new Error('反驳复核没有返回可解析的 JSON。');
+      if (Array.isArray(answer.parsed.results)) {
+        const covered = new Map();
+        for (const item of answer.parsed.results) {
+          if (item === null || typeof item !== 'object') continue;
+          const claim = typeof item.claim === 'string' ? item.claim.trim() : '';
+          const decision = item.decision === 'drop' ? 'drop' : (item.decision === 'keep' ? 'keep' : '');
+          if (claim === '' || decision === '') continue;
+          covered.set(claim, { claim, decision, reason: typeof item.reason === 'string' ? item.reason.trim().slice(0, 300) : '' });
+        }
+        const missing = targets.filter((item) => !covered.has(item.claim));
+        if (missing.length > 0) throw new Error(`反驳复核遗漏了 claim：${missing.map((item) => item.claim).join('、')}`);
+        decisions.push(...covered.values());
+        break;
+      }
+      if (closing) throw new Error('反驳复核在收口阶段没有给出 results。');
+      const { accepted } = normalizeQueries(answer.parsed.queries, remaining);
+      if (accepted.length === 0) { remaining = 0; continue; }
+      for (const query of accepted) trace.push({ step: trace.length + 1, queries: [query], results: [await executor.execute(query)] });
+      remaining -= accepted.length;
+    }
+    const dropped = new Map(decisions.filter((item) => item.decision === 'drop').map((item) => [item.claim, item.reason || '反驳复核判定为误报']));
+    const kept = [];
+    const refuted = [];
+    for (const item of options.findings) {
+      const reason = dropped.get(item.claim);
+      if (reason === undefined) kept.push(item);
+      else refuted.push({ point: item.point, reason });
+    }
+    return { kept, refuted };
+  }
+
   /** In-flight file explanations: duplicate requests share one model call. */
   const explainInFlight = new Map();
 
@@ -1791,26 +1989,36 @@ export function apply(ctx, config) {
     // The baseline snapshot (the newest concluded round's findings) rides along with the
     // analysis prompt: the model re-judges every baseline finding for this file.
     const baselineFindings = baselineRoundOf(record)?.findings ?? [];
-    const prompt = buildExplainPrompt(
-      pull,
-      file,
-      diffText,
-      record.report,
-      focus,
-      fileContent,
+    const opening = buildExplainOpening(
+      pull, file, diffText, record.report, focus, fileContent,
       { language: commentLanguage(), baselineFindings },
     );
     if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
     if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
-    const answer = await callModelJson(prompt, signal, answerHasContent);
-    // The round can switch while the model answers; drop the answer before parsing, so a
-    // late malformed reply is never reported as a failure of the round that replaced it.
-    if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
-    const parsed = answer.parsed;
-    if (parsed === null || !answerHasContent(parsed)) {
-      throw new Error(`模型没有返回完整的分析 JSON。原始输出：${answer.raw.slice(0, 400)}`);
+    const investigated = await runInvestigation(
+      record,
+      {
+        opening,
+        mode: 'file',
+        stale: () => (record.analysisEpoch ?? 0) !== epoch,
+        allowedRoundItems: new Set(baselineFindings.map((item) => item.index)),
+      },
+      signal,
+    );
+    if (investigated.discarded === true) return { explanation: null, cached: false, discarded: true };
+    const parsed = investigated.final;
+    let issues = investigated.issues;
+    let refuted = investigated.refuted;
+    if (issues.length > 0) {
+      const refutation = await refuteFindings(record, {
+        opening,
+        findings: issues,
+        claims: investigated.claims,
+        startIndex: investigated.evidenceCount,
+      }, signal);
+      issues = refutation.kept;
+      refuted = [...refuted, ...refutation.refuted];
     }
-    const concerns = normalizeConcerns(parsed.concerns);
     // Baseline re-judgement (review-delta spec v7): every baseline finding must come out
     // of the analysis with a status. "fixed" drops it (the model's explicit resolved
     // verdict); "still-open" re-enters this round's findings as a carry-over that skips
@@ -1850,33 +2058,6 @@ export function apply(ctx, config) {
         });
       }
     }
-    // One concern carries one suggestion; the verifier's suggestion rewrites win, the
-    // candidate's are the fallback. Legacy model output that still carries a separate
-    // `suggestions` array is folded into issues by normalizeExplanation (findingsOf).
-    let issues = [];
-    let unverified = [];
-    if (concerns.length > 0) {
-      if (settings.evidenceVerify === false) {
-        issues = concerns.map(({ severity, point, suggestion, line }) => ({ severity, point, suggestion, line }));
-      } else {
-        const verdicts = await verifyConcerns(
-          record,
-          concerns,
-          parsed.evidenceNeeds,
-          (evidence, missing) => buildExplainVerifyPrompt(pull, file, concerns, evidence, missing, {
-            language: commentLanguage(),
-            diffText,
-          }),
-          epoch,
-          signal,
-        );
-        if (verdicts.discarded) return { explanation: null, cached: false, discarded: true };
-        // partitionVerdicts products still carry a `file` key; normalizeExplanation
-        // (findingsOf) drops it, so the stored shape stays the uniform four keys.
-        issues = verdicts.issues;
-        unverified = verdicts.unverified;
-      }
-    }
     // 同文去重：模型有时把已判 still-open 的问题又作为一条新发现写进 issues（完全同文）。
     // 延续条目优先，同文的无 roundItem 条目丢弃——不做语义猜测，只认归一后的完全相等。
     const comparablePoint = (value) => String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
@@ -1899,7 +2080,7 @@ export function apply(ctx, config) {
     const explanation = normalizeExplanation({
       ...parsed,
       issues,
-      unverified,
+      refuted,
       verdict,
     });
     // Repeat the check at the write point: an await added between parse and store must
