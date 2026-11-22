@@ -3349,6 +3349,7 @@ export function apply(ctx, config) {
             number: numberProperty,
             path: { type: 'string', description: '变更文件路径（必须在 review_list_files 清单中）。' },
             preset: { type: 'string', description: '只读预设 id；默认 pr-review-readonly。' },
+            prompt: { type: 'string', description: '可选：覆盖默认探针提示，用于写边界验证。' },
           },
           required: ['path'],
         },
@@ -3362,8 +3363,9 @@ export function apply(ctx, config) {
             return toolText(['宿主没有提供 ctx.agents.create；阶段 0 无法继续。']);
           }
           const preset = typeof args.preset === 'string' && args.preset.trim() !== '' ? args.preset.trim() : 'pr-review-readonly';
+          const customPrompt = typeof args.prompt === 'string' && args.prompt.trim() !== '' ? args.prompt.trim() : null;
           const selection = resolveSelection(ctx, settings);
-          const prompt = [
+          const prompt = customPrompt ?? [
             `你是审查探针，目标 PR #${record.number}，文件 ${filePath}。`,
             '请严格按以下顺序调用工具，不要修改代码、不要发布评论、不要询问用户：',
             `1. review_get，number=${record.number}，取得 revision。`,
