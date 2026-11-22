@@ -147,7 +147,7 @@ test('the runner exposes the created agent for PR binding', async () => {
 test('a same-round retry counts analyses written by the failed attempt', async () => {
   const record = fakeRecord(['src/a.js', 'src/b.js']);
   record.round = 3;
-  record.run = { round: 3, headSha: 'abc', status: 'error', token: null };
+  record.run = { round: 3, headSha: 'abc', status: 'error' };
   record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: 100 });
   const ctx = fakeCtx(() => {});
   await runnerFor(record, ctx, { reviewCoverageRetries: 0 }).start();
@@ -159,7 +159,7 @@ test('a same-round retry counts analyses written by the failed attempt', async (
 test('a same-round retry with a different head re-analyzes every file', async () => {
   const record = fakeRecord(['src/a.js']);
   record.round = 3;
-  record.run = { round: 3, headSha: 'old-head', status: 'error', token: null };
+  record.run = { round: 3, headSha: 'old-head', status: 'error' };
   record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: 100 });
   const ctx = fakeCtx(() => {});
   await runnerFor(record, ctx, { reviewCoverageRetries: 0 }).start();

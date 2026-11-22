@@ -240,9 +240,11 @@ await agent.whenIdle();
 
 - 保留：`record.files`、`record.explanations`、`record.report`、`record.conclusion`、轮次历史、发布记录。
 - 删除：`unverified`、`raised`、`discarded`、`refuted`（均为直连 LLM 链路的产物）。
-- 新增：`record.run = { token?, round, headSha, agentSessionId, startedAt, finishedAt, status: 'running'|'done'|'incomplete'|'error'|'cancelled', missingFiles: [], missingSections: [], headIsolated: boolean, error }`。
+- 新增：`record.run = { round, headSha, agentSessionId, startedAt, finishedAt, status: 'running'|'done'|'incomplete'|'error'|'cancelled', missingFiles: [], missingSections: [], headIsolated: boolean, error }`。
   - `round` 与本轮 `record.round` 一起持久化，用于区分“同一轮重试”（沿用已有逐文件分析）与“新一轮”（从头覆盖）；`headSha` 同时匹配才沿用，防止新 head 复用旧代码分析。
-  - 持久化到缓存（不含模型输出；`token` 只在进程内区分新旧 run，不写缓存）。
+  - 持久化到缓存（不含模型输出）。`reviewing` 记录也持久化：重启时恢复为 `stale`，`run: running` 恢复为中断 error；不能整条丢弃，否则审查中重启会丢掉该 PR 的轮次历史与结论。
+  - 运行归属用 runner 持有的 run 对象身份判断（`record.run === run`），不依赖进程内 token。
+  - 持久化到缓存（不含模型输出；`token` 只在进程内区分新旧 run，不写缓存）。`reviewing` 记录也持久化：重启时恢复为 `stale`，`run: running` 恢复为中断 error；不能整条丢弃，否则审查中重启会丢掉该 PR 的轮次历史与结论。
   - `record.status` 映射：run `done` → `done`；`incomplete` / `cancelled` → `incomplete`；`error` → `error`。不允许把 incomplete 折叠成 done。
   - `reviewing` 记录本来就不写缓存；若恢复时遇到 `status: 'running'`，视为中断，恢复为 `error` +「应用重启，上一轮 Agent 审查中断」。
   - `newReviewRecord` 初始化 `run: null`，`rollNewRound` 清空 `run`，`restoreReviewRecord` 用 `sanitizeRun` 恢复。

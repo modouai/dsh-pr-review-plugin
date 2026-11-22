@@ -333,6 +333,7 @@ async function setup(options = {}) {
     ...(options.useDefaultAutoAnalyze === true ? {} : { autoAnalyze: options.autoAnalyze === true }),
     // Keep the existing tests on the legacy engine while the agent path has its own tests.
     reviewEngine: options.reviewEngine ?? 'legacy',
+    ...(options.reviewCoverageRetries === undefined ? {} : { reviewCoverageRetries: options.reviewCoverageRetries }),
   });
 
   async function call(pathname, method = 'GET', body) {
@@ -4565,9 +4566,9 @@ test('agent engine runs through the plugin, binds writes to its PR, and refuses 
       await executeTool('review_update_analysis', {
         path: 'src/a.js',
         revision: revisionOf(first),
-        verdict: 'pass',
-        summary: '没有发现问题',
-        issues: [],
+        verdict: 'suggest',
+        summary: '有一个建议',
+        issues: [{ point: 'agent finding', severity: 'suggest', line: 1 }],
       }, agent);
       const secondGet = await executeTool('review_get', {}, agent);
       await executeTool('review_update_report', {
@@ -4607,6 +4608,11 @@ test('agent engine runs through the plugin, binds writes to its PR, and refuses 
     assert.equal(done.run.status, 'done');
     assert.equal(done.run.headIsolated, true);
     assert.deepEqual(done.run.missingFiles, []);
+    assert.deepEqual(done.run.missingSections, []);
+    // The Agent's conclusion freezes this round's findings for the next round's comparison.
+    const lastRound = done.roundHistory[done.roundHistory.length - 1];
+    assert.equal(lastRound.findings.length, 1);
+    assert.equal(lastRound.findings[0].point, 'agent finding');
     // The later-finished PR 2 is untouched: the agent was bound to #1.
     const other = await plugin.review(2);
     assert.equal(other.report.summary, '初步报告');
@@ -4636,8 +4642,49 @@ test('agent engine fails closed when the PR head worktree cannot be created', as
     const failed = await plugin.waitFor(1, (review) => review.status !== 'reviewing', 8000);
     assert.equal(failed.status, 'error');
     assert.match(failed.error, /无法为 PR head 创建工作区/);
+    assert.equal(failed.run.status, 'error');
+    assert.deepEqual(failed.run.missingFiles, []);
     assert.equal(plugin.agentState.followups.length, 0);
   } finally {
     await plugin.dispose();
+  }
+});
+
+test('a reviewing agent run is persisted so a restart does not drop the PR', async () => {
+  const workspace = await makeGitWorkspace();
+  const plugin = await setup({
+    reviewEngine: 'agent',
+    reviewCoverageRetries: 0,
+    fetch: agentFetch(workspace.headSha),
+    onAgentFollowup: async () => {
+      await delay(1200);
+    },
+  });
+  try {
+    await plugin.call(`/pr-review-api/context?cwd=${encodeURIComponent(workspace.dir)}`);
+    const started = await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    assert.equal(started.json.started, true);
+    const cachePath = path.join(plugin.home, '.dsh', 'pr-review', CACHE_SLUG);
+    let persisted = null;
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      try {
+        const data = JSON.parse(await readFile(cachePath, 'utf8'));
+        const entry = data.reviews?.['1'];
+        if (entry?.status === 'reviewing') {
+          persisted = entry;
+          break;
+        }
+      } catch {
+        // The cache file may not exist yet.
+      }
+      await delay(50);
+    }
+    assert.ok(persisted !== null, 'reviewing record is written to the cache');
+    assert.equal(persisted.run.status, 'running');
+    const finished = await plugin.waitFor(1, (review) => review.status !== 'reviewing', 8000);
+    assert.equal(finished.status, 'incomplete');
+  } finally {
+    await plugin.dispose();
+    await rm(workspace.dir, { recursive: true, force: true });
   }
 });

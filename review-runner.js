@@ -126,7 +126,7 @@ export function restrictAgentTools(agentCtx) {
   if (deny.length > 0) tools.restrict({ deny });
 }
 
-export function createReviewRunner({ ctx, settings, record, selection, cwd, analyze = true, cwdNote = '', headIsolated = false, runToken = null, onAgent, onChange }) {
+export function createReviewRunner({ ctx, settings, record, selection, cwd, analyze = true, cwdNote = '', headIsolated = false, onAgent, onChange }) {
   const agents = typeof ctx?.get === 'function' ? ctx.get('agents') : undefined;
   const service = agents ?? ctx?.agents;
   let handle = null;
@@ -188,7 +188,6 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
       && priorRun.round === record.round
       && priorRun.headSha === headSha;
     activeRun = {
-      token: runToken,
       round: record.round ?? 0,
       headSha,
       agentSessionId: null,
@@ -286,6 +285,10 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
       finish('error', activeRun?.missingFiles ?? [], activeRun?.missingSections ?? [], error instanceof Error ? error.message : String(error));
     } finally {
       await dispose();
+      // A runner may be reused by a test or a retry path; a stale resolved promise would
+      // make the next run's whenIdle return immediately after any cancel.
+      cancelPromise = null;
+      cancelResolve = null;
     }
   };
 
@@ -305,5 +308,5 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
     await dispose();
   };
 
-  return { start, cancel, dispose, changed };
+  return { start, cancel, dispose, changed, currentRun: () => activeRun };
 }

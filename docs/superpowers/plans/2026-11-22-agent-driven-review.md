@@ -1,5 +1,15 @@
 # Agent 驱动的审查 Implementation Plan
 
+> **⚠️ 历史执行计划，不要按正文执行。** 阶段 0/1/2 已按下面的实施备注实现，正文里的旧方案（`cordis.patch.yml` 预设、`review-continue.md`、`evidenceWorkspace` 等）已被当前代码与 spec 取代。复选框是原始计划形态，未逐项勾选不代表未实现；阶段 3 仍是待办。当前行为以 `docs/superpowers/specs/2026-11-22-agent-driven-review-design.md` 和代码为准。
+
+| 阶段 | 实际状态 |
+|---|---|
+| 0 宿主原型 | 完成（探针已删除） |
+| 1 Runner / 预设 / 提示 | 完成（预设改为程序化注册，不再写 `cordis.patch.yml`） |
+| 2 自动触发 / UI / 安全 | 完成（含 incomplete、run 持久化、会话绑定、fail-closed） |
+| 3 删除旧直连 LLM 链路 | 未开始（旧引擎仍保留以便回退） |
+| 4 全量验收 / PR | 进行中（PR #36 draft） |
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 用独立 Agent 会话（`ctx.agents.create`）替代插件内直连 LLM 的 JSON 审查流水线；审查结果通过 `review_*` 工具写回，插件只负责触发、覆盖率、持久化与展示。

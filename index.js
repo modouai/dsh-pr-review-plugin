@@ -199,10 +199,9 @@ function parseBody(text) {
   }
 }
 
-/** Serialize one review record for the browser half (no diff text, no Maps, no abort handles). */
 /**
- * Browser/cache-safe view of one agent run. A run left `running` by a restart cannot still
- * be alive, so it is restored as an error with an explicit interruption reason.
+ * Browser/cache-safe view of one agent run. A live run keeps `running`; only a cache read
+ * during startup converts it to an interruption (see `restoreRun`).
  */
 function sanitizeRun(raw) {
   if (raw === null || raw === undefined || typeof raw !== 'object') return null;
@@ -215,14 +214,25 @@ function sanitizeRun(raw) {
     agentSessionId: typeof raw.agentSessionId === 'string' && raw.agentSessionId !== '' ? raw.agentSessionId : null,
     startedAt: Number.isFinite(raw.startedAt) ? raw.startedAt : 0,
     finishedAt: Number.isFinite(raw.finishedAt) ? raw.finishedAt : 0,
-    status: status === 'running' ? 'error' : status,
+    status,
     missingFiles: strings(raw.missingFiles),
     missingSections: strings(raw.missingSections),
     headIsolated: raw.headIsolated === true,
-    error: status === 'running' ? '应用重启，上一轮 Agent 审查中断。' : (typeof raw.error === 'string' ? raw.error : null),
+    error: typeof raw.error === 'string' ? raw.error : null,
   };
 }
 
+/** Restoring from cache: a `running` run cannot still be alive, so it is an interruption. */
+function restoreRun(raw) {
+  const run = sanitizeRun(raw);
+  if (run !== null && run.status === 'running') {
+    run.status = 'error';
+    run.error = '应用重启，上一轮 Agent 审查中断。';
+  }
+  return run;
+}
+
+/** Serialize one review record for the browser half (no diff text, no Maps, no abort handles). */
 function serializeReview(record) {
   if (record === undefined) return null;
   return {
@@ -948,7 +958,9 @@ export function apply(ctx, config) {
   function buildCachePayload() {
     const payload = { savedAt: Date.now(), reviews: {} };
     for (const [number, record] of state.reviews) {
-      if (record.status === 'reviewing') continue;
+      // Persist reviewing records too: the partial round is marked stale on restore, but
+      // dropping the whole record would lose its history and conclusion if the app restarts
+      // mid-review.
       payload.reviews[number] = {
         number: record.number,
         status: record.status,
@@ -1128,7 +1140,7 @@ export function apply(ctx, config) {
       diffFiles: undefined,
       revision: Number.isInteger(saved.revision) && saved.revision >= 0 ? saved.revision : 0,
       audit: Array.isArray(saved.audit) ? saved.audit.filter((item) => item !== null && typeof item === 'object') : [],
-      run: sanitizeRun(saved.run),
+      run: restoreRun(saved.run),
     };
     if (Array.isArray(saved.roundHistory) && saved.roundHistory.length > 0) {
       record.roundHistory = saved.roundHistory.map((entry, index) => sanitizeRoundEntry(entry, index));
@@ -1831,6 +1843,28 @@ export function apply(ctx, config) {
     return { pull, files };
   }
 
+  /** Record an early agent failure as a terminal run so the panel can show a complete state. */
+  function failAgentRun(record, message, headIsolated = false) {
+    const now = Date.now();
+    record.run = {
+      round: record.round ?? 0,
+      headSha: record.headSha ?? record.pull?.headSha ?? '',
+      agentSessionId: null,
+      startedAt: now,
+      finishedAt: now,
+      status: 'error',
+      missingFiles: [],
+      missingSections: [],
+      headIsolated: headIsolated === true,
+      error: message,
+    };
+    record.status = 'error';
+    record.error = message;
+    record.finishedAt = now;
+    currentRoundEntry(record).finishedAt = now;
+    scheduleSave();
+  }
+
   /** Agent-driven review: fetch context, then let the read-only agent write results. */
   async function runAgentReview(record) {
     const previous = agentRuns.get(record.number);
@@ -1838,26 +1872,22 @@ export function apply(ctx, config) {
       await previous.cancel();
       if (agentRuns.get(record.number) === previous) agentRuns.delete(record.number);
     }
-    await prepareReviewContext(record);
+    try {
+      await prepareReviewContext(record);
+    } catch (error) {
+      failAgentRun(record, error instanceof Error ? error.message : String(error));
+      return;
+    }
     if (!(await presetReady)) {
-      record.status = 'error';
-      record.error = '只读审查预设注册失败；请检查宿主日志（agentPresets.register）。';
-      record.finishedAt = Date.now();
-      currentRoundEntry(record).finishedAt = record.finishedAt;
-      scheduleSave();
+      failAgentRun(record, '只读审查预设注册失败；请检查宿主日志（agentPresets.register）。');
       return;
     }
     const selection = resolveSelection(ctx, settings);
     const worktree = await prepareReviewWorktree(record);
     if (worktree.isolated !== true) {
-      record.status = 'error';
-      record.error = '无法为 PR head 创建工作区，已停止审查（避免读到旧代码）。请确认本地已拉取该 head 后重试。';
-      record.finishedAt = Date.now();
-      currentRoundEntry(record).finishedAt = record.finishedAt;
-      scheduleSave();
+      failAgentRun(record, '无法为 PR head 创建工作区，已停止审查（避免读到旧代码）。请确认本地已拉取该 head 后重试。');
       return;
     }
-    const runToken = Symbol('pr-review-run');
     let runner;
     let boundAgentId = null;
     try {
@@ -1869,7 +1899,6 @@ export function apply(ctx, config) {
         cwd: worktree.cwd,
         cwdNote: worktree.note,
         headIsolated: true,
-        runToken,
         onAgent: (agent, sessionId) => {
           const bound = typeof sessionId === 'string' && sessionId !== '' ? sessionId : agentSessionId(agent);
           if (bound === '') return;
@@ -1887,14 +1916,21 @@ export function apply(ctx, config) {
       await worktree.cleanup();
     }
     // A newer run replaced this one while it was finishing; its state owns the record.
-    if (record.run?.token !== runToken) return;
-    const status = record.run?.status ?? 'error';
+    // Compare the run object itself: a restored/rebuilt record can lose a process-local token.
+    const run = runner.currentRun();
+    if (record.run !== run) return;
+    const status = run.status ?? 'error';
     record.status = status === 'done' ? 'done'
       : status === 'incomplete' || status === 'cancelled' ? 'incomplete'
         : 'error';
-    record.error = record.run?.error ?? null;
+    record.error = run.error ?? null;
     record.finishedAt = Date.now();
     currentRoundEntry(record).finishedAt = record.finishedAt;
+    if (status === 'done' && record.conclusion !== null && record.conclusion !== undefined) {
+      // Refresh after coverage: the Agent may have written its conclusion before its last
+      // analysis, and this is the final, complete set for the next round's baseline.
+      currentRoundEntry(record).findings = findingsSnapshotOf(record);
+    }
     scheduleSave();
   }
 
@@ -3815,6 +3851,11 @@ export function apply(ctx, config) {
           });
           const runnerAgent = isReviewRunnerAgent(record, exec.agent);
           pushConclusionVersion(record, runnerAgent ? 'model' : 'human', normalized, record.coverage);
+          if (runnerAgent) {
+            // The Agent finishes per-file analyses before writing its conclusion, so this is
+            // the point that freezes the round's findings for the next round's comparison.
+            currentRoundEntry(record).findings = findingsSnapshotOf(record);
+          }
           if (!runnerAgent) {
             record.conclusionEditedAt = Date.now();
             const touched = [...normalized.blockers, ...normalized.suggestions].map((item) => item.id);
