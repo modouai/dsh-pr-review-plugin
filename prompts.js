@@ -25,7 +25,7 @@ function read(relativePath) {
 export const PROMPT_NAMES = [
   'reviewer', 'reviewer-compact', 'verifier',
   'report', 'explain', 'verify', 'chat', 'conclude', 'feedback',
-  'review-data',
+  'review-data', 'review-task', 'review-continue',
 ];
 
 /** Shared fragment file stems; `language-zh` loads `prompts/fragments/language-zh.md`. */

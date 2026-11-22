@@ -59,6 +59,7 @@ import {
 } from './llm.js';
 import { loadPrompt } from './prompts.js';
 import { probeAgent } from './review-probe.js';
+import { createReviewRunner } from './review-runner.js';
 
 /** Cordis function-plugin name. */
 export const name = 'pr-review';
@@ -98,6 +99,10 @@ const DEFAULTS = {
   evidenceVerify: true,
   evidenceMaxFiles: 6,
   evidenceMaxChars: 6000,
+  // Agent-driven review: the plugin creates a read-only agent session per round.
+  reviewAgentPreset: 'pr-review-readonly',
+  reviewCoverageRetries: 2,
+  reviewAgentMaxTokens: 8000,
 };
 
 /** GUI launches can have a minimal PATH; try the common absolute locations too. */
@@ -134,6 +139,9 @@ export const Config = Schema.object({
   evidenceVerify: Schema.boolean().default(DEFAULTS.evidenceVerify),
   evidenceMaxFiles: Schema.number().min(1).max(20).default(DEFAULTS.evidenceMaxFiles),
   evidenceMaxChars: Schema.number().min(500).default(DEFAULTS.evidenceMaxChars),
+  reviewAgentPreset: Schema.string().default(DEFAULTS.reviewAgentPreset),
+  reviewCoverageRetries: Schema.number().min(0).max(5).default(DEFAULTS.reviewCoverageRetries),
+  reviewAgentMaxTokens: Schema.number().min(1000).default(DEFAULTS.reviewAgentMaxTokens),
 });
 
 /** Stable tool failure codes: the tool registry keeps `error.code` for HarnessError only. */
@@ -1739,6 +1747,8 @@ export function apply(ctx, config) {
 
   /** In-flight file explanations: duplicate requests share one model call. */
   const explainInFlight = new Map();
+  /** PR number → active agent review runner (one per PR). */
+  const agentRuns = new Map();
 
   /** Explain one file: deep logic walkthrough + findings. `signal` cancels a batch call. */
   async function explainFile(number, filePath, force, signal) {
@@ -3155,6 +3165,9 @@ export function apply(ctx, config) {
             `变更文件：${(record.files ?? []).length} 个 · 已发布评论：${(record.published ?? []).length} 条`,
             `总览：初筛风险 ${overviewCounts(record).risks} · 逐文件审查意见 ${overviewCounts(record).issues} 条（review_update_overview 可一次改总览）`,
             `revision：${record.revision ?? 0}（写入工具必须带回这个值）`,
+            ...(record.run === null || record.run === undefined
+              ? []
+              : [`Agent 审查：${record.run.status}${record.run.error ? `（${record.run.error}）` : ''}${Array.isArray(record.run.missingFiles) && record.run.missingFiles.length > 0 ? ` · 缺 ${record.run.missingFiles.length} 个文件` : ''}`]),
           ]);
         },
       },
@@ -3323,11 +3336,7 @@ export function apply(ctx, config) {
     ];
   }
 
-  /**
-   * Temporary phase-0 probe. It creates a read-only review agent and asks it to write one
-   * analysis, so we can verify ctx.agents, the preset and tool visibility inside DSH.
-   * Remove this definition (and review-probe.js) after the check.
-   */
+  /** Temporary phase-0 probe definitions; removed after the write-boundary check. */
   function probeToolDefinitions(numberProperty, textOutput) {
     return [
       {
@@ -3391,6 +3400,69 @@ export function apply(ctx, config) {
   }
 
   /** Mutating review tools: they rewrite review data or drive conclude/publish. */
+  /** Phase-1 manual entry: start an agent-driven review run in the background. */
+  function agentReviewToolDefinitions(numberProperty, textOutput) {
+    return [
+      {
+        name: 'review_run_agent',
+        description: '启动一个只读审查 Agent（独立会话）审查指定 PR；可用 paths 限制文件。结果通过 review_* 工具写回，面板实时更新。',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            number: numberProperty,
+            paths: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '可选：只审查这些变更文件；省略时审查全部文件。',
+            },
+            analyze: {
+              type: 'boolean',
+              description: '是否逐文件分析；false 时只写总体报告。默认 true。',
+            },
+          },
+        },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          const agents = ctx.get('agents');
+          if (agents === undefined || agents === null || typeof agents.create !== 'function') {
+            return toolText(['宿主没有提供 ctx.agents.create；无法启动 Agent 审查。']);
+          }
+          const paths = Array.isArray(args.paths)
+            ? args.paths.filter((item) => typeof item === 'string' && item.trim() !== '').map((item) => item.trim())
+            : null;
+          const existing = agentRuns.get(record.number);
+          if (existing !== undefined) await existing.cancel();
+          const selection = resolveSelection(ctx, settings);
+          const runner = createReviewRunner({
+            ctx,
+            settings,
+            record,
+            selection,
+            cwd: state.workspaceCwd || process.cwd(),
+            paths,
+            analyze: args.analyze !== false,
+            onChange: () => scheduleSave(),
+          });
+          agentRuns.set(record.number, runner);
+          void runner.start()
+            .catch((error) => {
+              console.warn('[pr-review] Agent 审查失败', error);
+            })
+            .finally(() => {
+              if (agentRuns.get(record.number) === runner) agentRuns.delete(record.number);
+            });
+          return toolText([
+            `已启动审查 Agent：PR #${record.number}`,
+            `范围：${paths === null ? `全部 ${(record.files ?? []).length} 个文件` : paths.join('、')}`,
+            '进度会显示在审查面板；完成后可在 review_get 查看覆盖率。',
+          ]);
+        },
+      },
+    ];
+  }
+
   /** Write review tools: they rewrite analyses, report or conclusion in place. */
   function writeToolDefinitions(numberProperty, textOutput) {
     return [
@@ -3837,6 +3909,7 @@ export function apply(ctx, config) {
     const definitions = [
       ...readOnlyToolDefinitions(numberProperty, textOutput),
       ...probeToolDefinitions(numberProperty, textOutput),
+      ...agentReviewToolDefinitions(numberProperty, textOutput),
       ...writeToolDefinitions(numberProperty, textOutput),
       ...actionToolDefinitions(numberProperty, textOutput),
     ];
