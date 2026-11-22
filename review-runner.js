@@ -130,7 +130,7 @@ function missingFilesOf(record, before) {
 const DANGEROUS_GLOBAL_TOOLS = [
   'bash', 'write', 'edit', 'apply_patch',
   'create_worktree', 'working_directory', 'load_workspace_dependencies', 'arch_map',
-  'review_publish', 'review_conclude', 'review_run_agent',
+  'review_publish', 'review_run_agent',
 ];
 
 /** Prompt clarification for the read-only agent: the global review-data section names
@@ -139,7 +139,7 @@ const DANGEROUS_GLOBAL_TOOLS = [
 export const READONLY_AGENT_PROMPT = [
   '你是通过 pr-review-readonly 预设运行的只读审查 Agent。',
   '可用的写回工具只有 review_update_analysis、review_update_report、review_update_conclusion、review_update_overview。',
-  '你的工具集里没有 review_publish、review_conclude、write、bash、create_worktree。',
+  '你的工具集里没有 review_publish、write、bash、create_worktree。',
   '不要建议或尝试发布评论、重新生成结论，也不要在最终答复里声称这些工具可用。',
 ].join('\n');
 

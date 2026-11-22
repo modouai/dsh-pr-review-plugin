@@ -79,7 +79,7 @@ ctx.agents.create(options: CreateAgentOptions): Promise<AgentHandle>
 - **现有 `review_*` 工具**
   - 读取：`review_get`、`review_list_files`、`review_get_file`、`review_get_diff`、`review_get_analysis`。
   - 写入：`review_update_analysis`、`review_update_report`、`review_update_conclusion`。
-  - 禁止：`review_publish`、`review_conclude`（直连 LLM 的旧入口）由 runner 拒绝；发布仍只能由用户在主对话触发。
+  - 禁止：`review_publish` 由 runner 拒绝；发布仍只能由用户在主对话触发。
 
 ### 4.2 Agent 创建
 
@@ -189,7 +189,7 @@ await agent.whenIdle();
 
 | 工具 | 用途 |
 |---|---|
-| `review_update_analysis` | 单文件 verdict/summary/logic/walkthrough/changes/issues；逐文件明细的 `baselineVerdicts` / `roundItem` 仅保留给旧版 findings 对比，不参与结论层复审计数 |
+| `review_update_analysis` | 单文件 verdict/summary/logic/walkthrough/changes/issues |
 | `review_update_report` | 总体 verdict/summary/risks/order/focus |
 | `review_update_conclusion` | 最终结论（blockers/suggestions/nextSteps）+ `previousVerdicts` 对上一轮结论项逐项判 fixed/still-open；Agent 写入时同时冻结本轮 findings 作为明细快照 |
 
@@ -197,7 +197,7 @@ await agent.whenIdle();
 
 - 任务消息要求所有 `review_*` 调用显式带 `number`；同时插件在创建 Agent 时建立 `agentSessionId → PR number` 绑定，`resolveToolReview` 优先使用绑定，**不**回退到“最新记录”。即使 Agent 漏传 `number`，也不会写到另一个 PR。
 - `review_update_conclusion` 允许 Agent 写入初始结论，标记 `source: 'model'`（Agent 也是模型调用）；人工编辑仍为 `source: 'human'`。
-- `review_publish` 与 `review_conclude`（旧直连 LLM 入口）在 runner 的 Agent 会话中被拒绝：工具检查调用方 session id 是否为当前 review run 的 Agent，若是则返回明确错误。
+- `review_publish` 在 runner 的 Agent 会话中被拒绝：工具检查调用方 session id 是否为当前 review run 的 Agent，若是则返回明确错误。旧的 `review_conclude` 工具已删除。
 - 删除 `refuted` 审计字段与相关 normalizer；直连 LLM 链路的 `unverified`/`raised`/`discarded` 一并移除（阶段 3 完成）。
 
 ### 5.3 面板组装
@@ -205,7 +205,7 @@ await agent.whenIdle();
 - 明细页：直接渲染 `record.explanations`（工具写入）。
 - 总览页：渲染 `record.report`；**不**自动拼一份摘要。Agent 未写 report → 本轮 incomplete 并列出缺失项，由 Agent 在 coverage follow-up 中重写；插件不替 Agent 生成结论。
 - 结论页：渲染 Agent 写入的 conclusion；缺失时显示 incomplete，不自动生成。
-- 复审对比：`conclusionDeltaOf` 用 `previousRound.items`（上一轮结论的 blockers+suggestions）与当前结论按 id/文本相似度匹配，并读取当前结论版本的 `previousVerdicts`；显式 fixed → 已修复，still-open 或仍匹配 → 仍未解决，无判定且未匹配 → 未判定，结论未生成 → 待分析。逐文件 findings 的 `findingsDeltaOf` 只在没有 `previousRound` 的旧记录上作为回退。
+- 复审对比：`conclusionDeltaOf` 用 `previousRound.items`（上一轮结论的 blockers+suggestions）与当前结论按 id/文本相似度匹配，并读取当前结论版本的 `previousVerdicts`；显式 fixed → 已修复，still-open 或仍匹配 → 仍未解决，无判定且未匹配 → 未判定，结论未生成 → 待分析。逐文件 findings 只作明细。
 - 开新轮时若旧轮缺 findings 快照（引入 Agent 路径前的轮次），从旧轮仍保留的逐文件分析回填；该快照仅用于明细。
 - 所有写回仍走现有 `revision` 冲突保护，runner 不需要绕过。
 
@@ -265,7 +265,7 @@ await agent.whenIdle();
   - 已全覆盖 → done，不额外 follow-up；
   - 缺少全局工具 mask → error（只读边界不可用时不运行）。
 - **预设**：断言程序化注册的定义：`id`/`order`/`plugins`、`tool-fs` 的 write/edit/applyPatch 为 false、无 bash；不要解析插件 bundle patch。
-- **工具**：现有 `review_*` 工具测试保留；新增 runner 会话拒绝 `review_publish`/`review_conclude` 的测试；`resolveToolReview` 优先使用 Agent→PR 绑定。
+- **工具**：现有 `review_*` 工具测试保留；新增 runner 会话拒绝 `review_publish` 的测试；`resolveToolReview` 优先使用 Agent→PR 绑定。
 - **组装**：无 report 时确定性摘要；缺 conclusion → incomplete。
 - **无真实模型调用**：测试不经过 `ctx.llm.stream`。
 - 回归：现有 provider/工具/UI 测试；删除直连 LLM 链路的测试。
@@ -277,7 +277,7 @@ await agent.whenIdle();
 1. **阶段 0（原型，不合并）**：创建 Agent + 只读预设 + 单文件 `review_update_analysis` 写回；验证工具可见、读边界、自动触发可创建 Agent。记录宿主版本与 API 实际形状。
 2. **阶段 1**：ReviewRunner + 预设 + 任务提示 + 覆盖率；手动「开始审查」接入；保留旧链路但不再默认使用。
 3. **阶段 2**：自动轮询/新 head 替换/并发/取消；UI 状态（running/incomplete/error）；面板实时刷新。
-4. **阶段 3**：删除 `runInvestigation`/`refuteFindings`/`evidence.js`/investigation prompts/confidence/verifier/refuter/相关 normalizer；删除 `refuted/unverified` 数据；配置改为 `reviewAgentPreset`/`reviewCoverageRetries`/`reviewAgentMaxTokens`；版本 0.5.0。
+4. **阶段 3（已完成）**：删除直连 LLM 的 report/explain/verify/conclude 链路、evidence/verifier/refuter、相关 prompts/normalizer/UI 动作；删除 `refuted/unverified/raised/discarded` 数据；配置只保留 `reviewAgentPreset`/`reviewCoverageRetries`/`reviewAgentMaxTokens`；版本 0.5.0。
 5. **阶段 4**：全量测试、README/设计文档、PR。
 
 ## 11. 风险与待验证

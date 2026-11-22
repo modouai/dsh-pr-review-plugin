@@ -12,9 +12,9 @@ AI-assisted pull request review for the DeepSeek Harness Web UI. The plugin watc
 
 - **Workspace aware**: each session's workspace `git origin` selects the repository and platform (GitHub; GitLab; Gitea / Forgejo / Codeberg; Gitee / GitCode / AtomGit; Codeup); the panel only shows pull requests from that repository, and switching workspaces switches reviews with it.
 - **Automatic rounds**: the plugin polls for open pull requests and starts a new review round whenever new commits land (`autoReview` can be turned off).
-- **Batch analysis**: every finished round analyzes all changed files in the background, one file at a time, so a round costs one model call per changed file (`autoAnalyze` can be turned off). With it off, a file is analyzed when you open it, or all at once with **Analyze all** in the file column.
+- **Per-file analysis**: the read-only Agent writes each file's analysis in the same round; `autoAnalyze` controls whether the task includes per-file analysis (on by default). With it off the Agent writes only the overall report and conclusion.
 - **Review panel**: a right-sidebar panel inside the session — overview / changed files / conclusion three-page navigation. The overview shows the conversation state (author replies with cross-round comparison), a changes summary, the single review findings list, and review completeness; click a file to enter the diff with per-file analysis; the conclusion page carries the final conclusion, publish composing, and published records. Columns are resizable.
-- **Final conclusion**: generated in the background with visible stages and cancel support; carries review coverage (X of Y files analyzed) and a version number, and flags itself for regeneration when outdated (automatic with `autoReconclude`). It is the only decision surface in the panel — the overview no longer shows a preliminary verdict.
+- **Final conclusion**: written by the read-only Agent through `review_update_conclusion`, with review coverage (X of Y files analyzed) and a version number. When a later report/analysis is newer, the panel marks the conclusion stale; start a new round to re-review. It is the only decision surface in the panel — the overview no longer shows a preliminary verdict.
 - **Version history**: every conclusion version is kept, and each review round gets its own tab, so older rounds and versions stay readable.
 - **Reviewer feedback loop**: replies left by the implementer after the previous review comment are parsed into fixed / rejected / acknowledged states, marked on individual findings, and compared across rounds (resolved vs. still open).
 - **Publishing**: check "include in publish" directly on conclusion-page items, and the comment preview regenerates live from the selection; the publish dialog only does the final confirmation (full text and conflict notices). Comments are appended (never overwritten), tagged with the reviewed commit, round, conclusion version, and coverage.
@@ -24,7 +24,7 @@ AI-assisted pull request review for the DeepSeek Harness Web UI. The plugin watc
 
 Read: `review_list_prs`, `review_get`, `review_get_report`, `review_list_files`, `review_get_analysis`, `review_get_diff`, `review_get_file`, `review_list_rounds`, `review_get_round`, `review_get_comments`
 
-Write: `review_update_analysis`, `review_update_report`, `review_update_overview`, `review_update_conclusion` (optimistic-lock guarded), plus the panel actions `review_conclude`, `review_publish`, `review_get_links`.
+Write: `review_update_analysis`, `review_update_report`, `review_update_overview`, `review_update_conclusion` (optimistic-lock guarded), plus the panel action `review_publish` and `review_get_links`.
 
 ## Requirements
 
@@ -105,10 +105,6 @@ The file is a top-level YAML array. Keep one entry for this row; `dsh plugin add
     pollSeconds: 60
     autoReview: true
     autoAnalyze: true
-    autoReconclude: false
-    evidenceVerify: true
-    evidenceMaxFiles: 6
-    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''
@@ -151,9 +147,7 @@ A workspace that is not a git repository activates no repository: the panel show
 |---|---|---|---|
 | `pollSeconds` | number ≥ 15 | `60` | How often the plugin polls for open pull requests. It also bounds how quickly new commits are noticed; the minimum is 15 seconds. |
 | `autoReview` | boolean | `true` | Start a round automatically when a pull request first appears or its head SHA changes. Set `false` to review only when you click **Review now**. A failed round is retried after 5 minutes. |
-| `autoAnalyze` | boolean | `true` | Analyze every changed file of a finished round in the background, one model call per file, so a round costs one call per changed file (100 files, 100 calls). Set `false` to analyze a file only when you open it, or on demand with **Analyze all**. The automatic pass does not retry failed files; **Analyze all** does, costing about one call per unfinished or failed file. Starting a new round cancels a batch still running from the previous one. A failed file shows its error in the file panel and stays out of the analyzed coverage until it succeeds. |
-| `autoReconclude` | boolean | `false` | Regenerate the conclusion when the report or per-file analysis changes after it. Runs at most once every 5 minutes, never during a running round, and only while the conclusion is stale. |
-| `evidenceVerify` | boolean | `true` | Two-pass review: the first pass only proposes concerns and the evidence they need, the host fetches callers, definitions and tests, and a verifier scores each concern against that evidence (80+ becomes a finding, 25-79 becomes an unverified note, below 25 is dropped). No concerns still costs one call; with concerns each file costs one extra verifier call. Set `false` to fall back to the single pass, where concerns become findings directly. |
+| `autoAnalyze` | boolean | `true` | Whether the Agent task includes per-file analysis. When false the Agent writes only the overall report and conclusion. |
 | `commentLanguage` | `zh`, `en` | `zh` | Language of the published comment (labels, headings, appendix, footer) and the language the built-in prompts ask the model to write in: per-file analysis, conclusion, discussion answers and feedback parsing. It defaults to `zh`, so an English repository needs `commentLanguage: en` explicitly. The setting applies when text is generated; content generated earlier is not rewritten. |
 
 ### Model and limits
@@ -161,10 +155,9 @@ A workspace that is not a git repository activates no repository: the panel show
 | Key | Accepted values | Default | Effect |
 |---|---|---|---|
 | `provider` / `model` | strings, or empty | empty | Both must be set to take effect. Otherwise the plugin uses the current Harness default model. Setting only one falls back to the default. |
-| `reasoningEffort` | `off`, `low`, `high`, `max` | `off` | Reasoning effort for report, per-file, and conclusion calls. If the selected model rejects the level, the plugin retries the call without it. |
-| `evidenceMaxFiles` | number, 1-20 | `6` | Most files the verifier may read; overflow is reported as unverified. |
-| `evidenceMaxChars` | number ≥ 500 | `6000` | Character cap per evidence file, truncated at line boundaries. |
-| `maxDiffCharsPerFile` | number ≥ 1000 | `14000` | Maximum diff characters per file sent to the model. The report call uses at most 2,200 characters per file and 120,000 characters of excerpts in total. |
+| `reasoningEffort` | `off`, `low`, `high`, `max` | `off` | Reasoning effort for the review Agent session. If the selected model rejects the level, the plugin retries without it. |
+| `reviewCoverageRetries` | number, 0-5 | `2` | Follow-ups used to close missing file analyses or report/conclusion gaps. |
+| `maxDiffCharsPerFile` | number ≥ 1000 | `14000` | Maximum diff characters returned by `review_get_diff` per file. |
 
 ### Token resolution
 
@@ -213,10 +206,6 @@ export CODEUP_TOKEN=...    # Codeup (YUNXIAO_TOKEN works too)
     pollSeconds: 60
     autoReview: true
     autoAnalyze: true
-    autoReconclude: false
-    evidenceVerify: true
-    evidenceMaxFiles: 6
-    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''
@@ -237,7 +226,6 @@ export CODEUP_TOKEN=...    # Codeup (YUNXIAO_TOKEN works too)
     pollSeconds: 60
     autoReview: true
     autoAnalyze: true
-    autoReconclude: false
     commentLanguage: en
     provider: ''
     model: ''
@@ -258,7 +246,6 @@ export CODEUP_TOKEN=...    # Codeup (YUNXIAO_TOKEN works too)
     pollSeconds: 60
     autoReview: true
     autoAnalyze: true
-    autoReconclude: false
     commentLanguage: en
     provider: ''
     model: ''
@@ -283,10 +270,6 @@ This example targets `gitlab.com`; a self-hosted GitLab origin is not detected a
     pollSeconds: 60
     autoReview: true
     autoAnalyze: true
-    autoReconclude: false
-    evidenceVerify: true
-    evidenceMaxFiles: 6
-    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''
@@ -312,7 +295,6 @@ With the `org/group/repo` form, a non-empty `organizationId` overrides the first
 
 ```yaml
     reasoningEffort: high
-    autoReconclude: true
     maxDiffCharsPerFile: 24000
 ```
 
@@ -322,9 +304,9 @@ The last two snippets are partial on purpose: unlisted keys keep their defaults.
 
 1. In a session, click the **Review PRs** button in the session header (or the card under the composer in an empty session).
 2. Pick a pull request at the top; with `autoReview` on, the first review starts in the background (otherwise click **Review now**).
-3. On the overview page, read the changes summary, review findings, and completeness; click a file in the left column to enter the detail page with its diff and per-file analysis; with `autoAnalyze` on, files are analyzed in the background as the batch progresses, so a file you open early may still be waiting; with it off, opening a file starts its analysis. Click a hunk for the per-segment walkthrough; switch to the full file when needed.
+3. On the overview page, read the changes summary, review findings, and completeness; click a file in the left column to enter the detail page with its diff and the Agent's per-file analysis; `autoAnalyze` off means the Agent only wrote the report and conclusion. Click a hunk for the per-segment walkthrough; switch to the full file when needed.
 4. Discuss in the main conversation — for example "risk 1 doesn't hold" or "turn suggestion 2 into a blocker" — and the review data updates directly.
-5. Use the "Conclusion" entry in the left column to open the conclusion page, then click **Conclude review**; when generation finishes, the panel switches to the conclusion page automatically only while you are on the overview page — reading the detail page is not interrupted. If the report changes afterwards, the panel offers **Regenerate conclusion**.
+5. Use the "Conclusion" entry in the left column to open the conclusion page; the read-only Agent writes the conclusion through `review_update_conclusion`. If the report changes afterwards, the conclusion is marked stale — start a new round to re-review.
 6. Check "include in publish" on the conclusion items, expand the comment preview to confirm the Markdown, then click **Publish**. Each round appends a new comment; history is never overwritten.
 7. Use the round tabs at the top to revisit earlier rounds and conclusion versions (read-only).
 8. After the implementer replies under the previous review comment, click **Check developer feedback** (the panel also checks automatically every 2 minutes) to see per-finding states and the resolved-vs-still-open comparison. New commits start the next round.

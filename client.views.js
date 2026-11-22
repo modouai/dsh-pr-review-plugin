@@ -23,7 +23,6 @@ window.__ModuleLoader__.load({
       } = components;
       const {
         ConclusionBlock, FeedbackBlock, PublishedBlock, conclusionMetaLine, overviewFooter,
-        ConcludingProgress,
       } = conclusion;
 
       /**
@@ -56,7 +55,6 @@ window.__ModuleLoader__.load({
         const filesTone = filesBadgeTone(analyzing, failedFiles, analyzedFiles, files.length);
         const processing = phase !== null && phase !== undefined
           && (phase.phase === 'reviewing' || phase.phase === 'analyzing');
-        const concluding = phase !== null && phase !== undefined && phase.phase === 'concluding';
         return h(
           'aside',
           { className: 'prr-files', style },
@@ -89,15 +87,6 @@ window.__ModuleLoader__.load({
               analyzing !== null ? h('span', { className: 'prr-spinner-sm', 'aria-hidden': 'true' }) : null,
               countLabel,
             ),
-            props.manual === true && analyzing === null && files.length > 0
-              ? h(Btn, {
-                  small: true,
-                  label: props.analyzeAllBusy === true ? t('explaining') : t('analyzeAll'),
-                  title: t('analyzeAllHint'),
-                  disabled: props.analyzeAllBusy === true,
-                  onClick: () => props.onAnalyzeAll(),
-                })
-              : null,
           ),
           h(
             'div',
@@ -130,7 +119,6 @@ window.__ModuleLoader__.load({
               h(
                 'span',
                 { className: 'prr-navrow-badge', 'data-tone': conclusionBadgeTone(phase) },
-                concluding === true ? h('span', { className: 'prr-spinner-sm', 'aria-hidden': 'true' }) : null,
                 conclusionBadgeText(phase, t),
               ),
             ),
@@ -142,7 +130,7 @@ window.__ModuleLoader__.load({
       function PhaseBar(props) {
         const { phase, round, t } = props;
         if (phase === null || phase === undefined) return null;
-        const spinning = phase.phase === 'reviewing' || phase.phase === 'analyzing' || phase.phase === 'concluding';
+        const spinning = phase.phase === 'reviewing' || phase.phase === 'analyzing';
         return h(
           'div',
           { className: 'prr-phasebar' },
@@ -435,42 +423,6 @@ window.__ModuleLoader__.load({
         );
       }
 
-      /**
-       * Points the verifier could not confirm: they get their own block so they are never
-       * mistaken for findings. Malformed entries are dropped instead of leaking "undefined".
-       */
-      function UnverifiedBlock(props) {
-        const { t } = props;
-        const list = (Array.isArray(props.items) ? props.items : []).filter(
-          (item) => item !== null && typeof item === 'object' && typeof item.point === 'string' && item.point.trim() !== '',
-        );
-        if (list.length === 0) return null;
-        return h(
-          'div',
-          null,
-          h('div', { className: 'prr-h2' }, t('unverified')),
-          h(
-            'div',
-            { className: 'prr-card prr-unverified' },
-            h('div', { className: 'prr-subtle' }, t('unverifiedHint')),
-            list.map((item, index) =>
-              h(
-                'div',
-                { className: 'prr-rowitem', key: index },
-                h(
-                  'div',
-                  { className: 'prr-rowmain' },
-                  h('div', { className: 'prr-text' }, item.point),
-                  typeof item.missing === 'string' && item.missing !== ''
-                    ? h('div', { className: 'prr-subtle' }, `${t('unverifiedMissing')}${item.missing}`)
-                    : null,
-                ),
-              ),
-            ),
-          ),
-        );
-      }
-
       /** Per-file review detail: logic, walkthrough, changes, and the one findings list. */
       function FileDetailPanel(props) {
         const { t, filePath, explanation } = props;
@@ -482,7 +434,6 @@ window.__ModuleLoader__.load({
             'div',
             null,
             h('div', { className: 'prr-banner', style: { margin: '0 0 10px' } }, explanation.error ?? t('statusError')),
-            h(Btn, { label: t('retry'), onClick: () => props.onExplain(true) }),
           );
         }
         if (explanation.status !== 'done' || explanation.explanation === null) {
@@ -525,7 +476,6 @@ window.__ModuleLoader__.load({
                 ),
               ),
             );
-        const unverified = h(UnverifiedBlock, { t, items: detail.unverified });
         return h(
           'div',
           null,
@@ -541,22 +491,9 @@ window.__ModuleLoader__.load({
               : null,
             h('span', { className: 'prr-meta2 prr-filetag' }, filePath),
           ),
-          h(
-            'div',
-            { style: { display: 'flex', gap: '6px', marginBottom: '10px' } },
-            h(Btn, {
-              // Busy belongs to the file it was requested for: switching to another file
-              // mid-analysis must keep that file's button clickable and honestly labeled.
-              label: props.explainBusyPath === filePath ? t('explaining') : t('reExplain'),
-              small: true,
-              disabled: props.explainBusyPath === filePath,
-              onClick: () => props.onExplain(true),
-            }),
-          ),
           h('div', { className: 'prr-card prr-text' }, detail.summary),
           section(t('changes'), detail.changes),
           issues,
-          unverified,
         );
       }
 
@@ -654,7 +591,7 @@ window.__ModuleLoader__.load({
       /**
        * Overview page: the fix record first (round >= 2), then the change digest, the single
        * findings list and the completeness line. Only verified facts and pending actions live
-       * here — initial-screen risks, unverified notes and the report verdict are pipeline
+       * here — initial-screen risks and the report verdict are pipeline
        * internals and never render; the only decision surface is the conclusion page.
        */
       function OverviewPage(props) {
@@ -679,7 +616,7 @@ window.__ModuleLoader__.load({
         // Hooks run unconditionally and BEFORE any early return: the dock clears wherever this
         // page has nothing to act on (`overviewFooter` answers `{ actions: null, notice: null }`
         // for pending and historical rounds) — and the hook count never varies by path.
-        // The footer mounts only in the actionable phases (ready / concluding): once a
+        // The footer is rendered above the composer by whichever surface owns it.
         // conclusion exists its actions belong to the conclusion page, so the dock clears
         // here instead of re-offering a job this page cannot supervise.
         const footer = overviewFooterVisible(phase)
@@ -961,7 +898,6 @@ window.__ModuleLoader__.load({
         }
 
         if (selectedVersion === null || selectedVersion === undefined) {
-          const concluding = props.concluding ?? null;
           const coverage = review.coverage ?? null;
           return h(
             'div',
@@ -969,9 +905,7 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'prr-card' },
-              concluding !== null
-                ? h(ConcludingProgress, { concluding, t, cancelBusy: props.cancelBusy, onCancel: props.onCancelConclude })
-                : h('div', { className: 'prr-zero' }, t('conclusionPendingCard')),
+              h('div', { className: 'prr-zero' }, t('conclusionPendingCard')),
             ),
             h(
               'div',
@@ -980,14 +914,6 @@ window.__ModuleLoader__.load({
                 ? fill(t('metaCoverage'), { analyzed: coverage.analyzed ?? 0, total: coverage.total ?? 0 })
                 : fill(t('metaCoverage'), { analyzed: props.explainedCount ?? 0, total: props.totalFiles ?? 0 }),
             ),
-            concluding === null
-              ? h(Btn, {
-                  label: t('conclude'),
-                  primary: true,
-                  disabled: props.concludeBusy === true || props.reviewBusy === true,
-                  onClick: props.onConclude,
-                })
-              : null,
           );
         }
 
@@ -1023,9 +949,6 @@ window.__ModuleLoader__.load({
             t,
           }),
           h(PublishedBlock, { entries: publishedEntries, t }),
-          review.concludeError === null || review.concludeError === undefined || review.concludeError === ''
-            ? null
-            : h('div', { className: 'prr-conclude-note' }, String(review.concludeError)),
         );
       }
 

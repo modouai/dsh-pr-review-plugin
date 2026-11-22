@@ -29,33 +29,20 @@ import { parseDiff } from './diff.js';
 import {
   buildChatPrompt,
   buildCommentMarkdown,
-  buildConcludePrompt,
   buildFeedbackPrompt,
-  calibrateVerdict,
   commentItems,
   compareComments,
   conclusionCoverage,
   ensureConclusionIds,
   parseChatReply,
   parseFeedbackReply,
-  buildExplainPrompt,
-  buildExplainVerifyPrompt,
-  buildReportPrompt,
-  buildReportVerifyPrompt,
   callModel,
-  extractJson,
   findingsOf,
   itemId,
-  mergeConclusion,
-  normalizeConcerns,
   normalizeConclusion,
-  normalizeEvidenceNeeds,
   normalizeExplanation,
   normalizePreviousVerdicts,
-  normalizeReport,
-  normalizeReportDraft,
   normalizeVerdict,
-  partitionVerdicts,
   resolveSelection,
 } from './llm.js';
 import { loadPrompt } from './prompts.js';
@@ -93,19 +80,10 @@ const DEFAULTS = {
   reasoningEffort: 'off',
   maxDiffCharsPerFile: 14000,
   commentLanguage: 'zh',
-  autoReconclude: false,
-  // Two-pass review: triage proposes concerns, the host collects evidence, a verifier scores
-  // them. On by default (quality first); turn it off to spend one call per file as before.
-  evidenceVerify: true,
-  evidenceMaxFiles: 6,
-  evidenceMaxChars: 6000,
   // Agent-driven review: the plugin creates a read-only agent session per round.
   reviewAgentPreset: 'pr-review-readonly',
   reviewCoverageRetries: 2,
   reviewAgentMaxTokens: 8000,
-  // 'agent' runs the whole review through a dedicated read-only agent session.
-  // 'legacy' keeps the direct-LLM pipeline during the migration.
-  reviewEngine: 'agent',
 };
 
 /** GUI launches can have a minimal PATH; try the common absolute locations too. */
@@ -138,14 +116,9 @@ export const Config = Schema.object({
   reasoningEffort: Schema.union(['off', 'low', 'high', 'max']).default(DEFAULTS.reasoningEffort),
   maxDiffCharsPerFile: Schema.number().min(1000).default(DEFAULTS.maxDiffCharsPerFile),
   commentLanguage: Schema.union(['zh', 'en']).default(DEFAULTS.commentLanguage),
-  autoReconclude: Schema.boolean().default(DEFAULTS.autoReconclude),
-  evidenceVerify: Schema.boolean().default(DEFAULTS.evidenceVerify),
-  evidenceMaxFiles: Schema.number().min(1).max(20).default(DEFAULTS.evidenceMaxFiles),
-  evidenceMaxChars: Schema.number().min(500).default(DEFAULTS.evidenceMaxChars),
   reviewAgentPreset: Schema.string().default(DEFAULTS.reviewAgentPreset),
   reviewCoverageRetries: Schema.number().min(0).max(5).default(DEFAULTS.reviewCoverageRetries),
   reviewAgentMaxTokens: Schema.number().min(1000).default(DEFAULTS.reviewAgentMaxTokens),
-  reviewEngine: Schema.union(['agent', 'legacy']).default(DEFAULTS.reviewEngine),
 });
 
 /** Stable tool failure codes: the tool registry keeps `error.code` for HarnessError only. */
@@ -247,14 +220,6 @@ function serializeReview(record) {
     pull: record.pull,
     files: record.files,
     filesTruncated: record.filesTruncated === true,
-    analyzing: record.analyzing === null || record.analyzing === undefined
-      ? null
-      : {
-          total: record.analyzing.total,
-          done: record.analyzing.done,
-          failed: record.analyzing.failed,
-          current: record.analyzing.current,
-        },
     report: record.report,
     explanations: [...record.explanations.entries()].map(([filePath, entry]) => ({
       file: filePath,
@@ -263,7 +228,6 @@ function serializeReview(record) {
       explanation: entry.explanation,
       chat: entry.chat,
       updatedAt: entry.updatedAt ?? 0,
-      baselineVerdicts: Array.isArray(entry.baselineVerdicts) ? entry.baselineVerdicts : null,
     })),
     pullChat: record.pullChat,
     reportUpdatedAt: record.reportUpdatedAt ?? 0,
@@ -272,15 +236,11 @@ function serializeReview(record) {
     roundHistory: Array.isArray(record.roundHistory) ? record.roundHistory : [],
     humanItemIds: Array.isArray(record.humanItemIds) ? record.humanItemIds : [],
     coverage: record.coverage ?? null,
-    concluding: record.concluding === null || record.concluding === undefined
-      ? null
-      : { stage: record.concluding.stage, startedAt: record.concluding.startedAt },
-    concludeError: record.concludeError ?? null,
     publishing: record.publishing === true,
     published: record.published ?? [],
     publishedItems: record.publishedItems ?? [],
     feedback: record.feedback ?? null,
-    delta: conclusionDeltaOf(record) ?? findingsDeltaOf(record),
+    delta: conclusionDeltaOf(record),
     conclusionAt: record.conclusionAt ?? 0,
     conclusion: record.conclusion,
     comment: record.comment ?? null,
@@ -290,58 +250,10 @@ function serializeReview(record) {
 }
 
 /**
- * Freeze the round's finished per-file findings as the next round's comparison baseline
- * (review-delta spec v7): flattened through findingsOf and globally numbered, frozen in
- * full — per-file ordering is block first, then line ascending, original order otherwise.
- * Truncation happens only when the prompt is built (10 per file, declared there), so a
- * frozen finding never silently disappears from the comparison.
- */
-function findingsSnapshotOf(record) {
-  const byFile = [];
-  for (const [filePath, entry] of record.explanations) {
-    if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-    const group = findingsOf(entry.explanation).map((finding) => ({ ...finding, file: filePath }));
-    group.sort((left, right) => (left.severity === right.severity ? 0 : left.severity === 'block' ? -1 : 1) || left.line - right.line);
-    // 全量冻结，不丢条目：prompt 下发时再按文件截断（并声明截断），未下发的条目在
-    // 对比里落「未判定」，绝不静默消失。
-    byFile.push(...group.map((finding) => ({
-      index: 0,
-      file: finding.file,
-      severity: finding.severity,
-      point: finding.point,
-      line: finding.line,
-      suggestion: finding.suggestion,
-    })));
-  }
-  return byFile.map((finding, index) => ({ ...finding, index: index + 1 }));
-}
-
-/**
- * The baseline round for the re-review comparison: the newest earlier round that
- * produced a conclusion (published or not) and thus froze a findings snapshot.
- * Rounds without a conclusion are skipped — their analysis never completed the
- * step that makes its findings a trustworthy baseline.
- */
-function baselineRoundOf(record) {
-  const history = roundHistoryOf(record);
-  const current = currentRoundEntry(record);
-  for (let i = history.length - 1; i >= 0; i -= 1) {
-    const entry = history[i];
-    if (entry === current) continue;
-    // 基准 = 最近一个「生成过结论」的轮次（无论快照是否为空）：空快照意味着上一轮干净，
-    // findingsDeltaOf 会因无条目而返回 null——绝不再向前回溯到更早的轮次。
-    if ((entry.conclusions?.length ?? 0) > 0) {
-      return entry;
-    }
-  }
-  return null;
-}
-
-/**
  * Conclusion-level re-review comparison: the previous round's conclusion items
  * (blockers + suggestions) versus this round's conclusion. This is the count users see in
  * the panel; per-file findings stay as detail. An item still present (by id or similar text)
- * is still open; an item omitted from the new conclusion is treated as resolved.
+ * is still open; only an explicit `fixed` verdict resolves it.
  */
 function conclusionDeltaOf(record) {
   const previous = record.previousRound;
@@ -389,84 +301,6 @@ function conclusionDeltaOf(record) {
   }
   return { baselineRound: previous.round, resolved, stillOpen, undetermined, pending: [] };
 }
-
-/**
- * The re-review comparison over the audit workspace (review-delta spec v7): the baseline
- * round's frozen findings versus this round's re-judgement. Every baseline finding gets a
- * status from the *persisted* baselineVerdicts the analysis wrote: resolved only when the
- * model explicitly judged it fixed (the single source of「已修复」), still-open when it
- * carried it over, undetermined when the model never judged it (missed or truncated),
- * pending while its file has not been re-analyzed. Reading the persisted verdicts (not
- * the current issues) makes later issue rewrites — chat findingOps, review_update_analysis,
- * clearFindings — unable to manufacture a fake resolved state.
- * Derived on read, never persisted; it never touches the conclusion layer (H1).
- */
-function findingsDeltaOf(record) {
-  const baseline = baselineRoundOf(record);
-  if (baseline === null || !Array.isArray(baseline.findings) || baseline.findings.length === 0) return null;
-  const entries = record.explanations instanceof Map
-    ? record.explanations
-    : new Map((Array.isArray(record.explanations) ? record.explanations : []).map((entry) => [entry.file, entry]));
-  const analyzed = (filePath) => {
-    const entry = entries.get(filePath);
-    return entry !== undefined && entry.status === 'done'
-      && entry.explanation !== null && entry.explanation !== undefined;
-  };
-  // Claims: baseline index → this round's carry-over entry (for the「仍未解决」row body —
-  // the model's updated wording plus its suggestion). Display only: the status itself
-  // comes from the persisted verdicts below.
-  const claimOf = new Map();
-  for (const [filePath, entry] of entries) {
-    if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-    for (const finding of findingsOf(entry.explanation)) {
-      if (finding.roundItem === undefined) continue;
-      const previous = claimOf.get(finding.roundItem);
-      const updatedAt = entry.updatedAt ?? 0;
-      if (previous === undefined || updatedAt >= previous.updatedAt) {
-        claimOf.set(finding.roundItem, { finding: { ...finding, file: filePath }, fromFile: filePath, updatedAt });
-      }
-    }
-  }
-  const resolved = [];
-  const stillOpen = [];
-  const undetermined = [];
-  const pending = [];
-  for (const finding of baseline.findings) {
-    const entry = entries.get(finding.file);
-    const fileAnalyzed = analyzed(finding.file);
-    const verdicts = entry !== undefined && Array.isArray(entry.baselineVerdicts) ? entry.baselineVerdicts : null;
-    if (fileAnalyzed) {
-      // 已完成分析：状态只认持久化的 baselineVerdicts——没有判定（旧缓存、工具新建
-      // 的 entry、零判定折叠、漏判、截断）一律「未判定」，绝不因「无认领」判已修复。
-      const verdict = verdicts === null ? undefined : verdicts.find((item) => item.index === finding.index);
-      if (verdict === undefined) {
-        undetermined.push(finding);
-        continue;
-      }
-      if (verdict.status === 'fixed') {
-        resolved.push(finding);
-        continue;
-      }
-      stillOpen.push({ previous: finding, current: claimOf.get(finding.index)?.finding });
-      continue;
-    }
-    // 归属文件本轮未分析：跨文件认领（重命名场景）算「仍未解决」；否则保持待分析。
-    const claim = claimOf.get(finding.index);
-    if (claim !== undefined && claim.fromFile !== finding.file) {
-      stillOpen.push({ previous: finding, current: claim.finding });
-    } else {
-      pending.push(finding);
-    }
-  }
-  return {
-    baselineRound: baseline.round,
-    resolved,
-    stillOpen,
-    undetermined,
-    pending,
-  };
-}
-
 /** A quick status row for the pull list; the final conclusion wins over the initial report. */
 function reviewSummary(record) {
   if (record === undefined) return null;
@@ -648,7 +482,6 @@ function makeRoundEntry(round, headSha, startedAt) {
     startedAt: startedAt ?? Date.now(),
     finishedAt: 0,
     conclusions: [],
-    findings: null,
     feedback: null,
     publishedIds: [],
   };
@@ -755,7 +588,6 @@ function sanitizeRoundEntry(entry, index) {
     finishedAt: Number.isFinite(entry?.finishedAt) ? entry.finishedAt : 0,
     conclusions,
     feedback: entry?.feedback ?? null,
-    findings: Array.isArray(entry?.findings) && entry.findings.length > 0 ? entry.findings : null,
     publishedIds: Array.isArray(entry?.publishedIds) ? entry.publishedIds.filter((id) => typeof id === 'number') : [],
   };
 }
@@ -882,41 +714,6 @@ export function apply(ctx, config) {
     const version = latestConclusionVersionOf(record);
     const createdAt = version === null ? 0 : (version.createdAt ?? 0);
     return createdAt < latestContextAt(record);
-  }
-
-  /** Stop a running conclusion job without letting it record a cancellation error. */
-  function abortConclude(record) {
-    const abort = record.concludingAbort;
-    record.concludingAbort = null;
-    record.concluding = null;
-    if (abort !== null && abort !== undefined) abort.abort();
-  }
-
-  /**
-   * Stop a running analysis batch and invalidate every explain still in flight: a provider
-   * may ignore the abort, so the epoch bump — not the abort alone — is what keeps a late
-   * answer from being written into a record that was cleared, replaced or pruned.
-   */
-  function abortAnalysis(record) {
-    if (record === undefined || record === null) return;
-    const job = record.analyzing;
-    record.analyzing = null;
-    record.analysisEpoch = (record.analysisEpoch ?? 0) + 1;
-    if (job !== null && job !== undefined && job.abort !== undefined) job.abort.abort();
-  }
-
-  /** Background auto-regeneration (opt-in): only when stale, idle and rate-limited. */
-  function maybeAutoConclude(record) {
-    if (settings.autoReconclude !== true) return false;
-    if (record === undefined || record === null) return false;
-    if (record.concluding !== null && record.concluding !== undefined) return false;
-    if (record.status === 'reviewing') return false;
-    if (record.report === null || record.report === undefined) return false;
-    if (!isStale(record)) return false;
-    const now = Date.now();
-    if (now - (record.lastAutoConcludeAt ?? 0) < 300_000) return false;
-    record.lastAutoConcludeAt = now;
-    return startConclude(record).ok === true;
   }
 
   /** Map an origin host to the platform whose API it speaks. */
@@ -1046,7 +843,6 @@ export function apply(ctx, config) {
           explanation: entry.explanation,
           chat: entry.chat,
           updatedAt: entry.updatedAt,
-          baselineVerdicts: Array.isArray(entry.baselineVerdicts) ? entry.baselineVerdicts : null,
         })),
         pullChat: record.pullChat,
         reportUpdatedAt: record.reportUpdatedAt ?? 0,
@@ -1055,7 +851,6 @@ export function apply(ctx, config) {
         roundHistory: record.roundHistory ?? [],
         humanItemIds: record.humanItemIds ?? [],
         coverage: record.coverage ?? null,
-        concludeError: record.concludeError ?? null,
         published: record.published ?? [],
         publishedItems: record.publishedItems ?? [],
         feedback: record.feedback ?? null,
@@ -1150,16 +945,6 @@ export function apply(ctx, config) {
           : normalizeExplanation(entry.explanation),
         chat: Array.isArray(entry.chat) ? entry.chat : [],
         updatedAt: entry.updatedAt ?? 0,
-        // The persisted per-item verdicts drive the re-review comparison; a legacy
-        // cache without them lands every baseline finding in「未判定」(undetermined) —
-        // conservative: no data never means resolved.
-        baselineVerdicts: Array.isArray(entry.baselineVerdicts)
-          ? entry.baselineVerdicts
-            .filter((item) => item !== null && typeof item === 'object'
-              && Number.isInteger(item.index) && item.index >= 1
-              && (item.status === 'fixed' || item.status === 'still-open'))
-            .map((item) => ({ ...item, status: item.status }))
-          : null,
       });
     }
     const number = Number(saved.number ?? key);
@@ -1199,13 +984,7 @@ export function apply(ctx, config) {
         : [],
       coverage: saved.coverage ?? null,
       roundHistory: [],
-      concluding: null,
-      concludingAbort: null,
-      analyzing: null,
-      analysisEpoch: 0,
       publishing: false,
-      concludeError: null,
-      lastAutoConcludeAt: 0,
       diffFiles: undefined,
       revision: Number.isInteger(saved.revision) && saved.revision >= 0 ? saved.revision : 0,
       audit: Array.isArray(saved.audit) ? saved.audit.filter((item) => item !== null && typeof item === 'object') : [],
@@ -1283,10 +1062,6 @@ export function apply(ctx, config) {
       state.saveTimer = null;
     }
     await saveNow();
-    for (const record of state.reviews.values()) {
-      abortConclude(record);
-      abortAnalysis(record);
-    }
     provider = nextProvider;
     cachePath = cacheFile(provider);
     state.repoKey = key;
@@ -1365,233 +1140,6 @@ export function apply(ctx, config) {
     return result;
   }
 
-  // ---------- evidence for the verifier ----------
-
-  /** Run one git command in the workspace; evidence lookup only, so failures read as null. */
-  function runGit(cwd, args) {
-    return new Promise((resolve) => {
-      const attempt = (at) => {
-        if (at >= GIT_CANDIDATES.length) {
-          resolve(null);
-          return;
-        }
-        execFile(GIT_CANDIDATES[at], ['-C', cwd, ...args], { timeout: 5000, maxBuffer: 512 * 1024 }, (error, stdout) => {
-          if (error !== null && error !== undefined && error.code === 'ENOENT') {
-            attempt(at + 1);
-            return;
-          }
-          resolve(error === null ? String(stdout) : null);
-        });
-      };
-      attempt(0);
-    });
-  }
-
-  /**
-   * Workspace directory whose origin is the repository under review, or '' when unusable.
-   * The directory may be on another branch, so it only ever supplies candidate paths.
-   */
-  function evidenceWorkspace() {
-    const cwd = state.workspaceCwd;
-    if (typeof cwd !== 'string' || cwd === '') return '';
-    const known = repoByCwd.get(cwd);
-    if (known === undefined || known.supported !== true) return '';
-    return known.repo === provider.repo && known.platform === provider.platform ? cwd : '';
-  }
-
-  /** Candidate paths: files in the workspace that contain the symbol. */
-  async function grepWorkspaceSymbol(cwd, symbol, limit) {
-    // --full-name keeps paths repo-root-relative even when the workspace is a subdirectory.
-    const stdout = await runGit(cwd, ['grep', '--full-name', '-l', '-F', '-e', symbol]);
-    if (stdout === null) return [];
-    return stdout
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line !== '')
-      .slice(0, limit);
-  }
-
-  /** Fallback candidates: changed files whose diff mentions the symbol. */
-  function diffSymbolCandidates(record, symbol) {
-    const paths = [];
-    for (const [filePath, diff] of record.diffFiles ?? new Map()) {
-      if (typeof diff?.text === 'string' && diff.text.includes(symbol)) paths.push(filePath);
-    }
-    return paths.slice(0, 3);
-  }
-
-  function describeNeed(need) {
-    const target = need.path !== '' ? need.path : (need.symbol !== '' ? need.symbol : '?');
-    return `${need.kind} ${target}${need.reason === '' ? '' : `（${need.reason}）`}`;
-  }
-
-  /**
-   * Around the first symbol occurrence when there is one, else the file's head. The note
-   * states which lines were shown: a verifier that sees only part of a file must know it,
-   * or it will report "this file lacks X" from a truncated view.
-   */
-  function sliceEvidence(content, symbol, maxChars) {
-    const text = String(content ?? '');
-    const lines = text.split('\n');
-    const total = lines.length;
-    let start = 0;
-    let end = total;
-    let note = '';
-    if (symbol !== '') {
-      const at = text.indexOf(symbol);
-      if (at !== -1) {
-        const lineIndex = text.slice(0, at).split('\n').length - 1;
-        start = Math.max(0, lineIndex - 40);
-        end = Math.min(total, lineIndex + 41);
-        note = `第 ${start + 1}–${end} 行（共 ${total} 行）`;
-      } else {
-        end = Math.min(total, 200);
-        note = `未找到 ${symbol}，显示前 ${end} 行（共 ${total} 行）`;
-      }
-    } else if (total > 200) {
-      end = 200;
-      note = `前 ${end} 行（共 ${total} 行）`;
-    }
-    let chunk = lines.slice(start, end).join('\n');
-    if (chunk.length > maxChars) {
-      chunk = `${chunk.slice(0, maxChars)}\n…（已按字符上限截断）`;
-      note = note === '' ? '内容超过字符上限，已截断' : `${note}，且超过字符上限已截断`;
-    }
-    return { text: chunk, note };
-  }
-
-  /** A fence longer than any backtick run inside the evidence, so Markdown cannot close it. */
-  function fenceFor(text) {
-    const runs = String(text).match(/`{3,}/g);
-    const longest = runs === null ? 0 : Math.max(...runs.map((run) => run.length));
-    return '`'.repeat(Math.max(3, longest + 1));
-  }
-
-  function evidenceBlock(index, need, filePath, content, maxChars) {
-    const meta = [need.kind, need.symbol === '' ? '' : `symbol=${need.symbol}`].filter((item) => item !== '').join(' · ');
-    const sliced = sliceEvidence(content, need.symbol, maxChars);
-    const scope = sliced.note === '' ? '' : `；${sliced.note}`;
-    const fence = fenceFor(sliced.text);
-    return `## 证据 ${index}：${filePath}（${meta}${scope}）\n\n${fence}text\n${sliced.text}\n${fence}`;
-  }
-
-  /**
-   * Fetch what the triage pass asked for. Local files only nominate candidates; the bytes in
-   * the prompt always come from the PR head, so a stale worktree can never turn into evidence.
-   */
-  async function collectEvidence(record, needs, maxFiles, maxChars) {
-    const blocks = [];
-    const missing = [];
-    const used = new Set();
-    const cwd = evidenceWorkspace();
-    let index = 0;
-    for (const need of needs) {
-      if (blocks.length >= maxFiles) {
-        missing.push(`${describeNeed(need)}：证据超过上限（${maxFiles} 个文件），未读取`);
-        continue;
-      }
-      const candidates = [];
-      if (need.path !== '') candidates.push(need.path);
-      if (need.symbol !== '') {
-        if (cwd !== '') candidates.push(...await grepWorkspaceSymbol(cwd, need.symbol, 3));
-        if (candidates.length === 0) candidates.push(...diffSymbolCandidates(record, need.symbol));
-      }
-      if (candidates.length === 0) {
-        missing.push(`${describeNeed(need)}：没有可读取的文件路径`);
-        continue;
-      }
-      let covered = false;
-      for (const candidate of candidates) {
-        // Dedupe per (file, symbol): the same file can hold several symbols, and each
-        // needs its own window. An existing key still covers this need; keep trying later
-        // candidates because one may offer a better match.
-        const cacheKey = `${candidate}::${need.symbol}`;
-        if (used.has(cacheKey)) {
-          covered = true;
-          continue;
-        }
-        try {
-          const content = await ensureFileContent(record, candidate);
-          index += 1;
-          blocks.push(evidenceBlock(index, need, candidate, content.content, maxChars));
-          used.add(cacheKey);
-          covered = true;
-          break;
-        } catch (error) {
-          console.warn('[pr-review] 读取证据失败:', candidate, error);
-        }
-      }
-      if (!covered) missing.push(`${describeNeed(need)}：无法读取 ${candidates[0]}`);
-    }
-    return { blocks: blocks.join('\n\n'), missing };
-  }
-
-  /**
-   * Score the triage pass's concerns against the evidence. A verifier failure never fails the
-   * review: the candidates become unverified notes instead of findings.
-   */
-  async function verifyConcerns(record, concerns, rawNeeds, buildPrompt, epoch, signal) {
-    const needs = normalizeEvidenceNeeds(rawNeeds);
-    const evidence = await collectEvidence(
-      record,
-      needs,
-      settings.evidenceMaxFiles ?? DEFAULTS.evidenceMaxFiles,
-      settings.evidenceMaxChars ?? DEFAULTS.evidenceMaxChars,
-    );
-    if (epoch !== null && (record.analysisEpoch ?? 0) !== epoch) {
-      return { discarded: true, issues: [], unverified: [] };
-    }
-    if (signal !== undefined && signal !== null && signal.aborted) {
-      return { discarded: true, issues: [], unverified: [] };
-    }
-    let answer;
-    try {
-      answer = await callModelJson(
-        buildPrompt(evidence.blocks, evidence.missing),
-        signal,
-        // A reply without a results array is a stub, not a verdict.
-        (value) => value !== null && typeof value === 'object' && Array.isArray(value.results),
-      );
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      // A cancelled batch must not persist its cancellation as "unverified" findings.
-      if ((signal !== undefined && signal !== null && signal.aborted) || reason.includes('已取消')) {
-        return { discarded: true, issues: [], unverified: [] };
-      }
-      console.warn('[pr-review] 复审调用失败，候选问题转入未验证项：', error);
-      return {
-        discarded: false,
-        issues: [],
-        unverified: concerns.map((item) => ({ point: item.point, missing: `复审未完成：${reason}` })),
-        dropped: 0,
-        raw: null,
-      };
-    }
-    if (answer.parsed === null) {
-      return {
-        discarded: false,
-        issues: [],
-        unverified: concerns.map((item) => ({ point: item.point, missing: '复审未完成：模型没有返回可解析的 JSON' })),
-        dropped: 0,
-        raw: null,
-      };
-    }
-    const verdicts = partitionVerdicts(answer.parsed, concerns);
-    // Dropped candidates are neither findings nor unverified notes; keep the count visible
-    // so a model that stopped answering in range does not look like "no problems found".
-    if (verdicts.dropped > 0) {
-      console.warn(`[pr-review] 复审丢弃 ${verdicts.dropped} 条候选（无法归位或置信度 < 25）`);
-    }
-    return { discarded: false, raw: answer.parsed, ...verdicts };
-  }
-
-  // ---------- pull list ----------
-
-  /**
-   * Keep the review cache bounded: drop the oldest finished records that were never
-   * published. Records with published comments are the reviewer's history and stay
-   * forever (the product promises version history is never deleted).
-   */
   function pruneReviews() {
     if (state.reviews.size <= MAX_REVIEWS) return;
     const candidates = [...state.reviews.entries()]
@@ -1600,7 +1148,6 @@ export function apply(ctx, config) {
     let pruned = 0;
     for (const [number, record] of candidates) {
       if (state.reviews.size <= MAX_REVIEWS) break;
-      abortAnalysis(record);
       state.reviews.delete(number);
       pruned += 1;
     }
@@ -1683,13 +1230,7 @@ export function apply(ctx, config) {
       humanItemIds: [],
       coverage: null,
       roundHistory: [],
-      concluding: null,
-      concludingAbort: null,
-      analyzing: null,
-      analysisEpoch: 0,
       publishing: false,
-      concludeError: null,
-      lastAutoConcludeAt: 0,
       diffFiles: undefined,
       run: null,
     };
@@ -1706,14 +1247,6 @@ export function apply(ctx, config) {
   function rollNewRound(record, now) {
     const history = roundHistoryOf(record);
     const previousRoundEntry = history[history.length - 1];
-    // Rounds reviewed before the Agent path froze findings have an empty snapshot. Backfill
-    // from the still-current explanations before they are cleared, so this new round can
-    // compare against the previous one instead of losing the「已修复」baseline.
-    if ((previousRoundEntry.conclusions?.length ?? 0) > 0
-      && (!Array.isArray(previousRoundEntry.findings) || previousRoundEntry.findings.length === 0)) {
-      const backfill = findingsSnapshotOf(record);
-      if (backfill.length > 0) previousRoundEntry.findings = backfill;
-    }
     const previousVersion = latestConclusionVersionOf(record);
     const previousItems = previousVersion === null ? [] : commentItems(previousVersion.conclusion);
     record.previousRound = previousVersion === null ? null : {
@@ -1724,10 +1257,6 @@ export function apply(ctx, config) {
         ? previousItems
         : (Array.isArray(record.publishedItems) ? record.publishedItems : []),
     };
-    abortConclude(record);
-    // Cancels the batch (if any) and invalidates explanations still in flight, including
-    // manual ones that hold no batch job.
-    abortAnalysis(record);
     history.push(makeRoundEntry(previousRoundEntry.round + 1, '', now));
     record.round = previousRoundEntry.round + 1;
     record.report = null;
@@ -1743,8 +1272,6 @@ export function apply(ctx, config) {
     record.feedback = null;
     record.humanItemIds = [];
     record.coverage = null;
-    record.concludeError = null;
-    record.lastAutoConcludeAt = 0;
     record.run = null;
   }
 
@@ -1773,7 +1300,7 @@ export function apply(ctx, config) {
     // finishing, queued slot, catch handlers) must not write a record owned by a later one.
     const generation = (record.reviewGeneration ?? 0) + 1;
     record.reviewGeneration = generation;
-    const task = settings.reviewEngine === 'agent' ? runAgentReview(record, generation) : runReview(record);
+    const task = runAgentReview(record, generation);
     void task.catch((error) => {
       if (record.reviewGeneration !== generation) return;
       record.status = 'error';
@@ -1783,50 +1310,6 @@ export function apply(ctx, config) {
       scheduleSave();
     });
     return true;
-  }
-
-  /**
-   * Model call that must return JSON. Models occasionally answer in prose or with a stub
-   * object despite the contract; one corrective turn — echoing its answer back with the
-   * required shape — recovers most of those instead of failing the whole round.
-   *
-   * `isUsable` decides whether a parsed answer is complete enough to keep. The corrective
-   * turn uses a user message, never an assistant one: the Host's LLM runtime expects
-   * assistant history to carry `finish.replayState`, which callModel does not collect.
-   */
-  async function callModelJson(prompt, signal, isUsable) {
-    const usable = typeof isUsable === 'function' ? isUsable : () => true;
-    const request = signal === undefined || signal === null ? prompt : { ...prompt, signal };
-    const first = await callModel(ctx, settings, request);
-    const parsed = extractJson(first);
-    if (parsed !== null && usable(parsed)) return { raw: first, parsed };
-    const correction = {
-      ...prompt,
-      messages: [
-        ...prompt.messages,
-        {
-          role: 'user',
-          content: [{
-            type: 'text',
-            text: `上一次的输出不是合法的、完整的 JSON：\n---\n${first.slice(0, 4000)}\n---\n请按上面的字段约定，只输出一个完整的 JSON 对象，不要 markdown 代码块，不要任何解释。`,
-          }],
-        },
-      ],
-    };
-    const retried = await callModel(ctx, settings, signal === undefined || signal === null ? correction : { ...correction, signal });
-    return { raw: retried, parsed: extractJson(retried) };
-  }
-
-  /**
-   * Both the report and the per-file prompt require a summary or at least one candidate
-   * concern; an answer with neither is a stub, not a review. Shared so the two paths cannot
-   * drift apart.
-   */
-  function answerHasContent(value) {
-    if (value === null || typeof value !== 'object') return false;
-    const summary = typeof value.summary === 'string' ? value.summary.trim() : '';
-    const concerns = Array.isArray(value.concerns) ? value.concerns : [];
-    return summary !== '' || concerns.length > 0;
   }
 
   /** Long-running git call with the same PATH fallback as `runGit`; null on failure. */
@@ -2040,82 +1523,9 @@ export function apply(ctx, config) {
     record.error = run.error ?? null;
     record.finishedAt = Date.now();
     currentRoundEntry(record).finishedAt = record.finishedAt;
-    if (status === 'done' && record.conclusion !== null && record.conclusion !== undefined) {
-      // Refresh after coverage: the Agent may have written its conclusion before its last
-      // analysis, and this is the final, complete set for the next round's baseline.
-      currentRoundEntry(record).findings = findingsSnapshotOf(record);
-    }
     scheduleSave();
   }
 
-  /** Fetch one pull request and produce the overall report plus reading order. */
-  async function runReview(record) {
-    const { pull, files } = await prepareReviewContext(record);
-    const prompt = buildReportPrompt(pull, record.files, record.diffFiles, settings);
-    let answer;
-    try {
-      answer = await callModelJson(prompt, undefined, answerHasContent);
-    } catch (error) {
-      record.status = 'error';
-      record.error = error instanceof Error ? error.message : String(error);
-      record.finishedAt = Date.now();
-      currentRoundEntry(record).finishedAt = record.finishedAt;
-      scheduleSave();
-      return;
-    }
-    const parsed = answer.parsed;
-    if (parsed === null || !answerHasContent(parsed)) {
-      record.status = 'error';
-      record.error = `模型没有返回完整的报告 JSON。原始输出：${answer.raw.slice(0, 400)}`;
-      record.finishedAt = Date.now();
-      currentRoundEntry(record).finishedAt = record.finishedAt;
-      scheduleSave();
-      return;
-    }
-    const order = Array.isArray(files) ? files.map((file) => file.path) : [];
-    const draft = normalizeReportDraft(parsed, order);
-    let risks = [];
-    let unverified = [];
-    let discarded = 0;
-    if (draft.concerns.length > 0) {
-      if (settings.evidenceVerify === false) {
-        risks = draft.concerns.map((item) => ({ severity: item.severity, file: item.file, point: item.point }));
-      } else {
-        const verdicts = await verifyConcerns(
-          record,
-          draft.concerns,
-          parsed.evidenceNeeds,
-          (evidence, missing) => buildReportVerifyPrompt(pull, draft.concerns, evidence, missing, { language: commentLanguage() }),
-          null,
-        );
-        risks = verdicts.issues.map((item) => ({ severity: item.severity, file: item.file, point: item.point }));
-        unverified = verdicts.unverified;
-        discarded = verdicts.dropped ?? 0;
-      }
-    }
-    // A confirmed blocker outranks the triage verdict; a confirmed finding never leaves a "pass".
-    const verdict = risks.some((risk) => risk.severity === 'block')
-      ? 'block'
-      : (risks.length > 0 && draft.verdict === 'pass' ? 'suggest' : draft.verdict);
-    record.report = normalizeReport({
-      ...draft,
-      verdict,
-      risks,
-      unverified,
-      raised: draft.concerns.length,
-      discarded,
-    }, order);
-    record.reportUpdatedAt = 0;
-    record.status = 'done';
-    record.finishedAt = Date.now();
-    currentRoundEntry(record).finishedAt = record.finishedAt;
-    scheduleSave();
-    // Every finished round analyzed in the background: files no longer wait for a click.
-    ensureAutoAnalyze(record);
-  }
-
-  /** In-flight file explanations: duplicate requests share one model call. */
-  const explainInFlight = new Map();
   /** PR number → active agent review runner (one per PR). */
   const agentRuns = new Map();
   /** Agent session id → PR number, so review_* calls from a runner cannot resolve another PR. */
@@ -2146,311 +1556,6 @@ export function apply(ctx, config) {
   }, 'pr-review: agent runs');
 
   /** Explain one file: deep logic walkthrough + findings. `signal` cancels a batch call. */
-  async function explainFile(number, filePath, force, signal) {
-    const record = state.reviews.get(number);
-    if (record === undefined) {
-      const started = startReview(number, false);
-      if (!started) throw new Error('该 PR 正在审查中，请稍后再试。');
-      throw new Error('该 PR 还没有审查报告，已开始审查，请稍后重试。');
-    }
-    const cached = record.explanations.get(filePath);
-    if (!force && cached !== undefined && cached.status === 'done' && cached.explanation !== null) {
-      return { explanation: cached.explanation, cached: true };
-    }
-    // A double click, a panel retry or the agent tool can ask for the same file at once;
-    // they await the same promise instead of paying for two model calls. Keyed by round:
-    // a request for the new round must not join an answer the cleared round will discard.
-    const inFlightKey = `${number}:${filePath}:${record.analysisEpoch ?? 0}`;
-    const running = explainInFlight.get(inFlightKey);
-    if (running !== undefined) return running;
-    const task = explainFileUncached(record, number, filePath, cached, signal);
-    explainInFlight.set(inFlightKey, task);
-    try {
-      return await task;
-    } finally {
-      explainInFlight.delete(inFlightKey);
-    }
-  }
-
-  /** The model call behind explainFile; callers deduplicate through explainInFlight. */
-  async function explainFileUncached(record, number, filePath, cached, signal) {
-    // A new round may start while the model is answering; its per-file analyses are cleared,
-    // so this answer must not land in the fresh round.
-    const epoch = record.analysisEpoch ?? 0;
-    const diffFiles = await ensureDiffFiles(record);
-    const file = (record.files ?? []).find((item) => item.path === filePath) ?? {
-      path: filePath,
-      status: 'changed',
-      additions: 0,
-      deletions: 0,
-    };
-    const diff = diffFiles.get(filePath);
-    const diffText = diff === undefined ? '' : diff.text.slice(0, settings.maxDiffCharsPerFile ?? 14000);
-    const focus = record.report?.focus?.[filePath] ?? '';
-    let fileContent = '';
-    try {
-      const content = await ensureFileContent(record, filePath);
-      fileContent = content.content;
-    } catch (error) {
-      console.warn('[pr-review] 读取文件完整内容失败，讲解退化为仅 diff：', error);
-    }
-    const pull = record.pull ?? { number, title: '', repo: provider.repo, platform: provider.platform };
-    // The baseline snapshot (the newest concluded round's findings) rides along with the
-    // analysis prompt: the model re-judges every baseline finding for this file.
-    const baselineFindings = baselineRoundOf(record)?.findings ?? [];
-    const prompt = buildExplainPrompt(
-      pull,
-      file,
-      diffText,
-      record.report,
-      focus,
-      fileContent,
-      { language: commentLanguage(), baselineFindings },
-    );
-    if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
-    if (signal !== undefined && signal !== null && signal.aborted) throw new Error('模型请求已取消。');
-    const answer = await callModelJson(prompt, signal, answerHasContent);
-    // The round can switch while the model answers; drop the answer before parsing, so a
-    // late malformed reply is never reported as a failure of the round that replaced it.
-    if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
-    const parsed = answer.parsed;
-    if (parsed === null || !answerHasContent(parsed)) {
-      throw new Error(`模型没有返回完整的分析 JSON。原始输出：${answer.raw.slice(0, 400)}`);
-    }
-    const concerns = normalizeConcerns(parsed.concerns);
-    // Baseline re-judgement (review-delta spec v7): every baseline finding must come out
-    // of the analysis with a status. "fixed" drops it (the model's explicit resolved
-    // verdict); "still-open" re-enters this round's findings as a carry-over that skips
-    // verification (the baseline round already confirmed it). A baseline finding the
-    // model never judged falls back conservatively to still-open (marked unjudged) when
-    // its file was analyzed here, and stays pending when the file wasn't.
-    const baselineVerdicts = normalizePreviousVerdicts(parsed.previousVerdicts, baselineFindings.length);
-    const verdictByIndex = new Map(baselineVerdicts.map((item) => [item.index, item]));
-    const carried = [];
-    for (const item of baselineFindings) {
-      const verdict = verdictByIndex.get(item.index);
-      if (verdict === undefined) {
-        if (item.file === filePath) {
-          carried.push({
-            severity: item.severity,
-            point: item.point,
-            suggestion: item.suggestion,
-            line: item.line,
-            roundItem: item.index,
-            unjudged: true,
-          });
-        }
-        continue;
-      }
-      if (verdict.status === 'still-open') {
-        // 归属文件在本轮会被分析：该条目的判定与展示归它（其最新分析是权威），认领只在
-        // 归属文件缺席时落库——重命名场景（旧文件已不在变更列表，新文件认领延续）。
-        const owningListed = item.file !== filePath
-          && (Array.isArray(record.files) ? record.files : []).some((file) => file.path === item.file);
-        if (owningListed) continue;
-        carried.push({
-          severity: verdict.severity ?? item.severity,
-          point: verdict.point ?? item.point,
-          suggestion: verdict.suggestion ?? item.suggestion,
-          line: verdict.line ?? item.line,
-          roundItem: item.index,
-        });
-      }
-    }
-    // One concern carries one suggestion; the verifier's suggestion rewrites win, the
-    // candidate's are the fallback. Legacy model output that still carries a separate
-    // `suggestions` array is folded into issues by normalizeExplanation (findingsOf).
-    let issues = [];
-    let unverified = [];
-    if (concerns.length > 0) {
-      if (settings.evidenceVerify === false) {
-        issues = concerns.map(({ severity, point, suggestion, line }) => ({ severity, point, suggestion, line }));
-      } else {
-        const verdicts = await verifyConcerns(
-          record,
-          concerns,
-          parsed.evidenceNeeds,
-          (evidence, missing) => buildExplainVerifyPrompt(pull, file, concerns, evidence, missing, {
-            language: commentLanguage(),
-            diffText,
-          }),
-          epoch,
-          signal,
-        );
-        if (verdicts.discarded) return { explanation: null, cached: false, discarded: true };
-        // partitionVerdicts products still carry a `file` key; normalizeExplanation
-        // (findingsOf) drops it, so the stored shape stays the uniform four keys.
-        issues = verdicts.issues;
-        unverified = verdicts.unverified;
-      }
-    }
-    // 同文去重：模型有时把已判 still-open 的问题又作为一条新发现写进 issues（完全同文）。
-    // 延续条目优先，同文的无 roundItem 条目丢弃——不做语义猜测，只认归一后的完全相等。
-    const comparablePoint = (value) => String(value ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
-    const carriedPoints = new Set(carried.map((item) => comparablePoint(item.point)));
-    issues = issues.filter((item) => !carriedPoints.has(comparablePoint(item.point)));
-    // Carried-over baseline findings lead the list: they were confirmed in the baseline
-    // round and only re-checked for survival this round.
-    issues = [...carried, ...issues];
-    // Verdict reconciliation (semantic contract):
-    // - any confirmed blocker -> block: never "pass" a file with confirmed blockers;
-    // - no confirmed findings -> pass: an all-dropped triage is a pass, since a "suggest"
-    //   verdict without a surviving finding is an unanchored judgment (the dropped
-    //   candidates and unverified notes stay visible in their own sections);
-    // - only suggest findings -> the model's verdict stands, except a bare "block"
-    //   (a blocked call with no confirmed blocker degrades to suggest).
-    const rawVerdict = ['block', 'suggest', 'pass'].includes(parsed.verdict) ? parsed.verdict : 'suggest';
-    const verdict = issues.some((item) => item.severity === 'block')
-      ? 'block'
-      : (issues.length === 0 ? 'pass' : (rawVerdict === 'block' ? 'suggest' : rawVerdict));
-    const explanation = normalizeExplanation({
-      ...parsed,
-      issues,
-      unverified,
-      verdict,
-    });
-    // Repeat the check at the write point: an await added between parse and store must
-    // not reopen the stale-write window.
-    if ((record.analysisEpoch ?? 0) !== epoch) return { explanation: null, cached: false, discarded: true };
-    record.explanations.set(filePath, {
-      status: 'done',
-      error: null,
-      explanation,
-      chat: cached?.chat ?? [],
-      updatedAt: Date.now(),
-      // The baseline re-judgement is persisted with the entry (review-delta spec v7):
-      // findingsDeltaOf reads explicit verdicts instead of inferring "no claim = fixed",
-      // so later issue rewrites (chat findOps, review_update_analysis, clearFindings)
-      // can never manufacture a fake resolved state.
-      baselineVerdicts: baselineVerdicts.length === 0 ? null : baselineVerdicts,
-    });
-    scheduleSave();
-    maybeAutoConclude(record);
-    return { explanation, cached: false };
-  }
-
-  // ---------- batch file analysis ----------
-
-  /**
-   * Batches of different PRs run in parallel (auto review can finish several rounds at
-   * once); this ceiling keeps their model calls from piling up on the provider.
-   */
-  const ANALYZE_CONCURRENCY = 2;
-  let analyzeActive = 0;
-  const analyzeWaiters = [];
-
-  /**
-   * Run `task` while holding one of the analysis slots. A cancelled batch may still sit in
-   * the waiter queue; when woken it sees the record superseded and returns without calling
-   * the model, so the queue stays bounded by the number of live batches.
-   */
-  async function withAnalyzeSlot(task) {
-    while (analyzeActive >= ANALYZE_CONCURRENCY) {
-      await new Promise((resolve) => analyzeWaiters.push(resolve));
-    }
-    analyzeActive += 1;
-    try {
-      return await task();
-    } finally {
-      analyzeActive -= 1;
-      const next = analyzeWaiters.shift();
-      if (next !== undefined) next();
-    }
-  }
-
-  /** True while `job` still owns this record: same job, same round, still in the map. */
-  function analysisBatchCurrent(record, job) {
-    return record.analyzing === job
-      && (record.analysisEpoch ?? 0) === job.epoch
-      && state.reviews.get(record.number) === record;
-  }
-
-  /**
-   * Analyze every file that has no analysis yet, one model call at a time.
-   * `includeErrors` retries files whose previous analysis failed; the automatic path
-   * leaves them alone so a broken call is not repeated on every panel poll.
-   */
-  function startAnalysisBatch(record, options = {}) {
-    if (record === undefined || record === null) return false;
-    if (record.status !== 'done') return false;
-    if (record.report === null || record.report === undefined) return false;
-    if (record.analyzing !== null && record.analyzing !== undefined) return false;
-    const includeErrors = options.includeErrors === true;
-    const pending = [];
-    for (const file of Array.isArray(record.files) ? record.files : []) {
-      const entry = record.explanations.get(file.path);
-      // An entry without an explanation is not an analysis (restored legacy records can
-      // carry `done` with a null body); the automatic pass still leaves failures alone.
-      const empty = entry !== undefined && entry.status === 'done'
-        && (entry.explanation === null || entry.explanation === undefined);
-      const unanalyzed = entry === undefined || empty;
-      if (unanalyzed || (includeErrors && entry !== undefined && entry.status === 'error')) pending.push(file.path);
-    }
-    if (pending.length === 0) return false;
-    const job = {
-      total: pending.length,
-      done: 0,
-      failed: 0,
-      current: pending[0],
-      abort: new AbortController(),
-      // The round this batch belongs to; every guard rejects a batch from another round.
-      epoch: record.analysisEpoch ?? 0,
-    };
-    record.analyzing = job;
-    scheduleSave();
-    void runAnalysisBatch(record, job, pending);
-    return true;
-  }
-
-  /** Auto mode entry: honors the `autoAnalyze` setting. */
-  function ensureAutoAnalyze(record) {
-    if (settings.autoAnalyze !== true) return false;
-    return startAnalysisBatch(record);
-  }
-
-  /** The batch itself; a failed file is kept on the record and does not stop the rest. */
-  async function runAnalysisBatch(record, job, pending) {
-    try {
-      for (const filePath of pending) {
-        if (!analysisBatchCurrent(record, job)) return;
-        job.current = filePath;
-        try {
-          // Re-check after waiting for a slot: a new round may have taken over meanwhile.
-          const result = await withAnalyzeSlot(() => (
-            analysisBatchCurrent(record, job)
-              ? explainFile(record.number, filePath, false, job.abort.signal)
-              : null
-          ));
-          // A discarded answer belongs to a round that is gone; stop instead of counting it.
-          if (result === null || result.discarded === true) return;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          // A cancelled call is not a failed file: the record belongs to a round that is gone.
-          if (!analysisBatchCurrent(record, job) || job.abort.signal.aborted) return;
-          console.warn(`[pr-review] PR #${record.number} 自动分析 ${filePath} 失败：${message}`);
-          record.explanations.set(filePath, {
-            status: 'error',
-            error: message,
-            explanation: null,
-            chat: record.explanations.get(filePath)?.chat ?? [],
-            updatedAt: Date.now(),
-          });
-          job.failed += 1;
-        }
-        if (!analysisBatchCurrent(record, job)) return;
-        job.done += 1;
-        scheduleSave();
-      }
-    } finally {
-      // Clear the marker by job identity, not by map membership: a record that left the
-      // review map must not keep pointing at a finished job.
-      if (record.analyzing === job) {
-        record.analyzing = null;
-        scheduleSave();
-      }
-    }
-  }
-
   /** Continue the conversation about one file, or about the whole PR. */
   async function chat(number, filePath, question) {
     const record = state.reviews.get(number);
@@ -2472,7 +1577,7 @@ export function apply(ctx, config) {
     let applied = [];
     if (entry === null) {
       record.pullChat.push({ role: 'user', text: question }, { role: 'assistant', text: answer });
-      if (ops.length > 0) applied = applyOverviewOps(record, ops, () => maybeAutoConclude(record));
+      if (ops.length > 0) applied = applyOverviewOps(record, ops);
     } else {
       entry.chat.push({ role: 'user', text: question }, { role: 'assistant', text: answer });
       entry.updatedAt = Date.now();
@@ -2490,98 +1595,6 @@ export function apply(ctx, config) {
     }
     scheduleSave();
     return { answer, applied };
-  }
-
-  // ---------- final conclusion (async task with cancellation) ----------
-
-  /** Start one background conclusion generation; returns immediately. */
-  function startConclude(record) {
-    if (record === undefined || record === null) return { ok: false, code: 'not-found' };
-    if (record.concluding !== null && record.concluding !== undefined) return { ok: false, code: 'concluding' };
-    record.concludeError = null;
-    record.concluding = { stage: 'collect', startedAt: Date.now() };
-    const abort = new AbortController();
-    record.concludingAbort = abort;
-    void runConclude(record, abort);
-    return { ok: true };
-  }
-
-  /** The staged job behind POST /conclude: collect → model → parse → write. */
-  /** Everything the conclusion prompt needs from the finished per-file analyses. */
-  function concludeInputsOf(record) {
-    const files = Array.isArray(record.files) ? record.files : [];
-    // Only finished explanations feed the conclusion and the coverage number.
-    const done = new Map();
-    for (const [filePath, entry] of record.explanations) {
-      if (entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) continue;
-      done.set(filePath, entry.explanation);
-    }
-    return { files, done, coverage: conclusionCoverage(record.explanations, files) };
-  }
-
-  async function runConclude(record, abort) {
-    const stillCurrent = () => record.concludingAbort === abort;
-    try {
-      const { files, done, coverage } = concludeInputsOf(record);
-      const previousVersion = latestConclusionVersionOf(record);
-      const previousConclusion = previousVersion === null ? null : previousVersion.conclusion;
-      const humanEdited = (record.conclusionEditedAt ?? 0) > 0
-        && previousVersion !== null
-        && previousVersion.source === 'human';
-      const prompt = buildConcludePrompt(
-        record.pull ?? { number: record.number, title: '', repo: provider.repo, platform: provider.platform },
-        record.report,
-        done,
-        previousConclusion,
-        {
-          coverage,
-          previousItems: commentItems(previousConclusion),
-          feedback: record.feedback ?? null,
-          pullChat: Array.isArray(record.pullChat) ? record.pullChat : [],
-          humanItemIds: Array.isArray(record.humanItemIds) ? record.humanItemIds : [],
-          language: commentLanguage(),
-        },
-      );
-      if (record.concluding !== null) record.concluding.stage = 'model';
-      const raw = await callModel(ctx, settings, { ...prompt, signal: abort.signal });
-      if (abort.signal.aborted) throw new Error('已取消');
-      if (record.concluding !== null) record.concluding.stage = 'parse';
-      const parsed = extractJson(raw);
-      if (parsed === null) throw new Error(`模型没有返回可解析的 JSON。原始输出：${String(raw).slice(0, 400)}`);
-      const generated = normalizeConclusion(parsed, { files: files.map((file) => file.path) });
-      const merged = mergeConclusion(previousConclusion, generated, {
-        lockedItemIds: Array.isArray(record.humanItemIds) ? record.humanItemIds : [],
-      });
-      // The conclusion model reviewed every per-file analysis; its blocker judgment
-      // (including dismissing per-file blocks) is authoritative.
-      const calibrated = calibrateVerdict(merged, { humanEdited });
-      if (abort.signal.aborted) throw new Error('已取消');
-      if (record.concluding !== null) record.concluding.stage = 'write';
-      const version = pushConclusionVersion(record, 'model', calibrated, coverage);
-      if (version === null) throw new Error('模型返回了空结论。');
-      // Freeze the round's findings as the next round's comparison baseline (review-delta
-      // spec v7): the conclusion is the marker of a completed round, so its snapshot is
-      // what a later round compares against — skipping any conclusion-less rounds between.
-      currentRoundEntry(record).findings = findingsSnapshotOf(record);
-      record.conclusionEditedAt = 0;
-      record.reportUpdatedAt = 0;
-      record.error = null;
-      record.concludeError = null;
-      scheduleSave();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const cancelled = abort.signal.aborted || message.includes('已取消');
-      if (stillCurrent()) {
-        record.concludeError = cancelled ? `已取消：${message}` : message;
-        record.error = record.concludeError;
-      }
-    } finally {
-      if (stillCurrent()) {
-        record.concludingAbort = null;
-        record.concluding = null;
-      }
-      scheduleSave();
-    }
   }
 
   // ---------- HTTP routes ----------
@@ -2673,7 +1686,6 @@ export function apply(ctx, config) {
         autoAnalyze: settings.autoAnalyze === true,
         pollSeconds: settings.pollSeconds,
         commentLanguage: commentLanguage(),
-        autoReconclude: settings.autoReconclude === true,
         lastPollAt: state.lastPollAt,
         lastPollError: state.lastPollError,
         tokenMissing: state.tokenMissing,
@@ -2705,8 +1717,6 @@ export function apply(ctx, config) {
         return;
       }
       const record = state.reviews.get(number);
-      // Resume a batch the app restart or a disabled setting left unfinished.
-      ensureAutoAnalyze(record);
       sendJson(res, 200, { ok: true, review: serializeReview(record) });
     },
     POST: async (req, res) => {
@@ -2753,43 +1763,6 @@ export function apply(ctx, config) {
     },
   });
 
-  route(`${PREFIX}/explain`, {
-    POST: async (req, res) => {
-      await ensureRepoFor(req);
-      const text = await readBoundedBody(req);
-      const body = text === null ? null : parseBody(text);
-      const number = Number(body?.number);
-      const filePath = typeof body?.path === 'string' ? body.path : '';
-      if (!Number.isInteger(number) || number <= 0 || filePath === '') {
-        sendError(res, 400, 'bad-request', 'number and path are required');
-        return;
-      }
-      const result = await explainFile(number, filePath, body?.force === true);
-      sendJson(res, 200, { ok: true, ...result });
-    },
-  });
-
-  // Manual batch: analyze every file that has no analysis yet and retry the failed ones.
-  route(`${PREFIX}/analyze`, {
-    POST: async (req, res) => {
-      await ensureRepoFor(req);
-      const text = await readBoundedBody(req);
-      const body = text === null ? null : parseBody(text);
-      const number = Number(body?.number);
-      if (!Number.isInteger(number) || number <= 0) {
-        sendError(res, 400, 'bad-request', 'number must be a positive integer');
-        return;
-      }
-      const record = state.reviews.get(number);
-      if (record === undefined) {
-        sendError(res, 404, 'not-found', 'review not found');
-        return;
-      }
-      const started = startAnalysisBatch(record, { includeErrors: true });
-      sendJson(res, 200, { ok: true, started });
-    },
-  });
-
   route(`${PREFIX}/chat`, {
     POST: async (req, res) => {
       await ensureRepoFor(req);
@@ -2804,67 +1777,6 @@ export function apply(ctx, config) {
       }
       const result = await chat(number, filePath, question);
       sendJson(res, 200, { ok: true, answer: result.answer, applied: result.applied });
-    },
-  });
-
-  route(`${PREFIX}/conclude`, {
-    POST: async (req, res) => {
-      await ensureRepoFor(req);
-      const text = await readBoundedBody(req);
-      const body = text === null ? null : parseBody(text);
-      const number = Number(body?.number);
-      if (!Number.isInteger(number) || number <= 0) {
-        sendError(res, 400, 'bad-request', 'number must be a positive integer');
-        return;
-      }
-      const record = state.reviews.get(number);
-      if (record === undefined) {
-        sendError(res, 404, 'not-found', 'review not found');
-        return;
-      }
-      if (record.status === 'reviewing') {
-        sendError(res, 409, 'reviewing', '该 PR 正在审查中，请等审查完成后再生成结论。');
-        return;
-      }
-      if (record.report === null || record.report === undefined) {
-        sendError(res, 400, 'no-report', '还没有审查报告，请先完成审查再生成结论。');
-        return;
-      }
-      if (record.concluding !== null && record.concluding !== undefined) {
-        sendError(res, 409, 'concluding', '结论正在生成中，请稍候。');
-        return;
-      }
-      const started = startConclude(record);
-      if (!started.ok) {
-        sendError(res, 409, started.code === 'concluding' ? 'concluding' : 'conflict', '结论正在生成中，请稍候。');
-        return;
-      }
-      sendJson(res, 200, { ok: true, started: true });
-    },
-  });
-
-  route(`${PREFIX}/conclude/cancel`, {
-    POST: async (req, res) => {
-      await ensureRepoFor(req);
-      const text = await readBoundedBody(req);
-      const body = text === null ? null : parseBody(text);
-      const number = Number(body?.number);
-      if (!Number.isInteger(number) || number <= 0) {
-        sendError(res, 400, 'bad-request', 'number must be a positive integer');
-        return;
-      }
-      const record = state.reviews.get(number);
-      if (record === undefined) {
-        sendError(res, 404, 'not-found', 'review not found');
-        return;
-      }
-      const abort = record.concludingAbort;
-      if (abort === null || abort === undefined) {
-        sendJson(res, 200, { ok: true, cancelled: false });
-        return;
-      }
-      abort.abort();
-      sendJson(res, 200, { ok: true, cancelled: true });
     },
   });
 
@@ -3380,7 +2292,6 @@ export function apply(ctx, config) {
     if (typeof item.severity === 'string') output.severity = item.severity === 'block' ? 'block' : 'suggest';
     if (typeof item.file === 'string' && item.file !== '') output.file = item.file;
     if (typeof item.suggestion === 'string' && item.suggestion.trim() !== '') output.suggestion = item.suggestion.trim().slice(0, 1000);
-    if (Number.isInteger(item.roundItem) && item.roundItem > 0) output.roundItem = Math.floor(item.roundItem);
     return output;
   }
 
@@ -3572,7 +2483,7 @@ export function apply(ctx, config) {
             `状态：${record.status === 'incomplete' ? '审查未完成' : (record.status ?? '?')}${record.error ? `（${record.error}）` : ''} · 第 ${record.round ?? 1} 轮 · head ${String(record.headSha ?? record.pull?.headSha ?? '').slice(0, 8)}`,
             `结论：${record.conclusion === null || record.conclusion === undefined ? '尚未生成' : `${record.conclusion.verdict ?? ''}（v${latest?.version ?? '?'}，${latest?.published === true ? '已发布' : '未发布'}）`}`,
             `覆盖率：已分析 ${coverage.analyzed ?? 0}/${coverage.total ?? (record.files ?? []).length} 个文件`,
-            `过期：${isStale(record) ? '结论之后有新的报告/分析改动，可重新生成结论' : '无'}`,
+            `过期：${isStale(record) ? '结论之后有新的报告/分析改动，需要重审请开新一轮' : '无'}`,
             `变更文件：${(record.files ?? []).length} 个 · 已发布评论：${(record.published ?? []).length} 条`,
             `总览：初筛风险 ${overviewCounts(record).risks} · 逐文件审查意见 ${overviewCounts(record).issues} 条（review_update_overview 可一次改总览）`,
             `revision：${record.revision ?? 0}（写入工具必须带回这个值）`,
@@ -3753,7 +2664,7 @@ export function apply(ctx, config) {
     return [
       {
         name: 'review_run_agent',
-        description: '为当前 PR 开新一轮审查（按配置的 reviewEngine 执行；默认 Agent）。等价于面板的「开始新一轮审查」，不会在原轮上覆盖。',
+        description: '为当前 PR 开新一轮只读 Agent 审查。等价于面板的「开始新一轮审查」，不会在原轮上覆盖。',
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -3773,7 +2684,7 @@ export function apply(ctx, config) {
           }
           return toolText([
             `已开始新一轮审查：PR #${record.number}`,
-            `引擎：${settings.reviewEngine === 'legacy' ? 'legacy（直连 LLM）' : 'agent（独立只读 Agent）'}`,
+            '引擎：独立只读 Agent',
             '进度用 review_get 查看；不会覆盖原轮的分析。',
           ]);
         },
@@ -3799,12 +2710,7 @@ export function apply(ctx, config) {
             issues: {
               type: 'array',
               items: { type: 'object', additionalProperties: true },
-              description: '审查意见列表（传入即整体替换）；每条 { point, suggestion?, line?, severity?, roundItem? }，point 写问题与影响（≤ 500 字），suggestion 写具体修法，一条最多一条。roundItem 指向上一轮 baseline finding 的 index。',
-            },
-            baselineVerdicts: {
-              type: 'array',
-              items: { type: 'object', additionalProperties: true },
-              description: '上一轮 baseline findings 的逐项判定（传入即整体替换）：[{ index, status: "fixed"|"still-open" }]。只对该文件负责的 baseline 项写判定；没有明确确认修复就写 still-open。',
+              description: '审查意见列表（传入即整体替换）；每条 { point, suggestion?, line?, severity? }，point 写问题与影响（≤ 500 字），suggestion 写具体修法，一条最多一条。',
             },
             number: numberProperty,
           },
@@ -3827,16 +2733,11 @@ export function apply(ctx, config) {
             explanation: null,
             chat: [],
             updatedAt: 0,
-            baselineVerdicts: null,
           };
-          const baselineFindings = baselineRoundOf(record)?.findings ?? [];
-          const baselineVerdicts = args.baselineVerdicts === undefined
-            ? (Array.isArray(entry.baselineVerdicts) ? entry.baselineVerdicts : null)
-            : normalizePreviousVerdicts(args.baselineVerdicts, baselineFindings.length);
           const before = entry.explanation ?? null;
           // Normalize the merged explanation through the single shape point: issues become
           // four-key findings (suggestion inlined), any legacy `suggestions` key is dropped,
-          // and fields the call omits (walkthrough/changes/unverified) survive the edit.
+          // and fields the call omits (walkthrough/changes) survive the edit.
           const next = normalizeExplanation({
             verdict: args.verdict ?? before?.verdict,
             summary: args.summary ?? before?.summary,
@@ -3844,7 +2745,6 @@ export function apply(ctx, config) {
             walkthrough: before?.walkthrough,
             changes: before?.changes,
             issues: issues ?? before?.issues,
-            unverified: before?.unverified,
           });
           if (JSON.stringify(next).length > 12_000) {
             throw toolError(TOOL_ERROR.limitExceeded, '该文件分析超过 12000 字符，请精简 issues 后重试。');
@@ -3852,7 +2752,6 @@ export function apply(ctx, config) {
           entry.explanation = next;
           entry.status = 'done';
           entry.error = null;
-          entry.baselineVerdicts = Array.isArray(baselineVerdicts) && baselineVerdicts.length > 0 ? baselineVerdicts : null;
           entry.updatedAt = Date.now();
           record.explanations.set(args.path, entry);
           recordToolAudit(record, exec, 'review_update_analysis', `${args.path}: ${writeSummary(before, next)}`);
@@ -3935,7 +2834,7 @@ export function apply(ctx, config) {
             `${creating ? '已写入' : '已更新'}总体报告（revision ${record.revision}）`,
             `总体评价：${next.verdict ?? ''} · ${String(next.summary ?? '').slice(0, 160)}`,
             `初筛风险 ${(next.risks ?? []).length} 条 / 审查顺序 ${(next.order ?? []).length} 个文件`,
-            '报告更新会让结论变 stale，需要时可重新生成结论。',
+            '报告更新会让结论变 stale，需要重审时开新一轮。',
           ]);
         },
       },
@@ -4007,11 +2906,6 @@ export function apply(ctx, config) {
             ? (latestConclusionVersionOf(record)?.previousVerdicts ?? null)
             : normalizePreviousVerdicts(args.previousVerdicts, previousItems.length);
           pushConclusionVersion(record, runnerAgent ? 'model' : 'human', normalized, record.coverage, previousVerdicts);
-          if (runnerAgent) {
-            // The Agent finishes per-file analyses before writing its conclusion, so this is
-            // the point that freezes the round's findings for the next round's comparison.
-            currentRoundEntry(record).findings = findingsSnapshotOf(record);
-          }
           if (!runnerAgent) {
             record.conclusionEditedAt = Date.now();
             const touched = [...normalized.blockers, ...normalized.suggestions].map((item) => item.id);
@@ -4032,31 +2926,6 @@ export function apply(ctx, config) {
   /** Action review tools: they drive conclude, publish and platform links. */
   function actionToolDefinitions(numberProperty, textOutput) {
     return [
-      {
-        name: 'review_conclude',
-        description: '为当前轮触发（重新）生成最终结论，等同于审查面板的「生成最终结论 / 重新生成结论」按钮。后台运行，可用 review_get 查看进度与结果。',
-        parameters: {
-          type: 'object',
-          additionalProperties: false,
-          properties: { number: numberProperty },
-        },
-        output: textOutput,
-        async execute(args, exec) {
-          const record = requireToolReview(exec.agent, args.number);
-          if (isReviewRunnerAgent(record, exec.agent)) {
-            throw toolError(TOOL_ERROR.conflict, '审查 Agent 不能触发结论生成；请通过 review_update_conclusion 写回结论。');
-          }
-          if (record.status === 'reviewing') throw toolError(TOOL_ERROR.conflict, '该 PR 正在审查中，请等审查完成后再生成结论。');
-          if (record.report === null || record.report === undefined) throw toolError(TOOL_ERROR.notFound, '还没有审查报告，请先完成审查再生成结论。');
-          if (record.concluding !== null && record.concluding !== undefined) throw toolError(TOOL_ERROR.conflict, '结论正在生成中，请稍候。');
-          const started = startConclude(record);
-          if (!started.ok) throw toolError(TOOL_ERROR.conflict, '结论正在生成中，请稍候。');
-          return toolText([
-            `已开始生成结论：PR #${record.number} 第 ${record.round ?? 1} 轮（后台任务）`,
-            '稍后用 review_get 查看状态与 revision；生成完成后可在对话里继续调整，或让用户点「发布」。',
-          ]);
-        },
-      },
       {
         name: 'review_publish',
         description: '把当前轮的最终结论发布为一条新的 PR 评论（等同于审查面板的「发布」按钮）。默认全量选中；传 includeIds 只发布列出的条目（id 见 review_get_round 的结论条目）。会真实写入代码平台，用户明确要求发布时才调用；同一轮同一版本重复发布需要 force。若用户没说清发布范围、或是否要追加一条重复评论，先用 ask_user_question 列出候选让用户选，不要猜。',
@@ -4400,10 +3269,6 @@ export function apply(ctx, config) {
 
   ctx.effect(() => () => {
     if (state.saveTimer !== null) clearTimeout(state.saveTimer);
-    for (const record of state.reviews.values()) {
-      abortConclude(record);
-      abortAnalysis(record);
-    }
     // Synchronous flush: teardown may be the last turn the event loop gets.
     saveNowSync();
   }, 'pr-review: flush cache on unload');

@@ -12,9 +12,9 @@
 
 - **按工作区识别仓库**：每个会话工作区的 git `origin` 决定仓库与平台（GitHub；GitLab；Gitea / Forgejo / Codeberg；Gitee / GitCode / AtomGit；Codeup）；面板只显示该仓库的 PR，切换工作区即切换对应的审查数据。
 - **自动轮次**：插件后台轮询 open PR，出现新提交（head sha 变化）即自动开始新一轮审查（可用 `autoReview` 关闭）。
-- **全量分析**：每轮审查完成后，后台逐个分析全部变更文件，一轮的模型调用次数等于变更文件数（可用 `autoAnalyze` 关闭）。关闭后，点开文件才分析，也可在文件列表点「全部分析」一次补齐。
+- **全量分析**：每轮审查由只读 Agent 完成；`autoAnalyze` 控制任务是否包含逐文件分析（默认包含）。关闭时只写总体报告与结论。
 - **审查面板**：会话内右侧边栏面板——总览 / 变更文件 / 结论三页导航。总览呈现对话状态（作者回复与跨轮对照）、改动概述、唯一一份审查发现清单与审查完备性；点击文件进入 diff 与逐文件分析；结论页承载最终结论、发布装配与已发布记录。列宽可拖动。
-- **最终结论**：后台生成，展示阶段进度、可随时取消；结论带审查覆盖率（已分析 X/Y 文件）与版本号，过期时提示重新生成（`autoReconclude` 可改为自动）。面板上唯一的判定出口，总览不再显示初筛判定。
+- **最终结论**：由只读 Agent 通过 `review_update_conclusion` 写回，带审查覆盖率（已分析 X/Y 文件）与版本号。报告/分析在结论之后更新时，面板标记结论过期；需要重审请开新一轮。面板上唯一的判定出口，总览不再显示初筛判定。
 - **版本历史**：每个结论版本都保留，每轮审查有独立页签，历史轮次与旧版本随时可回看（只读）。
 - **实现者反馈闭环**：自动读取实现者在上一轮审查评论后的回复，解析为「已修复 / 不认可 / 已认可 / 有疑问」并标注到对应意见上，跨轮对比「已修复 / 仍未解决」。
 - **发布**：在结论页条目上直接勾选「纳入发布」，评论预览按勾选实时生成；发布弹窗只做最终确认（全文与冲突提示）。评论只追加、不覆盖，并标注被审 commit、轮次、结论版本与覆盖率。
@@ -24,7 +24,7 @@
 
 读取：`review_list_prs`、`review_get`、`review_get_report`、`review_list_files`、`review_get_analysis`、`review_get_diff`、`review_get_file`、`review_list_rounds`、`review_get_round`、`review_get_comments`
 
-写入：`review_update_analysis`、`review_update_report`、`review_update_overview`、`review_update_conclusion`（乐观锁保护），以及对应面板动作的 `review_conclude`、`review_publish`、`review_get_links`。
+写入：`review_update_analysis`、`review_update_report`、`review_update_overview`、`review_update_conclusion`（乐观锁保护），以及面板动作 `review_publish`、`review_get_links`。
 
 ## 环境要求
 
@@ -105,10 +105,6 @@ dsh --profile <name>
     pollSeconds: 60
     autoReview: true
     autoAnalyze: true
-    autoReconclude: false
-    evidenceVerify: true
-    evidenceMaxFiles: 6
-    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''
@@ -151,9 +147,7 @@ dsh --profile <name> --dump-config
 |---|---|---|---|
 | `pollSeconds` | 数字，≥ 15 | `60` | 轮询 open PR 的间隔，也决定新提交多久被发现；最小 15 秒。 |
 | `autoReview` | 布尔 | `true` | PR 首次出现或 head sha 变化时自动开启一轮审查。设为 `false` 后只在点「立即审查」时审查。失败的轮次 5 分钟后重试。 |
-| `autoAnalyze` | 布尔 | `true` | 每轮审查完成后在后台逐个分析全部变更文件，每个文件一次模型调用，调用次数等于变更文件数（例如 100 个文件就是 100 次）。设为 `false` 后点开文件才分析，也可在文件列表点「全部分析」一次补齐。自动分析不重试失败的文件；「全部分析」会重试，调用量约等于未完成与失败的文件数。开始新一轮会取消上一轮未跑完的批次。失败的文件在文件详情里显示错误，成功前不计入「已分析」覆盖率。 |
-| `autoReconclude` | 布尔 | `false` | 报告或逐文件分析在结论之后更新时自动重新生成结论。5 分钟内最多一次，审查进行中不触发，结论未过期不触发。 |
-| `evidenceVerify` | 布尔 | `true` | 两轮审查：第一轮只产出候选问题和所需证据，宿主读取调用方、定义处、测试等文件后，第二轮按证据给每条候选打分（≥ 80 才算审查意见，25–79 进「未验证项」，< 25 丢弃）。没有候选问题时仍只调用一次；有候选时每个文件多一次复审调用。设为 `false` 退回单轮，候选问题直接作为审查意见。 |
+| `autoAnalyze` | 布尔 | `true` | Agent 任务是否包含逐文件分析；关闭时 Agent 只写总体报告与结论。 |
 | `commentLanguage` | `zh`、`en` | `zh` | 发布评论的语言（固定标签、标题、附录、署名行），也是内置提示词要求模型使用的输出语言：逐文件分析、最终结论、讨论回答、反馈解析。默认 `zh`，英文仓库需要显式设置 `commentLanguage: en`。语言只在生成时生效，已生成的内容不会被重写。 |
 
 ### 模型与上限
@@ -161,10 +155,9 @@ dsh --profile <name> --dump-config
 | 字段 | 取值 | 默认 | 作用 |
 |---|---|---|---|
 | `provider` / `model` | 字符串或空 | 空 | 两个都填才生效；否则用 Harness 当前默认模型。只填一个也回落到默认模型。 |
-| `reasoningEffort` | `off`、`low`、`high`、`max` | `off` | 报告、逐文件分析与结论调用的思考档位。模型不支持该档位时，插件去掉档位重试。 |
-| `evidenceMaxFiles` | 数字，1–20 | `6` | 复审取证时最多读取的文件数；超出部分记入「未验证项」。 |
-| `evidenceMaxChars` | 数字，≥ 500 | `6000` | 单个证据文件的字符上限，超出按行截断。 |
-| `maxDiffCharsPerFile` | 数字，≥ 1000 | `14000` | 单个文件送入模型的最大 diff 字符数。报告调用每文件最多用 2,200 字符，摘录合计最多 120,000 字符。 |
+| `reasoningEffort` | `off`、`low`、`high`、`max` | `off` | 审查 Agent 会话的思考档位。模型不支持该档位时，插件去掉档位重试。 |
+| `reviewCoverageRetries` | 数字，0-5 | `2` | 缺口补齐的 follow-up 次数上限。 |
+| `maxDiffCharsPerFile` | 数字，≥ 1000 | `14000` | `review_get_diff` 单次返回的最大 diff 字符数。 |
 
 ### token 读取顺序
 
@@ -213,10 +206,6 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     pollSeconds: 60
     autoReview: true
     autoAnalyze: true
-    autoReconclude: false
-    evidenceVerify: true
-    evidenceMaxFiles: 6
-    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''
@@ -237,7 +226,6 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     pollSeconds: 60
     autoReview: true
     autoAnalyze: true
-    autoReconclude: false
     commentLanguage: en
     provider: ''
     model: ''
@@ -258,7 +246,6 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     pollSeconds: 60
     autoReview: true
     autoAnalyze: true
-    autoReconclude: false
     commentLanguage: en
     provider: ''
     model: ''
@@ -283,10 +270,6 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
     pollSeconds: 60
     autoReview: true
     autoAnalyze: true
-    autoReconclude: false
-    evidenceVerify: true
-    evidenceMaxFiles: 6
-    evidenceMaxChars: 6000
     commentLanguage: zh
     provider: ''
     model: ''
@@ -312,7 +295,6 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
 
 ```yaml
     reasoningEffort: high
-    autoReconclude: true
     maxDiffCharsPerFile: 24000
 ```
 
@@ -324,7 +306,7 @@ export CODEUP_TOKEN=...    # Codeup（也认 YUNXIAO_TOKEN）
 2. 顶部选择 PR；`autoReview` 开启时首轮审查在后台自动开始，关闭时点「立即审查」。
 3. 总览页看改动概述、审查发现与完备性；左栏点文件进入明细页查看 diff 与逐文件分析；`autoAnalyze` 开启时文件在后台陆续分析，批次未跑完时点开文件可能仍显示未分析；关闭时点开文件才开始分析。点 hunk 看逐段讲解；需要时切换完整文件视图。
 4. 在主对话里继续讨论——例如「第 1 条风险不成立」「把第 2 条建议改成阻塞项」——审查数据直接更新。
-5. 左栏「结论」入口进入结论页，点「生成最终结论」；生成完成后仅在总览页时会自动切到结论页，在明细页阅读时不会被打断。报告有更新时面板会提示「重新生成结论」。
+5. 左栏「结论」入口进入结论页；结论由只读 Agent 通过 `review_update_conclusion` 写入。报告之后有更新时结论会标记过期，需要重审请开新一轮。
 6. 在结论条目上勾选「纳入发布」，展开「评论预览」确认 Markdown 后点「发布」。每轮追加一条新评论，不覆盖历史。
 7. 顶部轮次页签可回看历史轮次与旧版结论（只读）。
 8. 实现者在上一轮审查评论下回复后，点「检查实现者反馈」（面板打开时每 2 分钟也会自动检查一次），查看逐条状态与「已修复 / 仍未解决」对比；新提交会开启下一轮。

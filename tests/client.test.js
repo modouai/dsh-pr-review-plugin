@@ -516,7 +516,6 @@ function overviewProps(parts, review, extra = {}) {
     onCheckFeedback: () => {},
     comment: extra.comment ?? null,
     onPublish: () => {},
-    autoReconclude: extra.autoReconclude ?? false,
     inlineFooter: extra.inlineFooter,
   };
 }
@@ -616,8 +615,8 @@ test('the footer actions name the conclusion and the publish step', () => {
   });
   const { actions } = renderFooter(client, review);
 
-  // A round that already has a version regenerates it; "first conclusion" is not on offer.
-  assert.match(actions.textOnly, /重新生成结论/);
+  // The agent writes the conclusion; the footer only offers publishing it.
+  assert.doesNotMatch(actions.textOnly, /重新生成结论/);
   assert.doesNotMatch(actions.textOnly, /生成最终结论/);
   assert.match(actions.textOnly, /发布/);
   // Publishing the unpublished version is the next step, so it owns the primary slot.
@@ -628,20 +627,6 @@ test('the footer actions name the conclusion and the publish step', () => {
   assert.match(String(publish.props.className), /prr-btn-primary/);
 });
 
-test('a round without a conclusion offers the first generation only', () => {
-  const client = loadClient();
-  const { fake } = client;
-  const review = makeReview({ round: 1, conclusion: null, roundHistory: [makeRound(1)] });
-  const { actions } = renderFooter(client, review);
-
-  assert.match(actions.textOnly, /生成最终结论/);
-  assert.doesNotMatch(actions.textOnly, /重新生成结论/);
-  assert.equal(
-    actions.elements.filter((node) => node.type === 'button' && /发布/.test(fake.textOf(node))).length,
-    0,
-    'nothing can be published before a conclusion exists',
-  );
-});
 
 test('a published version turns publishing into an explicit append action', () => {
   const client = loadClient();
@@ -669,60 +654,6 @@ test('a published version turns publishing into an explicit append action', () =
   );
 });
 
-test('the publish button says what the click would publish', () => {
-  const client = loadClient();
-  const { fake } = client;
-  const version = makeVersion(1, '第一轮结论', { createdAt: 5000 });
-  const publishOf = (review, extra) => {
-    const { actions } = renderFooter(client, review, extra);
-    return actions.elements.find(
-      (node) => node.type === 'button' && /发布|追加评论/.test(fake.textOf(node)),
-    );
-  };
-  const concludeOf = (actions) => actions.elements.find(
-    (node) => node.type === 'button' && /结论/.test(fake.textOf(node)),
-  );
-
-  // Stale: the click publishes the selected conclusion, not the changes made after it.
-  const stale = makeReview({
-    round: 1,
-    conclusionAt: 5000,
-    conclusion: version.conclusion,
-    roundHistory: [makeRound(1, { conclusions: [version] })],
-    explanations: [{ file: 'src/a.js', status: 'done', explanation: null, chat: [], updatedAt: 6000 }],
-  });
-  const staleButton = publishOf(stale);
-  assert.match(String(staleButton.props.title ?? ''), /结论之后还有未发布的新改动/);
-  assert.doesNotMatch(String(staleButton.props.className), /prr-btn-primary/, 'regenerating owns the primary slot while stale');
-  // …and it owns it alone: exactly one primary action in the footer.
-  const staleConclude = concludeOf(renderFooter(client, stale).actions);
-  assert.match(String(staleConclude.props.className), /prr-btn-primary/);
-
-  // Published and stale: the append is what will happen, and the title says it ships the
-  // selected conclusion without the newer changes.
-  const appendStale = makeReview({
-    round: 1,
-    conclusionAt: 5000,
-    conclusion: version.conclusion,
-    roundHistory: [makeRound(1, { conclusions: [version] })],
-    explanations: [{ file: 'src/a.js', status: 'done', explanation: null, chat: [], updatedAt: 6000 }],
-    published: [{ round: 1, version: 1, url: 'https://example.test/comment/1' }],
-  });
-  const appendStaleButton = publishOf(appendStale);
-  assert.equal(fake.textOf(appendStaleButton), '追加评论');
-  assert.match(String(appendStaleButton.props.title ?? ''), /本次追加的是最新结论/);
-
-  // Concluding: publishing keeps working, but on the conclusion that is already there.
-  const concluding = makeReview({
-    round: 1,
-    conclusionAt: version.createdAt,
-    conclusion: version.conclusion,
-    roundHistory: [makeRound(1, { conclusions: [version] })],
-  });
-  const concludingButton = publishOf(concluding, { concluding: { stage: 'model', startedAt: 6000 } });
-  assert.equal(concludingButton.props.disabled, false);
-  assert.match(String(concludingButton.props.title ?? ''), /正在生成新结论/);
-});
 
 test('the preview opens in the append flow when the conclusion was already published', () => {
   const { parts } = loadClient();
@@ -756,85 +687,8 @@ test('the preview opens in the append flow when the conclusion was already publi
   assert.equal(parts.previewConflictOf({ ...published, published: [] }), '');
 });
 
-test('stale analysis folds to one summary row that expands to the changed files', () => {
-  const client = loadClient();
-  const version = makeVersion(1, '第三轮结论', { createdAt: 5000 });
-  const review = makeReview({
-    round: 3,
-    conclusionAt: 5000,
-    conclusion: version.conclusion,
-    roundHistory: [makeRound(3, { conclusions: [version] })],
-    explanations: [
-      { file: 'src/a.js', status: 'done', explanation: null, chat: [], updatedAt: 6000 },
-      { file: 'src/b.js', status: 'done', explanation: null, chat: [], updatedAt: 7000 },
-    ],
-  });
-  const { footer, collapsed, expanded, actions } = renderFooter(client, review);
 
-  assert.match(actions.textOnly, /重新生成结论/);
-  assert.doesNotMatch(actions.textOnly, /处新改动/, 'the button must not repeat the count');
-  // Collapsed: a single summary row; the file list is not rendered yet.
-  assert.equal(footer.notice.tone, 'warn');
-  assert.match(collapsed.textOnly, /结论之后有更新的文件（2 处）/);
-  assert.doesNotMatch(collapsed.textOnly, /src\/a\.js/);
-  const toggle = collapsed.elements.find(
-    (node) => node.type === 'button' && node.props.className === 'prr-dock-toggle',
-  );
-  assert.ok(toggle, 'fold toggle missing');
-  assert.equal(toggle.props['aria-expanded'], 'false');
-  // Expanded: the same row plus the changed-file list.
-  assert.equal(
-    expanded.elements.find((node) => node.props.className === 'prr-dock-toggle').props['aria-expanded'],
-    'true',
-  );
-  assert.match(expanded.textOnly, /src\/a\.js/);
-  assert.match(expanded.textOnly, /src\/b\.js/);
-});
 
-test('auto-regeneration is announced when the stale panel is expanded', () => {
-  const client = loadClient();
-  const version = makeVersion(1, '第三轮结论', { createdAt: 5000 });
-  const review = makeReview({
-    round: 3,
-    conclusionAt: 5000,
-    conclusion: version.conclusion,
-    roundHistory: [makeRound(3, { conclusions: [version] })],
-    explanations: [
-      { file: 'src/a.js', status: 'done', explanation: null, chat: [], updatedAt: 6000 },
-    ],
-  });
-  const { collapsed, expanded } = renderFooter(client, review, { autoReconclude: true });
-  assert.doesNotMatch(collapsed.textOnly, /已开启自动重生成/);
-  assert.match(expanded.textOnly, /已开启自动重生成/);
-});
-
-test('the latest conclusion stays publishable with publish owning the primary slot', () => {
-  const client = loadClient();
-  const { fake } = client;
-  const version = makeVersion(1, '第一轮结论');
-  const review = makeReview({
-    round: 1,
-    conclusionAt: version.createdAt,
-    conclusion: version.conclusion,
-    roundHistory: [makeRound(1, { conclusions: [version] })],
-  });
-  const findPublish = (view) => view.elements.find(
-    (node) => node.type === 'button' && fake.textOf(node) === '发布',
-  );
-
-  const publish = findPublish(renderFooter(client, review).actions);
-  assert.ok(publish, 'publish button missing');
-  assert.equal(publish.props.disabled, false);
-  // With nothing stale and no older version in play, publishing is the step that reaches
-  // the PR and owns the primary slot; regenerating steps back.
-  assert.match(String(publish.props.className), /prr-btn-primary/);
-  const actions = renderFooter(client, review).actions;
-  const conclude = actions.elements.find(
-    (node) => node.type === 'button' && fake.textOf(node) === '重新生成结论',
-  );
-  assert.ok(conclude, 'conclude button missing');
-  assert.doesNotMatch(String(conclude.props.className), /prr-btn-primary/);
-});
 
 test('the footer notices the files that are not analyzed yet', () => {
   const client = loadClient();
@@ -1494,35 +1348,6 @@ test('a pass verdict with findings explains itself as suggestions for reference'
   assert.equal(tags.length, 2);
 });
 
-test('the re-analyze busy state belongs to its own file, not the whole panel', () => {
-  const client = loadClient();
-  const { parts, fake } = client;
-  const t = translator(parts);
-  const render = (filePath, explainBusyPath) => fake.render(fake.React.createElement(parts.FileDetailPanel, {
-    t,
-    filePath,
-    explainBusyPath,
-    explanation: {
-      status: 'done',
-      explanation: {
-        verdict: 'pass',
-        summary: '文件摘要',
-        logic: '',
-        changes: '',
-        issues: [],
-      },
-    },
-    onExplain: () => {},
-  }));
-
-  // 另一个文件在分析：本文件的按钮仍是可点的「重新分析」，不得显示「正在分析…」。
-  const other = render('src/a.js', 'src/b.js');
-  assert.match(other.textOnly, /重新分析/);
-  assert.doesNotMatch(other.textOnly, /正在分析/);
-  // 本文件自己才是分析中：按钮显示进行中并禁用。
-  const self = render('src/a.js', 'src/a.js');
-  assert.match(self.textOnly, /正在分析/);
-});
 
 test('the file detail renders the merged findings a review_update_analysis write produces', () => {
   const client = loadClient();
@@ -1643,96 +1468,6 @@ test('isAnalyzing only accepts a usable progress total', () => {
   assert.equal(parts.isAnalyzing(undefined), false);
 });
 
-test('the file column shows batch progress and the manual analyze-all button', () => {
-  const client = loadClient();
-  const { parts, fake } = client;
-  const t = translator(parts);
-  const dict = parts.DICT.zh;
-  const fill = (template, vars) => Object.keys(vars).reduce(
-    (text, key) => text.split(`{${key}}`).join(String(vars[key])),
-    template,
-  );
-  const files = [{ path: 'src/a.js', order: 1, severity: '', additions: 1, deletions: 0, reason: '' }];
-  // The global ledger the header badge speaks: one analyzed file, one failed entry.
-  const explanations = [
-    { file: 'src/a.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: 'x', issues: [] }, chat: [], updatedAt: 1 },
-    { file: 'src/b.js', status: 'error', error: 'boom', explanation: null, chat: [], updatedAt: 2 },
-  ];
-  const hits = [];
-  const render = (extra) => fake.render(fake.React.createElement(parts.FilesPane, {
-    t,
-    overviewMode: false,
-    onSelectOverview: () => {},
-    files,
-    filePath: '',
-    review: { files, explanations },
-    onOpenFile: () => {},
-    ...extra,
-  }));
-  const analyzeAllButton = (rendered) => rendered.elements.find(
-    (node) => node.type === 'button' && fake.textOf(node).trim() === dict.analyzeAll,
-  );
-
-  // Automatic mode: progress replaces the file count and no button competes with it.
-  // The numbers are the global ledger (analyzed / all changed files), not the batch's own.
-  const running = render({ analyzing: { total: 3, done: 1, failed: 0, current: 'src/a.js' } });
-  assert.ok(running.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
-  assert.equal(running.textOnly.includes(dict.fileUnit), false, 'progress replaces the file count');
-  assert.equal(running.textOnly.includes(dict.analyzingFailed.replace('{failed}', '0')), false);
-  assert.equal(analyzeAllButton(running), undefined);
-
-  const failing = render({ analyzing: { total: 3, done: 2, failed: 1, current: 'src/b.js' } });
-  assert.ok(failing.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
-  assert.ok(failing.textOnly.includes(fill(dict.analyzingFailed, { failed: 1 })));
-
-  const allFailed = render({ analyzing: { total: 2, done: 2, failed: 2 } });
-  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
-  assert.ok(allFailed.textOnly.includes(fill(dict.analyzingFailed, { failed: 1 })));
-
-  // Progress without a usable total is not a batch: keep the plain count.
-  const degenerate = render({ analyzing: { total: 0, done: 0, failed: 0 } });
-  assert.ok(degenerate.textOnly.includes(dict.fileUnit));
-  assert.equal(degenerate.textOnly.includes(fill(dict.analyzingFiles, { done: 0, total: 0 })), false);
-  const noTotal = render({ analyzing: { done: 1, failed: 0 } });
-  assert.ok(noTotal.textOnly.includes(dict.fileUnit));
-
-  // The global ledger is what shows: a batch claiming more than the ledger has still
-  // renders the ledger numbers ("5/3" cannot happen).
-  const clamped = render({ analyzing: { total: 2, done: 5, failed: 9 } });
-  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
-  assert.ok(clamped.textOnly.includes(fill(dict.analyzingFailed, { failed: 1 })));
-
-  // The last file of a batch still reports progress until the host clears `analyzing`.
-  const finishing = render({ analyzing: { total: 2, done: 2, failed: 0, current: '' } });
-  assert.ok(finishing.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
-
-  // Automatic mode with no batch: the plain count returns and no button appears.
-  const idle = render({});
-  assert.ok(idle.textOnly.includes(dict.fileUnit));
-  assert.equal(analyzeAllButton(idle), undefined);
-
-  // Manual mode: the count stays and the batch button appears.
-  const manual = render({ manual: true, analyzeAllBusy: false, onAnalyzeAll: () => hits.push('all') });
-  assert.ok(manual.textOnly.includes(dict.fileUnit));
-  const button = analyzeAllButton(manual);
-  assert.ok(button, 'manual mode renders the analyze-all button');
-  button.props.onClick();
-  assert.deepEqual(hits, ['all']);
-
-  // A batch already running wins over the button, whatever the mode says.
-  const manualRunning = render({ manual: true, analyzing: { total: 2, done: 1, failed: 0, current: 'src/a.js' } });
-  assert.equal(analyzeAllButton(manualRunning), undefined);
-  assert.ok(manualRunning.textOnly.includes(fill(dict.analyzingFiles, { done: 1, total: 1 })));
-
-  // While the request is in flight the button reports the work and cannot be clicked twice.
-  const busy = render({ manual: true, analyzeAllBusy: true, onAnalyzeAll: () => hits.push('again') });
-  const busyButton = busy.elements.find(
-    (node) => node.type === 'button' && fake.textOf(node).trim() === dict.explaining,
-  );
-  assert.ok(busyButton);
-  assert.equal(busyButton.props.disabled, true);
-  assert.equal(busyButton.props.onClick, undefined, 'a disabled button carries no click handler');
-});
 
 // ---------- v2: right-sidebar review tab ----------
 
@@ -2772,50 +2507,9 @@ test('dragged columns are clamped to usable ranges and can be reset', () => {
   assert.equal(parts.clampColumnWidth('detail', 2000), 760);
 });
 
-// ---------- unverified notes (evidence verification) ----------
+// ---------- per-file findings ----------
 
-test('the file detail breaks unverified points out of the findings', () => {
-  const client = loadClient();
-  const { parts, fake } = client;
-  const { textOnly, elements } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
-    t: translator(parts),
-    filePath: 'src/a.js',
-    explanation: {
-      status: 'done',
-      explanation: {
-        verdict: 'suggest',
-        summary: '文件摘要',
-        logic: '',
-        changes: '',
-        issues: [{ severity: 'suggest', point: '已确认问题', line: 1 }],
-        unverified: [{ point: '可疑调用方', missing: '缺少 callers 证据' }],
-      },
-    },
-    onExplain: () => {},
-  }));
 
-  assert.match(textOnly, /审查意见/);
-  assert.match(textOnly, /已确认问题/);
-  assert.match(textOnly, /未验证项/);
-  assert.match(textOnly, /可疑调用方/);
-  assert.match(textOnly, /缺少证据：缺少 callers 证据/);
-  assert.ok(elements.some((node) => node.props.className === 'prr-card prr-unverified'));
-});
-
-test('no unverified notes means no unverified section', () => {
-  const client = loadClient();
-  const { parts, fake } = client;
-  const { textOnly } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
-    t: translator(parts),
-    filePath: 'src/a.js',
-    explanation: {
-      status: 'done',
-      explanation: { verdict: 'pass', summary: '文件摘要', logic: '', changes: '', issues: [] },
-    },
-    onExplain: () => {},
-  }));
-  assert.doesNotMatch(textOnly, /未验证项/);
-});
 
 test('the zh and en tables expose the same keys', () => {
   const client = loadClient();
@@ -2830,7 +2524,6 @@ test('the overview no longer renders a reading-order section', () => {
       verdict: 'suggest',
       summary: '报告',
       risks: [],
-      unverified: [],
       order: [{ file: 'src/a.js', reason: '这是排序理由不该出现在总览' }],
       focus: {},
     },
@@ -2840,200 +2533,11 @@ test('the overview no longer renders a reading-order section', () => {
   assert.doesNotMatch(textOnly, /这是排序理由不该出现在总览/);
 });
 
-test('malformed unverified entries are dropped instead of leaking into the panel', () => {
-  const client = loadClient();
-  const { parts, fake } = client;
-  const { textOnly } = fake.render(fake.React.createElement(parts.FileDetailPanel, {
-    t: translator(parts),
-    filePath: 'src/a.js',
-    explanation: {
-      status: 'done',
-      explanation: {
-        verdict: 'suggest',
-        summary: '摘要',
-        logic: '',
-        changes: '',
-        issues: [],
-        unverified: [null, {}, { point: '   ' }, { point: '有效疑点', missing: null }],
-      },
-    },
-    onExplain: () => {},
-  }));
-  assert.match(textOnly, /有效疑点/);
-  assert.doesNotMatch(textOnly, /undefined/);
-  assert.doesNotMatch(textOnly, /缺少证据/);
-});
 
-test('derivePhase folds host state into one phase', () => {
-  const { parts } = loadClient();
-  const base = makeReview({ round: 2 });
-  assert.equal(parts.derivePhase({ ...base, status: 'error' }, null).phase, 'error');
-  assert.equal(parts.derivePhase({ ...base, status: 'incomplete' }, null).phase, 'incomplete');
-  assert.equal(parts.derivePhase({ ...base, status: 'reviewing' }, null).phase, 'reviewing');
-  assert.equal(
-    parts.derivePhase({ ...base, concluding: { stage: 'model', startedAt: 1 } }, null).phase,
-    'concluding',
-  );
 
-  // Batch progress is restated in the global ledger: done = analyzed files, total = all
-  // changed files — the same two numbers the completeness line shows, so the header badge
-  // and the overview can never disagree about how much is left.
-  const analyzing = makeReview({
-    status: 'done',
-    files: [
-      { path: 'src/a.js', status: 'modified', additions: 1, deletions: 0 },
-      { path: 'src/b.js', status: 'modified', additions: 1, deletions: 0 },
-      { path: 'src/c.js', status: 'modified', additions: 1, deletions: 0 },
-    ],
-    explanations: [
-      { file: 'src/a.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: 'x', issues: [] }, chat: [], updatedAt: 1 },
-      { file: 'src/b.js', status: 'done', error: null, explanation: { verdict: 'pass', summary: 'y', issues: [] }, chat: [], updatedAt: 2 },
-      { file: 'src/c.js', status: 'error', error: 'boom', explanation: null, chat: [], updatedAt: 3 },
-    ],
-    analyzing: { done: 12, total: 30, failed: 1, current: 'src/c.js' },
-  });
-  const phase = parts.derivePhase(analyzing, null);
-  assert.equal(phase.phase, 'analyzing');
-  assert.deepEqual(plain(phase.progress), { done: 2, total: 3, failed: 1 });
-  assert.equal(phase.nextAction, null);
-  assert.equal(parts.derivePhase(analyzing, null, { manual: true }).nextAction, 'analyzeAll');
 
-  // A negative failed count folds to 0; a record without files falls back to the batch total.
-  const clamped = parts.derivePhase(
-    { ...base, status: 'done', analyzing: { done: 99, total: 30, failed: -1, current: 'x' } },
-    null,
-  );
-  assert.deepEqual(plain(clamped.progress), { done: 0, total: 1, failed: 0 });
 
-  assert.equal(parts.derivePhase({ ...base, conclusion: null, conclusionAt: 0 }, null).phase, 'ready');
-  assert.equal(parts.derivePhase({ ...base, conclusion: null, conclusionAt: 0 }, null).nextAction, 'conclude');
 
-  // A missing review falls back to the empty record; staleness only decorates
-  // concluded/published states, so a stale report without a conclusion stays ready.
-  assert.deepEqual(plain(parts.derivePhase(null, null)), {
-    phase: 'ready', progress: null, nextAction: 'conclude', version: 0,
-  });
-  const staleInfo = { createdAt: 1, files: ['src/a.js'], reportNewer: false, count: 1 };
-  const staleReady = parts.derivePhase({ ...base, conclusion: null, conclusionAt: 0 }, staleInfo);
-  assert.equal(staleReady.phase, 'ready');
-  assert.equal(staleReady.nextAction, 'conclude');
-});
-
-test('derivePhase distinguishes concluded / stale / published states', () => {
-  const { parts } = loadClient();
-  const concluded = makeReview({
-    round: 2,
-    conclusion: { verdict: 'suggest', summary: 's', blockers: [], suggestions: [], nextSteps: [] },
-    conclusionAt: 5000,
-  });
-  assert.equal(parts.derivePhase(concluded, null).phase, 'concluded');
-  assert.equal(parts.derivePhase(concluded, null).nextAction, 'publish');
-  assert.equal(parts.derivePhase(concluded, null).version, 1);
-
-  const staleInfo = { createdAt: 1, files: ['src/a.js'], reportNewer: false, count: 1 };
-  assert.equal(parts.derivePhase(concluded, staleInfo).phase, 'concluded-stale');
-  assert.equal(parts.derivePhase(concluded, staleInfo).nextAction, 'regenerate');
-
-  const published = makeReview({
-    round: 2,
-    conclusion: { verdict: 'suggest', summary: 's', blockers: [], suggestions: [], nextSteps: [] },
-    conclusionAt: 5000,
-    published: [{ id: 'p1', round: 2, version: 1, publishedAt: 6000 }],
-  });
-  assert.equal(parts.derivePhase(published, null).phase, 'published');
-  assert.equal(parts.derivePhase(published, null).nextAction, 'append');
-  assert.equal(parts.derivePhase(published, staleInfo).phase, 'published-stale');
-  assert.equal(parts.derivePhase(published, staleInfo).nextAction, 'regenerate');
-});
-
-test('derivePhase combination order: error first, version kept, stale before concluded', () => {
-  const { parts } = loadClient();
-  const concluded = makeReview({
-    round: 2,
-    conclusion: { verdict: 'suggest', summary: 's', blockers: [], suggestions: [], nextSteps: [] },
-    conclusionAt: 5000,
-  });
-  const staleInfo = { createdAt: 1, files: ['src/a.js'], reportNewer: false, count: 1 };
-
-  // Error wins over everything — including a running analyze batch — but the version
-  // still reports the newest conclusion version instead of resetting to v0.
-  const errored = { ...concluded, status: 'error' };
-  assert.equal(parts.derivePhase(errored, null).phase, 'error');
-  assert.equal(parts.derivePhase(errored, null).version, 1);
-  const erroredAnalyzing = { ...errored, analyzing: { done: 0, total: 2, failed: 0, current: 'src/a.js' } };
-  assert.equal(parts.derivePhase(erroredAnalyzing, null).phase, 'error');
-
-  // A concluded round that starts re-analyzing folds back to the analyzing phase, version kept.
-  const analyzing = { ...concluded, analyzing: { done: 1, total: 2, failed: 0, current: 'src/b.js' } };
-  assert.equal(parts.derivePhase(analyzing, null).phase, 'analyzing');
-  assert.equal(parts.derivePhase(analyzing, null).version, 1);
-
-  // Stale is judged before the concluded fallback: the same record flips to regenerate.
-  const stale = parts.derivePhase(concluded, staleInfo);
-  assert.equal(stale.phase, 'concluded-stale');
-  assert.equal(stale.nextAction, 'regenerate');
-  assert.equal(stale.version, 1);
-});
-
-test('phase and conclusion badge text follow the phase', () => {
-  const { parts } = loadClient();
-  const t = (key) => key;
-  const analyzing = { phase: 'analyzing', progress: { done: 12, total: 30, failed: 2 }, nextAction: null, version: 0 };
-  assert.equal(
-    parts.phaseStateText(analyzing, t),
-    'badgeAnalyzing badgeAnalyzingFailed',
-  );
-
-  // The remaining status-bar branches, including the silent fall-through to badgeDone.
-  assert.equal(parts.phaseStateText(null, t), '');
-  assert.equal(parts.phaseStateText({ phase: 'reviewing' }, t), 'badgeReviewing');
-  assert.equal(parts.phaseStateText({ phase: 'concluding' }, t), 'badgeConcluding');
-  assert.equal(parts.phaseStateText({ phase: 'error' }, t), 'badgeError');
-  assert.equal(
-    parts.phaseStateText({ phase: 'analyzing', progress: { done: 3, total: 9, failed: 0 } }, t),
-    'badgeAnalyzing',
-  );
-  assert.equal(parts.phaseStateText({ phase: 'concluded', version: 1 }, t), 'badgeDone');
-  assert.equal(parts.phaseStateText({ phase: 'ready', nextAction: 'conclude' }, t), 'badgeDone');
-
-  // Conclusion-side badge: version-aware keys while a conclusion exists, none otherwise.
-  assert.equal(parts.conclusionBadgeText(null, t), 'badgeConclusionNone');
-  assert.equal(parts.conclusionBadgeText({ phase: 'ready', version: 0 }, t), 'badgeConclusionNone');
-  assert.equal(parts.conclusionBadgeText({ phase: 'error', version: 0 }, t), 'badgeConclusionNone');
-  assert.equal(parts.conclusionBadgeText({ phase: 'concluded', version: 3 }, t), 'badgeConclusionDraft');
-  assert.equal(parts.conclusionBadgeText({ phase: 'concluded-stale', version: 2 }, t), 'badgeConclusionStale');
-  assert.equal(parts.conclusionBadgeText({ phase: 'published', version: 4 }, t), 'badgePublished');
-  assert.equal(parts.conclusionBadgeText({ phase: 'published-stale', version: 5 }, t), 'badgePublishedStale');
-
-  // The overview-entry variant treats the process as its own subject: the conclude job
-  // never leaks into it, so concluding falls through to the plain review-done text.
-  assert.equal(parts.overviewStateText(null, t), '');
-  assert.equal(parts.overviewStateText({ phase: 'error' }, t), 'badgeError');
-  assert.equal(parts.overviewStateText({ phase: 'reviewing' }, t), 'badgeReviewing');
-  assert.equal(
-    parts.overviewStateText({ phase: 'analyzing', progress: { done: 3, total: 9, failed: 0 } }, t),
-    'badgeAnalyzing',
-  );
-  assert.equal(parts.overviewStateText({ phase: 'concluding' }, t), 'badgeDone');
-  assert.equal(parts.overviewStateText({ phase: 'ready' }, t), 'badgeDone');
-  assert.equal(parts.overviewStateText({ phase: 'concluded' }, t), 'badgeDone');
-  assert.equal(parts.overviewStateText({ phase: 'published' }, t), 'badgeDone');
-});
-
-test('conclusionBadgeTone maps phases to badge tones', () => {
-  const { parts } = loadClient();
-  const tone = (phase) => parts.conclusionBadgeTone({ phase, progress: null, nextAction: null, version: 0 });
-  assert.equal(tone('ready'), 'none');
-  assert.equal(tone('reviewing'), 'none');
-  assert.equal(tone('analyzing'), 'none');
-  assert.equal(parts.conclusionBadgeTone(null), 'none');
-  assert.equal(tone('concluding'), 'info');
-  assert.equal(tone('concluded'), 'info');
-  assert.equal(tone('concluded-stale'), 'warn');
-  assert.equal(tone('published'), 'ok');
-  assert.equal(tone('published-stale'), 'warn');
-  assert.equal(tone('error'), 'danger');
-});
 
 test('processBadgeTone maps phases to the overview entry tones', () => {
   const { parts } = loadClient();
@@ -3060,43 +2564,7 @@ test('filesBadgeTone maps the analysis progress to header tones', () => {
   assert.equal(parts.filesBadgeTone(null, 0, 5, 14), 'none');
 });
 
-test('shouldAutoSwitchPhase only lands on the conclusion after the conclude job finishes', () => {
-  const { parts } = loadClient();
-  const decides = parts.shouldAutoSwitchPhase;
-  // Without a finishing conclude job nothing switches, whatever the target phase is.
-  assert.equal(decides('ready', 'concluded', 'overview', true), false);
-  assert.equal(decides('reviewing', 'published', 'overview', true), false);
-  // concluding → an intermediate phase is not a finish: stay put.
-  assert.equal(decides('concluding', 'analyzing', 'overview', true), false);
-  assert.equal(decides('concluding', 'ready', 'overview', true), false);
-  // Each terminal phase of a finished conclude job lands on the conclusion page.
-  for (const terminal of ['concluded', 'concluded-stale', 'published', 'published-stale']) {
-    assert.equal(decides('concluding', terminal, 'overview', true), true, terminal);
-  }
-  // A reviewer reading a file is not interrupted.
-  assert.equal(decides('concluding', 'concluded', 'file', true), false);
-  assert.equal(decides('concluding', 'concluded', 'conclusion', true), false);
-  // Neither is a reviewer pinned to a historical round.
-  assert.equal(decides('concluding', 'concluded', 'overview', false), false);
-});
 
-test('overviewFooterVisible mounts the dock only in the actionable phases', () => {
-  const { parts } = loadClient();
-  const visible = parts.overviewFooterVisible;
-  // Ready (the first conclusion is the next step) and concluding (progress + cancel) act.
-  assert.equal(visible({ phase: 'ready', progress: null, nextAction: 'conclude', version: 0 }), true);
-  assert.equal(visible({ phase: 'concluding', progress: null, nextAction: null, version: 0 }), true);
-  // Once a conclusion exists its actions belong to the conclusion page — dock clears.
-  for (const settled of ['concluded', 'concluded-stale', 'published', 'published-stale']) {
-    assert.equal(visible({ phase: settled, progress: null, nextAction: null, version: 1 }), false, settled);
-  }
-  // The remaining pipeline states carry their own surfaces; no footer here either.
-  for (const running of ['analyzing', 'reviewing', 'error']) {
-    assert.equal(visible({ phase: running, progress: null, nextAction: null, version: 0 }), false, running);
-  }
-  assert.equal(visible(null), false);
-  assert.equal(visible(undefined), false);
-});
 
 
 
@@ -3270,46 +2738,6 @@ test('cleanCountOf counts finished analyses without issues', () => {
   assert.deepEqual(plain(parts.cleanCountOf(review)), { done: 2, clean: 1, failed: 1 });
 });
 
-test('overviewFooter gates publish and notices by page', () => {
-  const { parts } = loadClient();
-  const t = translator(parts);
-  const baseProps = {
-    t,
-    review: { publishing: false },
-    concludeBusy: false, reviewBusy: false, publishBusy: false, previewBusy: false,
-    cancelBusy: false, concluding: null,
-    onCancelConclude: () => {}, onConclude: () => {}, onPublish: () => {},
-    comment: null, autoReconclude: false,
-    explainedCount: 0, totalFiles: 1,
-  };
-  const derived = (page) => ({
-    report: makeReport(),
-    pull: { url: 'https://example.test/pr/7' },
-    selectedVersion: makeVersion(1, 's'),
-    staleInfo: null,
-    isCurrent: true,
-    hasVersion: true,
-    selectedPublished: false,
-    page,
-  });
-
-  const overview = parts.overviewFooter(baseProps, derived('overview'));
-  const overviewLabels = [];
-  for (const element of overview.actions.props.children) {
-    if (element !== null && element.props?.label !== undefined) overviewLabels.push(element.props.label);
-  }
-  assert.ok(overviewLabels.includes(t('reconclude')));
-  assert.ok(!overviewLabels.includes(t('publishComment')));
-  assert.equal(overview.notice, null);
-
-  const conclusion = parts.overviewFooter(baseProps, derived('conclusion'));
-  const conclusionLabels = [];
-  for (const element of conclusion.actions.props.children) {
-    if (element !== null && element.props?.label !== undefined) conclusionLabels.push(element.props.label);
-  }
-  assert.ok(conclusionLabels.includes(t('publishComment')));
-  assert.notEqual(conclusion.notice, null);
-});
 
 test('OverviewPage shows digest, findings and completeness — no initial risks, no verdict', () => {
   const { parts, fake } = loadClient();
@@ -3812,15 +3240,6 @@ test('FilesPane pins a conclusion entry with live badges', () => {
   assert.equal(countSpan.children[0]?.props?.className, 'prr-spinner-sm');
   const idleCount = view.elements.find((element) => element.props?.className === 'prr-count');
   assert.ok(!idleCount.children.some((child) => child?.props?.className === 'prr-spinner-sm'));
-  const concluding = fake.render(fake.React.createElement(parts.FilesPane, {
-    ...base,
-    phase: { phase: 'concluding', progress: null, nextAction: null, version: 0 },
-  }));
-  // The conclude job belongs to the conclusion entry alone: the overview badge settles
-  // to review-done with no spinner while the conclusion entry keeps 汇总中 and spins.
-  assert.ok(concluding.textOnly.includes(t('badgeDone')));
-  assert.ok(concluding.textOnly.includes(t('badgeConcluding')));
-  assert.equal(spinners(concluding).length, 1);
 
   const active = fake.render(fake.React.createElement(parts.FilesPane, {
     ...base,

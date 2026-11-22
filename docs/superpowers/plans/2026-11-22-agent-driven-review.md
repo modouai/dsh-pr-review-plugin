@@ -1,13 +1,13 @@
 # Agent 驱动的审查 Implementation Plan
 
-> **⚠️ 历史执行计划，不要按正文执行。** 阶段 0/1/2 已按下面的实施备注实现，正文里的旧方案（`cordis.patch.yml` 预设、`review-continue.md`、`evidenceWorkspace` 等）已被当前代码与 spec 取代。复选框是原始计划形态，未逐项勾选不代表未实现；阶段 3 仍是待办。当前行为以 `docs/superpowers/specs/2026-11-22-agent-driven-review-design.md` 和代码为准。
+> **⚠️ 历史执行计划，不要按正文执行。** 阶段 0/1/2/3 已按下面的实施备注实现，正文里的旧方案（`cordis.patch.yml` 预设、`review-continue.md`、`evidenceWorkspace` 等）已被当前代码与 spec 取代。复选框是原始计划形态，未逐项勾选不代表未实现。当前行为以 `docs/superpowers/specs/2026-11-22-agent-driven-review-design.md` 和代码为准。
 
 | 阶段 | 实际状态 |
 |---|---|
 | 0 宿主原型 | 完成（探针已删除） |
 | 1 Runner / 预设 / 提示 | 完成（预设改为程序化注册，不再写 `cordis.patch.yml`） |
 | 2 自动触发 / UI / 安全 | 完成（含 incomplete、run 持久化、会话绑定、fail-closed） |
-| 3 删除旧直连 LLM 链路 | 未开始（旧引擎仍保留以便回退） |
+| 3 删除旧直连 LLM 链路 | 完成（legacy 引擎/工具/prompts/UI 已删除） |
 | 4 全量验收 / PR | 进行中（PR #36 draft） |
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -20,7 +20,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-22-agent-driven-review-design.md`
 
-> **实施备注（2026-11-22）**：阶段 0/1 已通过，阶段 2 已基本完成，阶段 3 未开始。实际实现与下面的草案有几处偏差，以代码与 spec 为准（下面的复选框保留原始计划形态，未逐项勾选，不代表未实现）：
+> **实施备注（2026-11-22）**：阶段 0/1/2/3 已完成。实际实现与下面的草案有几处偏差，以代码与 spec 为准（下面的复选框保留原始计划形态，未逐项勾选，不代表未实现）：
 > - 预设改为 `ctx.get('agentPresets').register(...)` 程序化注册；bundle patch 里的预设行已删除（子插件从插件基座解析不到 Host 工具包）。
 > - Agent 创建时 `setup` 必须 `agentPresets.mount(agentCtx, presetId)`；`meta.agentPreset` 只是 session header 记录。
 > - `meta.cwd` 指向 PR head 的 detached worktree，不是用户工作区；worktree 失败直接 error（不降级读旧代码）。
@@ -32,7 +32,7 @@
 > - Agent 任务消息带上上一轮**结论条目**；「已修复 / 仍未解决」按结论 blockers+suggestions 计数（逐文件 findings 只作明细），结论写入时冻结 findings 快照供旧版回退与明细使用。
 > - 只读 Agent 额外挂一条 scoped system prompt（`order: 70`），说明它没有 publish/conclude/write/bash/create_worktree。
 > - `review_update_conclusion` 的 Agent 来源记为 `source: 'model'`（Agent 也是模型调用），人工编辑为 `source: 'human'`。
-> - 阶段 3（删除旧直连 LLM 流水线、`unverified/refuted` 数据、旧配置）尚未执行；当前分支仍保留旧引擎供回退。
+> - 阶段 3 已完成：直连 LLM 的 report/explain/verify/conclude 链路、evidence/verifier/refuter、对应 prompts/UI 动作与 `unverified/refuted` 数据已删除；版本 0.5.0。
 
 ---
 

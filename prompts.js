@@ -23,16 +23,15 @@ function read(relativePath) {
 
 /** Prompt file stems; `reviewer` loads `prompts/reviewer.md`. */
 export const PROMPT_NAMES = [
-  'reviewer', 'reviewer-compact', 'verifier',
-  'report', 'explain', 'verify', 'chat', 'conclude', 'feedback',
+  'reviewer', 'reviewer-compact',
+  'chat', 'feedback',
   'review-data', 'review-task',
 ];
 
 /** Shared fragment file stems; `language-zh` loads `prompts/fragments/language-zh.md`. */
 export const FRAGMENT_NAMES = [
-  'review-framework', 'previous-verdicts',
+  'review-framework',
   'language-zh', 'language-en', 'language-compact-zh', 'language-compact-en',
-  'verify-language-zh', 'verify-language-en',
   'chat-file-contract', 'chat-overview-contract',
 ];
 

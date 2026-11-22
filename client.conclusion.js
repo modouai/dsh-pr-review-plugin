@@ -389,7 +389,7 @@ window.__ModuleLoader__.load({
        * Expanded body of the stale warning: which files (and the report) changed after the latest
        * conclusion, plus the analysis-coverage line when both apply.
        */
-      function staleDetailOf(info, coverageIncomplete, autoReconclude, t) {
+      function staleDetailOf(info, coverageIncomplete, t) {
         const shown = info.files.slice(0, 5);
         const more = info.files.length - shown.length;
         return h(
@@ -405,27 +405,6 @@ window.__ModuleLoader__.load({
               ),
           more > 0 ? h('div', { className: 'prr-dock-tip' }, fill(t('staleMore'), { count: more })) : null,
           coverageIncomplete === true ? h('div', { className: 'prr-dock-tip' }, t('coverageIncomplete')) : null,
-          autoReconclude === true ? h('div', { className: 'prr-dock-tip' }, t('autoReconcludeOn')) : null,
-        );
-      }
-
-      /** Inline generation progress (stage text) with a cancel button. */
-      function ConcludingProgress(props) {
-        const { concluding, t, onCancel, cancelBusy } = props;
-        const stageKey = typeof concluding?.stage === 'string' ? STAGE_KEY[concluding.stage] : undefined;
-        return h(
-          'div',
-          { className: 'prr-progress' },
-          h('span', { className: 'prr-spinner' }),
-          h('span', null, stageKey === undefined
-            ? t('concluding')
-            : fill(t('concludingStage'), { stage: t(stageKey) })),
-          h(Btn, {
-            label: cancelBusy === true ? t('cancelBusy') : t('cancel'),
-            small: true,
-            disabled: cancelBusy === true,
-            onClick: onCancel,
-          }),
         );
       }
 
@@ -494,44 +473,24 @@ window.__ModuleLoader__.load({
               t('openPlatform'),
             )
           : null;
-        const concludeLabel = derived.hasVersion === true ? t('reconclude') : t('conclude');
         const selectedPublished = derived.selectedPublished === true;
         const publishLabel = props.publishBusy === true || review.publishing === true
           ? t('publishing')
           : (props.previewBusy === true
             ? t('previewLoading')
             : (selectedPublished ? t('appendComment') : t('publishComment')));
-        const progressActive = props.concluding !== null && props.concluding !== undefined;
         const publishTitle = selectedPublished
           ? t(staleInfo !== null ? 'appendStaleHint' : 'appendCommentHint')
           : staleInfo !== null
             ? t('publishStaleHint')
-            : (progressActive === true ? t('publishConcludingHint') : undefined);
+            : undefined;
         const actions = h(
           'div',
           { className: 'prr-actions' },
-          progressActive === true || props.concludeBusy === true
-            ? h(ConcludingProgress, {
-                concluding: progressActive === true ? props.concluding : null,
-                t,
-                cancelBusy: props.cancelBusy,
-                onCancel: props.onCancelConclude,
-              })
-            : h(Btn, {
-                label: props.concludeBusy ? t('concluding') : concludeLabel,
-                // Regenerating is the next step only when there is nothing to publish: a stale
-                // conclusion or no conclusion at all — the footer must never end up with no
-                // primary action.
-                primary: selectedVersion === null || staleInfo !== null,
-                disabled: props.concludeBusy === true || props.reviewBusy === true,
-                onClick: props.onConclude,
-              }),
           onConclusion === false || selectedVersion === null
             ? null
             : h(Btn, {
                 label: publishLabel,
-                // Publishing (or appending) is the step that reaches the PR; it steps back only
-                // while the conclusion is stale and regenerating is what the reviewer wants.
                 primary: staleInfo === null,
                 disabled: props.publishBusy === true || props.previewBusy === true
                   || review.publishing === true,
@@ -564,7 +523,7 @@ window.__ModuleLoader__.load({
               ? {
                   tone: 'warn',
                   summary: fill(t('staleSummary'), { count: staleInfo.count }),
-                  detail: staleDetailOf(staleInfo, coverageMissing === true, props.autoReconclude === true, t),
+                  detail: staleDetailOf(staleInfo, coverageMissing === true, t),
                 }
               : (coverageMissing === true
                   ? { tone: 'note', summary: t('coverageIncomplete'), detail: null }
@@ -573,7 +532,7 @@ window.__ModuleLoader__.load({
       }
 
       return {
-        inlineMarkdown, renderMarkdown, ConclusionBlock, FeedbackBlock, PublishedBlock, staleDetailOf, ConcludingProgress, conclusionMetaLine, overviewFooter,
+        inlineMarkdown, renderMarkdown, ConclusionBlock, FeedbackBlock, PublishedBlock, staleDetailOf, conclusionMetaLine, overviewFooter,
       };
     };
   },
