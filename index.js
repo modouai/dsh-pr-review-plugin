@@ -3426,6 +3426,7 @@ export function apply(ctx, config) {
           }
           const customPrompt = typeof args.prompt === 'string' && args.prompt.trim() !== '' ? args.prompt.trim() : null;
           const selection = resolveSelection(ctx, settings);
+          const beforeUpdatedAt = record.explanations.get(filePath)?.updatedAt ?? 0;
           const prompt = customPrompt ?? [
             `你是审查探针，目标 PR #${record.number}，文件 ${filePath}。`,
             '请严格按以下顺序调用工具，不要修改代码、不要发布评论、不要询问用户：',
@@ -3449,7 +3450,9 @@ export function apply(ctx, config) {
             return toolText([`探针失败：${error instanceof Error ? error.message : String(error)}`]);
           }
           const entry = record.explanations.get(filePath);
-          const wrote = entry !== undefined && entry.status === 'done' && entry.explanation !== null && entry.explanation !== undefined;
+          const wrote = entry !== undefined && entry.status === 'done'
+            && entry.explanation !== null && entry.explanation !== undefined
+            && (entry.updatedAt ?? 0) > beforeUpdatedAt;
           const coverage = toolCoverage(record);
           return toolText([
             `Agent ${result.agentId} 结束（status=${result.status}）`,
