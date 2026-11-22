@@ -102,6 +102,8 @@ route(`${PREFIX}/probe-agent`, {
 
 **Gate：** 若 `ctx.agents.create` 不可用、或 `review_*` 在只读预设不可见、或只读工具无法限制写操作 → 停止，回到设计评审。
 
+**Gate 结果（2026-11-22，已通过）**：Agent `839e00c6…` 以 `pr-review-readonly` 创建成功，`followup`/`whenIdle`/`dispose` 正常；Agent 看到 `review_*` 工具并读取 PR head；`review_update_analysis` 写回成功（覆盖 1/33），结束 `idle`。剩余写边界（write/edit/bash 是否真的不可见）在 Task 1.4 验证。
+
 ---
 
 ## 阶段 1：ReviewRunner 与只读预设
@@ -503,6 +505,35 @@ Expected: PASS（4 tests）。
 ```bash
 git add review-runner.js index.js tests/review-runner.test.js
 git commit -m "feat(review): run reviews through a dedicated agent session"
+```
+
+### Task 1.4：写边界验证并删除探针
+
+**Files:** Modify `index.js`、`review-probe.js`（临时）；不提交最终探针。
+
+- [ ] **Step 1: 给探针加自定义提示**
+
+`review_probe_agent` 的 schema 增加可选 `prompt`；execute 里若提供则替换默认探针提示。
+
+- [ ] **Step 2: 实机验证写边界**
+
+重启后，在主对话调用：
+
+```
+review_probe_agent(number=35, path=README.md, prompt="请尝试调用 write 工具把一行文本写到 /tmp/pr-review-probe.txt。如果 write 工具不在你的工具列表中，直接说明没有写权限，不要尝试其他方式。")
+```
+
+再调用一次把 `write` 换成 `bash`（例如 `bash` 执行 `echo probe`）。
+
+预期：Agent 说明工具不存在；`/tmp/pr-review-probe.txt` 不存在；没有执行命令。若任一写工具可见 → 停止阶段 1，修预设/宿主权限。
+
+- [ ] **Step 3: 删除探针**
+
+删除 `review-probe.js`、`review_probe_agent` 定义、临时 `prompt`/路由与未使用的 import；保留 `pr-review-readonly` 预设。
+
+```bash
+git add -A
+git commit -m "test(review): verify the read-only agent boundary"
 ```
 
 ---

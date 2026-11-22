@@ -257,12 +257,20 @@ await agent.whenIdle();
 
 ## 11. 风险与待验证
 
-- **宿主版本/API**：文档来自 DSH master；当前宿主版本是否暴露 `ctx.agents.create`、`whenIdle`、`agentPreset` 需要阶段 0 实测。若不可用，退回 `ctx.subagents.startActivation` 或用户驱动，而非继续直连 LLM。
-- **工具可见性**：全局 `review_*` 在自定义预设的 Agent 中是否可见；不可见时在预设内提供一组只读写回工具。
-- **上下文成本**：33 个文件的会话可能触发压缩；预设必须挂 compaction，任务消息要求逐文件处理、及时写回。
+**阶段 0 已实测（2026-11-22，DSH 实机）**：
+
+- `ctx.agents.create({ sessionId, meta: { cwd, agentPreset }, agentOptions })` 可用；`followup({ id, role:'user', source:{kind:'user'}, content })`、`whenIdle()`、`dispose()` 均按文档工作。
+- `pr-review-readonly` 预设成功加载；Agent 能看到 `review_get` / `review_list_files` / `review_get_file` / `review_update_analysis` 等全局工具。
+- Agent 读取的是 PR head（`review_get_*`），不是本地工作区；`review_update_analysis` 写回成功，面板覆盖进度 1/33，Agent 结束状态 `idle`。
+
+**仍需验证/风险**：
+
+- **写边界**：只读预设的 `tool-fs` 已关闭 write/edit/applyPatch，且不含 bash；仍需在阶段 1 用一次真实的 write/bash 尝试确认全局工具面没有绕过预设。
+- **`review_publish` 拒绝**：runner 会话调用发布工具必须被工具级授权挡住（阶段 2）。
+- **上下文成本**：33 个文件的会话可能触发压缩；预设已挂 compaction，任务提示要求逐文件处理并及时写回。
 - **模型遵循度**：Agent 可能提前 idle 或漏文件；覆盖率检查与有限 follow-up 是兜底，但不保证完美。宁可显式 incomplete，不静默通过。
 - **读边界/密钥**：只读预设仍能读取工作区文件；需要验证 `ctx.fs` 沙箱，必要时用 fs 观察策略或受限根。
-- **自动触发与用户打扰**：独立 Agent 会话不打断主对话，但会消耗模型配额；保留并发上限与可关闭的 autoReview。
+- **宿主版本差异**：阶段 0 只在当前 DSH 实机验证；文档来自 master，升级宿主后需重新跑一次探针。
 
 ## 12. 验收标准
 
