@@ -5,6 +5,8 @@
 
 import { randomUUID } from 'node:crypto';
 
+import { restrictAgentTools } from './review-runner.js';
+
 export function userMessage(text) {
   return {
     id: randomUUID(),
@@ -14,7 +16,7 @@ export function userMessage(text) {
   };
 }
 
-export async function probeAgent({ agents, cwd, preset, provider, model, prompt }) {
+export async function probeAgent({ ctx, agents, cwd, preset, provider, model, prompt }) {
   if (agents === undefined || agents === null || typeof agents.create !== 'function') {
     throw new Error('宿主没有提供 ctx.agents.create；阶段 0 无法继续。');
   }
@@ -22,6 +24,15 @@ export async function probeAgent({ agents, cwd, preset, provider, model, prompt 
     sessionId: randomUUID(),
     meta: { cwd, agentPreset: preset },
     agentOptions: { provider, model, reasoningEffort: 'off', maxTokens: 8000 },
+    // meta.agentPreset is only recorded in the session header. The composition itself must
+    // be mounted onto the new agent's scoped context.
+    setup: async (agentCtx) => {
+      const presets = typeof ctx?.get === 'function' ? ctx.get('agentPresets') : undefined;
+      if (presets !== undefined && presets !== null && typeof presets.mount === 'function') {
+        await presets.mount(agentCtx, preset);
+      }
+      restrictAgentTools(agentCtx);
+    },
   });
   try {
     const { agent } = handle;

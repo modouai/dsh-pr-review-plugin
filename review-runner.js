@@ -69,7 +69,7 @@ const DANGEROUS_GLOBAL_TOOLS = [
 ];
 
 /** Restrict the agent's global tool mask; scoped preset tools stay visible. */
-function restrictAgentTools(agentCtx) {
+export function restrictAgentTools(agentCtx) {
   const schemas = agentCtx.tools.schemas(agentCtx);
   const known = new Set((Array.isArray(schemas) ? schemas : []).map((schema) => schema.name));
   const deny = DANGEROUS_GLOBAL_TOOLS.filter((name) => known.has(name));
@@ -125,7 +125,15 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, path
           reasoningEffort: settings.reasoningEffort,
           maxTokens: settings.reviewAgentMaxTokens ?? 8000,
         },
-        setup: (agentCtx) => restrictAgentTools(agentCtx),
+        // meta.agentPreset only records the selection; the preset composition must be
+        // mounted onto the new agent's scoped context before any turn starts.
+        setup: async (agentCtx) => {
+          const presets = typeof ctx?.get === 'function' ? ctx.get('agentPresets') : undefined;
+          if (presets !== undefined && presets !== null && typeof presets.mount === 'function') {
+            await presets.mount(agentCtx, settings.reviewAgentPreset ?? 'pr-review-readonly');
+          }
+          restrictAgentTools(agentCtx);
+        },
       });
       const { agent } = handle;
       record.run.agentSessionId = agent.id;

@@ -734,7 +734,7 @@ export function apply(ctx, config) {
             name: '@deepseek-ai/dsh-tool-fs',
             config: { write: false, edit: false, applyPatch: false, readImage: false },
           },
-          { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search' },
+          { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
           {
             id: 'compaction',
             name: 'cordis:group',
@@ -749,7 +749,7 @@ export function apply(ctx, config) {
               },
             ],
           },
-          { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo' },
+          { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo', config: { allowParallelInProgress: true } },
         ],
       }).then(() => true).catch((error) => {
         console.warn('[pr-review] 注册只读审查预设失败', error);
@@ -3476,6 +3476,7 @@ export function apply(ctx, config) {
           let result;
           try {
             result = await probeAgent({
+              ctx,
               agents,
               cwd: state.workspaceCwd || process.cwd(),
               preset,

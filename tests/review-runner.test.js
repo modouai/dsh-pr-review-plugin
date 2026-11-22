@@ -19,10 +19,22 @@ function fakeCtx(onFollowup) {
   const created = [];
   const disposed = [];
   const restrictions = [];
-  return {
+  const mounts = [];
+  const ctx = {
     created,
     disposed,
     restrictions,
+    mounts,
+    get(name) {
+      if (name === 'agentPresets') {
+        return {
+          async mount(agentCtx, id) {
+            mounts.push({ agentCtx, id });
+          },
+        };
+      }
+      return undefined;
+    },
     agents: {
       async create(options) {
         created.push(options);
@@ -34,7 +46,7 @@ function fakeCtx(onFollowup) {
           },
           async whenIdle() {},
         };
-        options.setup?.({
+        await options.setup?.({
           tools: {
             schemas: () => [{ name: 'create_worktree' }, { name: 'review_get' }, { name: 'review_publish' }],
             restrict: (filter) => {
@@ -47,6 +59,7 @@ function fakeCtx(onFollowup) {
       },
     },
   };
+  return ctx;
 }
 
 function runnerFor(record, ctx, overrides = {}) {
@@ -77,6 +90,8 @@ test('the runner creates a read-only review agent and sends the task prompt', as
   assert.equal(ctx.created[0].meta.cwd, '/repo');
   assert.equal(ctx.created[0].agentOptions.provider, 'p');
   assert.equal(ctx.created[0].agentOptions.model, 'm');
+  assert.equal(ctx.mounts.length, 1);
+  assert.equal(ctx.mounts[0].id, 'pr-review-readonly');
   assert.deepEqual(ctx.restrictions, [{ deny: ['create_worktree', 'review_publish'] }]);
   assert.match(prompts[0], /review_list_files/);
   assert.match(prompts[0], /review_update_analysis/);
