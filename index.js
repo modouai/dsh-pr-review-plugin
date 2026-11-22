@@ -708,6 +708,58 @@ export function apply(ctx, config) {
   /** Workspace cwd → resolved repository (the same workspace always maps to the same repo). */
   const repoByCwd = new Map();
 
+  /**
+   * The read-only review preset is registered programmatically on the Host's preset registry.
+   * A bundle-patch declaration resolves its child plugin names from the plugin's install base,
+   * where the Host tool packages are absent; the registry mounts from the Host context instead.
+   */
+  const REVIEW_PRESET_ID = 'pr-review-readonly';
+  let presetReady = Promise.resolve(false);
+  {
+    const presets = ctx.get('agentPresets');
+    if (presets !== undefined && presets !== null && typeof presets.register === 'function') {
+      presetReady = presets.register({
+        id: REVIEW_PRESET_ID,
+        name: 'PR Review (read-only)',
+        description: 'Read-only PR reviewer: file read/search plus review_* write-back tools.',
+        order: 50,
+        plugins: [
+          {
+            id: 'persona',
+            name: '@deepseek-ai/dsh-persona',
+            config: { prefix: '你是资深代码审查员，只读地审查当前 PR。只通过 review_* 工具写回结论；不修改工作区、不发布评论。' },
+          },
+          {
+            id: 'tool-fs',
+            name: '@deepseek-ai/dsh-tool-fs',
+            config: { write: false, edit: false, applyPatch: false, readImage: false },
+          },
+          { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search' },
+          {
+            id: 'compaction',
+            name: 'cordis:group',
+            group: true,
+            isolate: { compaction: true, toolResultPruner: true },
+            config: [
+              { id: 'compaction-basic', name: '@deepseek-ai/dsh-compaction-basic' },
+              {
+                id: 'tool-result-pruner',
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner',
+                config: { thresholdChars: 8192, headChars: 4096, tailChars: 1024 },
+              },
+            ],
+          },
+          { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo' },
+        ],
+      }).then(() => true).catch((error) => {
+        console.warn('[pr-review] 注册只读审查预设失败', error);
+        return false;
+      });
+    } else {
+      console.warn('[pr-review] 宿主没有 agentPresets.register，无法注册只读审查预设');
+    }
+  }
+
   /** Effective comment language ('zh' default, 'en' opt-in). */
   function commentLanguage() {
     return settings.commentLanguage === 'en' ? 'en' : 'zh';
@@ -3369,6 +3421,9 @@ export function apply(ctx, config) {
             return toolText(['宿主没有提供 ctx.agents.create；阶段 0 无法继续。']);
           }
           const preset = typeof args.preset === 'string' && args.preset.trim() !== '' ? args.preset.trim() : 'pr-review-readonly';
+          if (preset === REVIEW_PRESET_ID && !(await presetReady)) {
+            return toolText(['只读审查预设注册失败；请检查宿主日志（agentPresets.register）。']);
+          }
           const customPrompt = typeof args.prompt === 'string' && args.prompt.trim() !== '' ? args.prompt.trim() : null;
           const selection = resolveSelection(ctx, settings);
           const prompt = customPrompt ?? [
@@ -3439,6 +3494,9 @@ export function apply(ctx, config) {
           const agents = ctx.get('agents');
           if (agents === undefined || agents === null || typeof agents.create !== 'function') {
             return toolText(['宿主没有提供 ctx.agents.create；无法启动 Agent 审查。']);
+          }
+          if (!(await presetReady)) {
+            return toolText(['只读审查预设注册失败；请检查宿主日志（agentPresets.register）。']);
           }
           const paths = Array.isArray(args.paths)
             ? args.paths.filter((item) => typeof item === 'string' && item.trim() !== '').map((item) => item.trim())
