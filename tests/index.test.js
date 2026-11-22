@@ -4768,3 +4768,55 @@ test('a report final without order falls back to every changed file', async () =
     await plugin.dispose();
   }
 });
+
+test('a report final written at the top level is accepted', async () => {
+  const plugin = await setup({
+    fetch: roundReviewFetch,
+    reviews: { 1: unanalyzedReview() },
+    llm: llmSequence([
+      {
+        claims: [{ id: 'C1', statement: '并发写入', status: 'investigating' }],
+        queries: [{ op: 'diff', path: 'src/a.js' }],
+      },
+      {
+        claims: [{ id: 'C1', statement: '并发写入', status: 'confirmed', reason: 'diff 中两个入口都写', evidence: ['E1'] }],
+        verdict: 'suggest',
+        summary: '报告',
+        risks: [{ severity: 'block', file: 'src/a.js', point: '并发写入', claim: 'C1' }],
+        order: [{ file: 'src/a.js', reason: '入口' }],
+        focus: [],
+      },
+    ]),
+  });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const review = await plugin.waitFor(1, (current) => current.status === 'done' && current.report !== null);
+    assert.deepEqual(review.report.risks, [{ severity: 'block', file: 'src/a.js', point: '并发写入' }]);
+    assert.equal(review.report.verdict, 'block');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a closure that still lacks a final reports the raw output', async () => {
+  const plugin = await setup({
+    fetch: roundReviewFetch,
+    reviews: { 1: unanalyzedReview() },
+    investigationMaxSteps: 2,
+    llm: llmSequence([
+      {
+        claims: [{ id: 'C1', statement: '未闭合', status: 'investigating' }],
+        queries: [{ op: 'diff', path: 'src/a.js' }],
+      },
+      { claims: [{ id: 'C1', statement: '未闭合', status: 'investigating' }] },
+    ]),
+  });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const review = await plugin.waitFor(1, (current) => current.status === 'error');
+    assert.match(review.error, /调查未能闭合/);
+    assert.match(review.error, /原始输出/);
+  } finally {
+    await plugin.dispose();
+  }
+});

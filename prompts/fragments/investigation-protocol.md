@@ -41,7 +41,7 @@ claims 是你要验证的**可证伪断言**。每条必须写清「谁、在什
 
 ### final
 
-所有 claim 都已 confirmed 或 refuted 之后，输出终稿。文件范围：
+所有 claim 都已 confirmed 或 refuted 之后，输出终稿。终稿必须放在 `final` 字段里（`{ "claims": [...], "final": {...} }`），不要把 `risks`/`issues` 直接放在顶层。文件范围：
 
 ```json
 {

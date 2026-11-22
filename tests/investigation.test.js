@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  isSafeGlob, isSafePath, normalizeClaims, normalizeQueries, normalizeQuery, queryKey, validateFinal,
+  finalOf, isSafeGlob, isSafePath, normalizeClaims, normalizeQueries, normalizeQuery, queryKey, validateFinal,
 } from '../investigation.js';
 
 test('normalizeQuery accepts the five ops and normalizes defaults', () => {
@@ -263,4 +263,17 @@ test('normalizeQuery rejects ReDoS-prone grep patterns and unsafe symbols', () =
   assert.equal(normalizeQuery({ op: 'find', symbol: 'a'.repeat(201) }), null);
   assert.notEqual(normalizeQuery({ op: 'find', symbol: 'a'.repeat(200) }), null);
   assert.equal(normalizeQuery({ op: 'grep', pattern: 'a\u0000b' }), null);
+});
+
+test('finalOf accepts the terminal-answer shapes models actually emit', () => {
+  const final = { verdict: 'pass', summary: 's', risks: [], order: [], focus: [] };
+  assert.deepEqual(finalOf({ final }), final);
+  assert.deepEqual(finalOf({ final: JSON.stringify(final) }), final);
+  assert.deepEqual(finalOf({ final: `\`\`\`json\n${JSON.stringify(final)}\n\`\`\`` }), final);
+  assert.deepEqual(finalOf({ final: [final] }), final);
+  assert.deepEqual(finalOf({ report: final }), final);
+  assert.deepEqual(finalOf({ claims: [], ...final }), final);
+  assert.equal(finalOf({ claims: [] }), undefined);
+  assert.equal(finalOf({ final: null, claims: [] }), undefined);
+  assert.equal(finalOf(null), undefined);
 });

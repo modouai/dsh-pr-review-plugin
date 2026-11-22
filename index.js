@@ -56,7 +56,7 @@ import {
   buildReportOpening,
 } from './llm.js';
 import { createEvidenceExecutor } from './evidence.js';
-import { normalizeClaims, normalizeQueries, validateFinal } from './investigation.js';
+import { finalOf, normalizeClaims, normalizeQueries, validateFinal } from './investigation.js';
 import { loadPrompt } from './prompts.js';
 
 /** Cordis function-plugin name. */
@@ -1603,7 +1603,7 @@ export function apply(ctx, config) {
 
   function isInvestigationAnswer(value) {
     return value !== null && typeof value === 'object'
-      && ((value.final !== null && typeof value.final === 'object') || Array.isArray(value.queries) || Array.isArray(value.claims));
+      && (finalOf(value) !== undefined || Array.isArray(value.queries) || Array.isArray(value.claims));
   }
 
   /** The evidence blocks behind the confirmed claims, handed to the refuter verbatim. */
@@ -1639,14 +1639,16 @@ export function apply(ctx, config) {
           budgetLine: '预算已用尽：不得再发起查询，只能用已有证据收口。',
           instruction: '强制收口：不要再输出 queries；为每个 claim 给出 confirmed 或 refuted，并输出 final。',
         });
-        const answer = await callModelJson(withDeadline(prompt), signal, (value) => value !== null && typeof value === 'object'
-          && value.final !== null && typeof value.final === 'object');
+        const answer = await callModelJson(withDeadline(prompt), signal, (value) => finalOf(value) !== undefined);
         if (stale()) return { discarded: true };
         if (Date.now() > deadline) closing = true;
+        const final = finalOf(answer.parsed);
         const closed = normalizeClaims(answer.parsed?.claims, claims);
-        const validated = validateFinal(answer.parsed?.final, closed.claims, executor.evidenceIds(), mode);
-        if (!validated.ok) throw new Error(`调查未能闭合：${validated.error}`);
-        return { ...validated, final: answer.parsed.final, trace, evidenceCount: evidenceCount() };
+        const validated = validateFinal(final, closed.claims, executor.evidenceIds(), mode);
+        if (!validated.ok) {
+          throw new Error(`调查未能闭合：${validated.error}；原始输出：${String(answer.raw ?? '').slice(0, 1200)}`);
+        }
+        return { ...validated, final, trace, evidenceCount: evidenceCount() };
       }
       step += 1;
       const prompt = buildInvestigationStepPrompt({
@@ -1657,14 +1659,17 @@ export function apply(ctx, config) {
       const answer = await callModelJson(withDeadline(prompt), signal, isInvestigationAnswer);
       if (stale()) return { discarded: true };
       if (Date.now() > deadline) closing = true;
-      if (answer.parsed === null) throw new Error(`调查第 ${step} 步没有返回可解析的 JSON。`);
+      if (answer.parsed === null) {
+        throw new Error(`调查第 ${step} 步没有返回可解析的 JSON。原始输出：${String(answer.raw ?? '').slice(0, 1200)}`);
+      }
       const normalized = normalizeClaims(answer.parsed.claims, claims);
       claims = normalized.claims;
       if (normalized.overflow) trace.push({ step, note: `claims 超过 ${MAX_CLAIMS} 条上限，超出部分已忽略；请用已有 claim 收口。` });
-      if (answer.parsed.final !== undefined) {
-        const validated = validateFinal(answer.parsed.final, claims, executor.evidenceIds(), mode);
-        if (validated.ok) return { ...validated, final: answer.parsed.final, trace, evidenceCount: evidenceCount() };
-        trace.push({ step, note: `终稿被拒绝：${validated.error}\n你上一步给出的 final：${JSON.stringify(answer.parsed.final).slice(0, 4000)}` });
+      const final = finalOf(answer.parsed);
+      if (final !== undefined) {
+        const validated = validateFinal(final, claims, executor.evidenceIds(), mode);
+        if (validated.ok) return { ...validated, final, trace, evidenceCount: evidenceCount() };
+        trace.push({ step, note: `终稿被拒绝：${validated.error}\n你上一步给出的 final：${JSON.stringify(final).slice(0, 4000)}` });
       }
       const { accepted, rejected } = normalizeQueries(answer.parsed.queries, MAX_QUERIES_PER_STEP);
       if (accepted.length === 0) {

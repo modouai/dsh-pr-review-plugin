@@ -146,6 +146,62 @@ export function normalizeClaims(raw, previous = [], max = 12) {
   return { claims: [...next.values()].slice(0, max), overflow: next.size > max };
 }
 
+/** Parse a JSON object out of a string, tolerating fences and surrounding prose. */
+function parseObject(value) {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  const attempt = (candidate) => {
+    try {
+      const parsed = JSON.parse(candidate);
+      return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const direct = attempt(trimmed);
+  if (direct !== undefined) return direct;
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced !== null) {
+    const parsed = attempt(fenced[1].trim());
+    if (parsed !== undefined) return parsed;
+  }
+  const first = trimmed.indexOf('{');
+  const last = trimmed.lastIndexOf('}');
+  return first !== -1 && last > first ? attempt(trimmed.slice(first, last + 1)) : undefined;
+}
+
+function looksLikeFinal(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && typeof value.summary === 'string'
+    && (Array.isArray(value.issues) || Array.isArray(value.risks));
+}
+
+/**
+ * Locate the terminal answer across the shapes models actually produce:
+ * `{ final: {...} }`, `{ final: "<json>" }`, `{ final: [{...}] }`, `{ report: {...} }`,
+ * or the final fields written at the top level. Returns undefined when none is present.
+ */
+export function finalOf(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const raw = value.final;
+  if (Array.isArray(raw) && raw.length === 1 && looksLikeFinal(raw[0])) return raw[0];
+  if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) return raw;
+  const parsedRaw = parseObject(raw);
+  if (parsedRaw !== undefined) return parsedRaw;
+  if (value.report !== null && typeof value.report === 'object' && !Array.isArray(value.report)) return value.report;
+  const parsedReport = parseObject(value.report);
+  if (parsedReport !== undefined) return parsedReport;
+  const parsedResult = parseObject(value.result);
+  if (parsedResult !== undefined && looksLikeFinal(parsedResult)) return parsedResult;
+  if (looksLikeFinal(value)) {
+    const rest = { ...value };
+    delete rest.claims;
+    delete rest.queries;
+    return rest;
+  }
+  return undefined;
+}
+
 /**
  * Validate the terminal answer. Every claim must be closed; every confirmed claim must
  * cite real evidence and produce exactly one finding. The host synthesizes baseline
