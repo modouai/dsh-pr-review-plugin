@@ -526,7 +526,9 @@ test('force review opens round 2: previousRound, cleared state, and a frozen bas
     assert.equal(openRound.feedback, null);
     assert.deepEqual(openRound.publishedIds, []);
     assert.equal(secondRound.conclusion, null);
-    assert.equal(secondRound.delta, null);
+    // 旧缓存没有 findings 快照；开轮前会用旧轮仍保留的逐文件分析回填基准。
+    assert.equal(secondRound.delta.baselineRound, 1);
+    assert.equal(secondRound.delta.pending.length, 1);
     assert.equal(secondRound.feedback, null);
     assert.deepEqual(secondRound.publishedItems, []);
     assert.deepEqual(secondRound.humanItemIds, []);
@@ -547,8 +549,9 @@ test('force review opens round 2: previousRound, cleared state, and a frozen bas
     assert.equal(reviewed.conclusion.verdict, 'block');
     // 第 2 轮 conclude 时没有任何已完成的逐文件分析 → 快照为空数组（非 null）。
     assert.deepEqual(reviewed.roundHistory[1].findings, []);
-    // 没有可对比的基准 → 无复审对比。
-    assert.equal(reviewed.delta, null);
+    // 基准来自回填的第 1 轮；第 2 轮没有逐文件分析，所以仍是待分析。
+    assert.equal(reviewed.delta.baselineRound, 1);
+    assert.equal(reviewed.delta.pending.length, 1);
   } finally {
     await plugin.dispose();
   }
@@ -4686,5 +4689,100 @@ test('a reviewing agent run is persisted so a restart does not drop the PR', asy
   } finally {
     await plugin.dispose();
     await rm(workspace.dir, { recursive: true, force: true });
+  }
+});
+
+test('review_update_analysis persists an agent re-judgement of baseline findings', async () => {
+  const conclusion = { verdict: 'block', summary: '第一轮结论', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 2,
+    conclusion: null,
+    conclusionAt: 0,
+    comment: null,
+    published: [],
+    publishedItems: [],
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 150,
+        conclusions: [{ version: 1, createdAt: 200, source: 'model', conclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+        findings: [
+          { index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 1, suggestion: '' },
+          { index: 2, file: 'src/a.js', severity: 'suggest', point: '旧建议', line: 2, suggestion: '' },
+        ],
+      },
+      { round: 2, headSha: 'newsha', startedAt: 160, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+    explanations: [],
+    report: null,
+    reportUpdatedAt: 0,
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const before = await plugin.review();
+    await plugin.runTool('review_update_analysis', {
+      revision: before.revision,
+      path: 'src/a.js',
+      issues: [{ point: '旧问题', line: 1, roundItem: 1 }],
+      baselineVerdicts: [
+        { index: 1, status: 'still-open' },
+        { index: 2, status: 'fixed' },
+      ],
+    });
+    const after = await plugin.review();
+    assert.notEqual(after.delta, null);
+    assert.deepEqual(after.delta.resolved.map((item) => item.index), [2]);
+    assert.deepEqual(after.delta.stillOpen.map((item) => item.previous.index), [1]);
+    assert.deepEqual(after.explanations[0].baselineVerdicts, [
+      { index: 1, status: 'still-open' },
+      { index: 2, status: 'fixed' },
+    ]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('starting a new round backfills a missing findings baseline from the old round', async () => {
+  const conclusion = { verdict: 'suggest', summary: '旧结论', blockers: [], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 1,
+    conclusion,
+    conclusionAt: 300,
+    roundHistory: [{
+      round: 1,
+      headSha: 'abc123',
+      startedAt: 100,
+      finishedAt: 200,
+      conclusions: [{ version: 1, createdAt: 300, source: 'model', conclusion, coverage: null }],
+      feedback: null,
+      publishedIds: [],
+      // Old agent round: conclusion exists but the findings snapshot was never frozen.
+    }],
+    explanations: [{
+      file: 'src/a.js',
+      status: 'done',
+      error: null,
+      explanation: {
+        verdict: 'suggest',
+        summary: '旧分析',
+        issues: [{ point: '旧问题', line: 1, severity: 'suggest' }],
+        suggestions: [],
+      },
+      chat: [],
+      updatedAt: 150,
+    }],
+  });
+  const plugin = await setup({ reviews: { 1: record }, fetch: roundReviewFetch });
+  try {
+    await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    const reviewed = await plugin.review();
+    assert.equal(reviewed.roundHistory[0].findings.length, 1);
+    assert.equal(reviewed.roundHistory[0].findings[0].point, '旧问题');
+  } finally {
+    await plugin.dispose();
   }
 });

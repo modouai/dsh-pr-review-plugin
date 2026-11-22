@@ -1637,6 +1637,14 @@ export function apply(ctx, config) {
   function rollNewRound(record, now) {
     const history = roundHistoryOf(record);
     const previousRoundEntry = history[history.length - 1];
+    // Rounds reviewed before the Agent path froze findings have an empty snapshot. Backfill
+    // from the still-current explanations before they are cleared, so this new round can
+    // compare against the previous one instead of losing the「已修复」baseline.
+    if ((previousRoundEntry.conclusions?.length ?? 0) > 0
+      && (!Array.isArray(previousRoundEntry.findings) || previousRoundEntry.findings.length === 0)) {
+      const backfill = findingsSnapshotOf(record);
+      if (backfill.length > 0) previousRoundEntry.findings = backfill;
+    }
     const previousVersion = latestConclusionVersionOf(record);
     const previousItems = previousVersion === null ? [] : commentItems(previousVersion.conclusion);
     record.previousRound = previousVersion === null ? null : {
@@ -3247,6 +3255,7 @@ export function apply(ctx, config) {
     if (typeof item.severity === 'string') output.severity = item.severity === 'block' ? 'block' : 'suggest';
     if (typeof item.file === 'string' && item.file !== '') output.file = item.file;
     if (typeof item.suggestion === 'string' && item.suggestion.trim() !== '') output.suggestion = item.suggestion.trim().slice(0, 1000);
+    if (Number.isInteger(item.roundItem) && item.roundItem > 0) output.roundItem = Math.floor(item.roundItem);
     return output;
   }
 
@@ -3663,7 +3672,12 @@ export function apply(ctx, config) {
             issues: {
               type: 'array',
               items: { type: 'object', additionalProperties: true },
-              description: '审查意见列表（传入即整体替换）；每条 { point, suggestion?, line?, severity? }，point 写问题与影响（≤ 500 字），suggestion 写具体修法，一条最多一条。',
+              description: '审查意见列表（传入即整体替换）；每条 { point, suggestion?, line?, severity?, roundItem? }，point 写问题与影响（≤ 500 字），suggestion 写具体修法，一条最多一条。roundItem 指向上一轮 baseline finding 的 index。',
+            },
+            baselineVerdicts: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+              description: '上一轮 baseline findings 的逐项判定（传入即整体替换）：[{ index, status: "fixed"|"still-open" }]。只对该文件负责的 baseline 项写判定；没有明确确认修复就写 still-open。',
             },
             number: numberProperty,
           },
@@ -3686,7 +3700,12 @@ export function apply(ctx, config) {
             explanation: null,
             chat: [],
             updatedAt: 0,
+            baselineVerdicts: null,
           };
+          const baselineFindings = baselineRoundOf(record)?.findings ?? [];
+          const baselineVerdicts = args.baselineVerdicts === undefined
+            ? (Array.isArray(entry.baselineVerdicts) ? entry.baselineVerdicts : null)
+            : normalizePreviousVerdicts(args.baselineVerdicts, baselineFindings.length);
           const before = entry.explanation ?? null;
           // Normalize the merged explanation through the single shape point: issues become
           // four-key findings (suggestion inlined), any legacy `suggestions` key is dropped,
@@ -3706,6 +3725,7 @@ export function apply(ctx, config) {
           entry.explanation = next;
           entry.status = 'done';
           entry.error = null;
+          entry.baselineVerdicts = Array.isArray(baselineVerdicts) && baselineVerdicts.length > 0 ? baselineVerdicts : null;
           entry.updatedAt = Date.now();
           record.explanations.set(args.path, entry);
           recordToolAudit(record, exec, 'review_update_analysis', `${args.path}: ${writeSummary(before, next)}`);

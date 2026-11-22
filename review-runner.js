@@ -20,6 +20,31 @@ function allFiles(record) {
   return (Array.isArray(record.files) ? record.files : []).map((file) => file.path);
 }
 
+/** The newest earlier round with a conclusion: its frozen findings are this round's baseline. */
+function baselineOf(record) {
+  const rounds = Array.isArray(record.roundHistory) ? record.roundHistory : [];
+  const current = rounds.length > 0 ? rounds[rounds.length - 1] : null;
+  for (let index = rounds.length - 1; index >= 0; index -= 1) {
+    const entry = rounds[index];
+    if (entry === current) continue;
+    if ((entry.conclusions?.length ?? 0) > 0) {
+      return { round: entry.round, findings: Array.isArray(entry.findings) ? entry.findings : [] };
+    }
+  }
+  return null;
+}
+
+function baselinePrompt(record) {
+  const baseline = baselineOf(record);
+  if (baseline === null || baseline.findings.length === 0) return '';
+  const lines = [
+    `上一轮（第 ${baseline.round} 轮）留下的 findings（共 ${baseline.findings.length} 项）：`,
+    ...baseline.findings.map((item) => `- #${item.index} [${item.severity}] ${item.file}${item.line > 0 ? `:${item.line}` : ''} ${item.point}`),
+    '对本轮每个曾出现的项判断 fixed 或 still-open；在对应文件的 `review_update_analysis` 里传 `baselineVerdicts: [{ index, status }]`。问题仍在时，把对应 issue 带 `roundItem: <index>`；只有明确确认已修复才写 fixed。',
+  ];
+  return lines.join('\n');
+}
+
 function taskPrompt(record, cwd, analyzeFiles, cwdNote) {
   const files = allFiles(record);
   const scope = `全部变更文件（${files.length} 个）`;
@@ -30,6 +55,7 @@ function taskPrompt(record, cwd, analyzeFiles, cwdNote) {
     cwd,
     cwdNote: typeof cwdNote === 'string' ? cwdNote : '',
     scope,
+    baselineSection: analyzeFiles ? baselinePrompt(record) : '',
     fileAnalysisStep: analyzeFiles
       ? '对每个文件：`review_get_file` / `review_get_diff` 获取 PR head 内容；按需读取调用方、定义、测试；分析后调用 `review_update_analysis` 写回。'
       : '本轮只写总体报告，不逐文件分析；用户点开文件时再分析。',

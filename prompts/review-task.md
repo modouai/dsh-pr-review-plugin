@@ -6,6 +6,8 @@
 
 本轮范围：{{scope}}
 
+{{baselineSection}}
+
 本审查会话只绑定这一个 PR：所有 `review_*` 工具调用都必须显式带 `number: {{pullNumber}}`，不要依赖“当前 PR”的隐式推断。
 
 流程：
