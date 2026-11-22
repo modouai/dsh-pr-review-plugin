@@ -3394,9 +3394,46 @@ export function apply(ctx, config) {
     ];
   }
 
-  /** Temporary phase-0 probe definitions; removed after the write-boundary check. */
-  function probeToolDefinitions(numberProperty, textOutput) {
+  /** Temporary preset diagnostics; removed once the read-only composition is verified. */
+  function presetInfoToolDefinitions(numberProperty, textOutput) {
     return [
+      {
+        name: 'review_preset_info',
+        description: '开发诊断：读取 pr-review-readonly 的注册结果与声明。',
+        parameters: { type: 'object', additionalProperties: false, properties: {} },
+        output: textOutput,
+        async execute() {
+          const presets = ctx.get('agentPresets');
+          if (presets === undefined || presets === null) return toolText(['宿主没有 agentPresets 服务。']);
+          const ready = await presetReady;
+          let resolved;
+          try {
+            resolved = await presets.resolve(REVIEW_PRESET_ID);
+          } catch (error) {
+            resolved = { error: error instanceof Error ? error.message : String(error) };
+          }
+          let document = null;
+          if (typeof presets.readDocument === 'function') {
+            try {
+              document = await presets.readDocument(REVIEW_PRESET_ID);
+            } catch (error) {
+              document = { error: error instanceof Error ? error.message : String(error) };
+            }
+          }
+          return toolText([
+            `presetReady=${String(ready)}`,
+            '--- resolved ---',
+            JSON.stringify(resolved, null, 2),
+            '--- document ---',
+            JSON.stringify(document, null, 2),
+          ]);
+        },
+      },
+    ];
+  }
+
+  /** Temporary phase-0 probe definitions; removed after the write-boundary check. */
+  function probeToolDefinitions(numberProperty, textOutput) {    return [
       {
         name: 'review_probe_agent',
         description: '开发探针：创建一个只读审查 Agent，让它读取指定文件并写回一条分析；验证后删除。',
@@ -3986,6 +4023,7 @@ export function apply(ctx, config) {
     };
     const definitions = [
       ...readOnlyToolDefinitions(numberProperty, textOutput),
+      ...presetInfoToolDefinitions(numberProperty, textOutput),
       ...probeToolDefinitions(numberProperty, textOutput),
       ...agentReviewToolDefinitions(numberProperty, textOutput),
       ...writeToolDefinitions(numberProperty, textOutput),
