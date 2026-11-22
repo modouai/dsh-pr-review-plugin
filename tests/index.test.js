@@ -549,9 +549,9 @@ test('force review opens round 2: previousRound, cleared state, and a frozen bas
     assert.equal(reviewed.conclusion.verdict, 'block');
     // 第 2 轮 conclude 时没有任何已完成的逐文件分析 → 快照为空数组（非 null）。
     assert.deepEqual(reviewed.roundHistory[1].findings, []);
-    // 基准来自回填的第 1 轮；第 2 轮没有逐文件分析，所以仍是待分析。
+    // 基准来自回填的第 1 轮；第 2 轮没有逐文件分析，但结论层对比已接管。
     assert.equal(reviewed.delta.baselineRound, 1);
-    assert.equal(reviewed.delta.pending.length, 1);
+    assert.equal(reviewed.delta.pending.length, 0);
   } finally {
     await plugin.dispose();
   }
@@ -4590,6 +4590,7 @@ test('agent engine runs through the plugin, binds writes to its PR, and refuses 
         blockers: [],
         suggestions: [],
         nextSteps: [],
+        previousVerdicts: [{ index: 1, status: 'fixed' }],
       }, agent);
       try {
         await executeTool('review_publish', {}, agent);
@@ -4797,6 +4798,176 @@ test('a reviewing record saved before restart is restored as a retryable error',
     assert.match(review.error, /应用重启/);
     assert.equal(review.run.status, 'error');
     assert.match(review.run.error, /应用重启/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('the delta compares the previous conclusion items, not per-file findings', async () => {
+  const conclusion = { verdict: 'block', summary: '旧结论', blockers: [{ file: 'src/a.js', point: '旧问题' }], suggestions: [], nextSteps: [] };
+  const currentConclusion = {
+    verdict: 'block',
+    summary: '新结论',
+    blockers: [{ file: 'src/a.js', point: '旧问题' }],
+    suggestions: [],
+    nextSteps: [],
+  };
+  const record = legacyReview({
+    round: 2,
+    previousRound: {
+      round: 1,
+      headSha: 'abc123',
+      conclusion,
+      items: [
+        { kind: 'blocker', id: 'b-old', file: 'src/a.js', point: '旧问题', line: 1, index: 1 },
+        { kind: 'suggestion', id: 's-old', file: 'src/a.js', point: '旧建议', line: 2, index: 2 },
+      ],
+    },
+    conclusion: currentConclusion,
+    conclusionAt: 600,
+    // 逐文件 findings 故意保留 20 条，确认它不再进入结论层对比。
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 200,
+        conclusions: [{ version: 1, createdAt: 300, source: 'model', conclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+        findings: Array.from({ length: 20 }, (_, index) => ({
+          index: index + 1, file: 'src/a.js', severity: 'suggest', point: `逐文件意见 ${index + 1}`, line: 1, suggestion: '',
+        })),
+      },
+      {
+        round: 2,
+        headSha: 'newsha',
+        startedAt: 400,
+        finishedAt: 0,
+        conclusions: [{
+          version: 1,
+          createdAt: 600,
+          source: 'model',
+          conclusion: currentConclusion,
+          coverage: null,
+          previousVerdicts: [
+            { index: 1, status: 'still-open' },
+            { index: 2, status: 'fixed' },
+          ],
+        }],
+        feedback: null,
+        publishedIds: [],
+      },
+    ],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const review = await plugin.review();
+    assert.equal(review.delta.baselineRound, 1);
+    assert.deepEqual(review.delta.resolved.map((item) => item.point), ['旧建议'], JSON.stringify(review.delta));
+    assert.deepEqual(review.delta.stillOpen.map((item) => item.previous.point), ['旧问题']);
+    assert.deepEqual(review.delta.pending, []);
+    assert.deepEqual(review.delta.undetermined, []);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a conclusion delta without previousVerdicts never reports an omitted item as fixed', async () => {
+  const conclusion = { verdict: 'block', summary: '旧结论', blockers: [{ file: 'src/a.js', point: '旧问题' }], suggestions: [], nextSteps: [] };
+  const currentConclusion = { verdict: 'block', summary: '新结论', blockers: [{ file: 'src/a.js', point: '旧问题' }], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 2,
+    previousRound: {
+      round: 1,
+      headSha: 'abc123',
+      conclusion,
+      items: [
+        { kind: 'blocker', id: 'b-old', file: 'src/a.js', point: '旧问题', line: 1, index: 1 },
+        { kind: 'suggestion', id: 's-old', file: 'src/a.js', point: '旧建议', line: 2, index: 2 },
+      ],
+    },
+    conclusion: currentConclusion,
+    conclusionAt: 600,
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 200,
+        conclusions: [{ version: 1, createdAt: 300, source: 'model', conclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+      },
+      {
+        round: 2,
+        headSha: 'newsha',
+        startedAt: 400,
+        finishedAt: 0,
+        conclusions: [{ version: 1, createdAt: 600, source: 'model', conclusion: currentConclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+      },
+    ],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const review = await plugin.review();
+    assert.deepEqual(review.delta.resolved, []);
+    assert.deepEqual(review.delta.stillOpen.map((item) => item.previous.point), ['旧问题']);
+    assert.deepEqual(review.delta.undetermined.map((item) => item.point), ['旧建议']);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('review_update_conclusion persists previous-round verdicts for the conclusion delta', async () => {
+  const previousConclusion = { verdict: 'block', summary: '旧结论', blockers: [{ file: 'src/a.js', point: '旧问题' }], suggestions: [], nextSteps: [] };
+  const record = legacyReview({
+    round: 2,
+    previousRound: {
+      round: 1,
+      headSha: 'abc123',
+      conclusion: previousConclusion,
+      items: [
+        { kind: 'blocker', id: 'b-old', file: 'src/a.js', point: '旧问题', line: 1, index: 1 },
+        { kind: 'suggestion', id: 's-old', file: 'src/a.js', point: '旧建议', line: 2, index: 2 },
+      ],
+    },
+    conclusion: null,
+    conclusionAt: 0,
+    roundHistory: [
+      {
+        round: 1,
+        headSha: 'abc123',
+        startedAt: 100,
+        finishedAt: 200,
+        conclusions: [{ version: 1, createdAt: 300, source: 'model', conclusion: previousConclusion, coverage: null }],
+        feedback: null,
+        publishedIds: [],
+      },
+      { round: 2, headSha: 'newsha', startedAt: 400, finishedAt: 0, conclusions: [], feedback: null, publishedIds: [] },
+    ],
+  });
+  const plugin = await setup({ reviews: { 1: record } });
+  try {
+    const before = await plugin.review();
+    await plugin.runTool('review_update_conclusion', {
+      revision: before.revision,
+      verdict: 'block',
+      summary: '新结论',
+      blockers: [{ file: 'src/a.js', point: '旧问题' }],
+      suggestions: [],
+      nextSteps: [],
+      previousVerdicts: [
+        { index: 1, status: 'still-open' },
+        { index: 2, status: 'fixed' },
+      ],
+    });
+    const after = await plugin.review();
+    assert.deepEqual(after.delta.resolved.map((item) => item.point), ['旧建议']);
+    assert.deepEqual(after.delta.stillOpen.map((item) => item.previous.point), ['旧问题']);
+    assert.equal(after.roundHistory[1].conclusions[0].previousVerdicts.length, 2);
   } finally {
     await plugin.dispose();
   }

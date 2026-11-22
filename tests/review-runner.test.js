@@ -144,24 +144,25 @@ test('the runner exposes the created agent for PR binding', async () => {
   assert.equal(seen[0], record.run.agentSessionId);
 });
 
-test('the task prompt includes baseline findings for the agent to re-judge', async () => {
+test('the task prompt includes the previous conclusion items for re-judgement', async () => {
   const record = fakeRecord(['src/a.js']);
   record.round = 2;
-  record.roundHistory = [
-    {
-      round: 1,
-      conclusions: [{ version: 1 }],
-      findings: [{ index: 1, file: 'src/a.js', severity: 'block', point: '旧问题', line: 3, suggestion: '' }],
-    },
-    { round: 2, conclusions: [], findings: [] },
-  ];
+  record.previousRound = {
+    round: 1,
+    items: [
+      { kind: 'blocker', id: 'b-1', file: 'src/a.js', point: '旧问题', line: 3, index: 1 },
+      { kind: 'suggestion', id: 's-2', file: 'src/a.js', point: '旧建议', line: 4, index: 2 },
+    ],
+  };
   let prompt = '';
   const ctx = fakeCtx((message) => { prompt = message.content[0].text; });
   await runnerFor(record, ctx, { reviewCoverageRetries: 0 }).start();
-  assert.match(prompt, /上一轮（第 1 轮）留下的 findings/);
-  assert.match(prompt, /#1 \[block\] src\/a\.js:3 旧问题/);
-  assert.match(prompt, /baselineVerdicts/);
-  assert.match(prompt, /roundItem/);
+  assert.match(prompt, /上一轮（第 1 轮）结论中的 2 项/);
+  assert.match(prompt, /#1 \[blocker\] src\/a\.js:3 旧问题/);
+  assert.match(prompt, /#2 \[suggestion\] src\/a\.js:4 旧建议/);
+  assert.match(prompt, /已修复的不要列出/);
+  assert.match(prompt, /previousVerdicts/);
+  assert.doesNotMatch(prompt, /baselineVerdicts/);
 });
 
 test('a same-round retry counts analyses written by the failed attempt', async () => {

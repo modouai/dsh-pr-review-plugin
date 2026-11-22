@@ -177,7 +177,7 @@ await agent.whenIdle();
 - 审查流程：`review_get` → `review_list_files` → 对每个文件 `review_get_file`/`review_get_diff` + 读相关调用方/测试 → `review_update_analysis`。
 - 写回要求：每条 issue 只写一个核心问题、带 severity 与行号；没有问题就写空 issues 并说明。
 - 汇总：全部文件完成后 `review_update_report`；最后 `review_update_conclusion`。
-- 复审对比：任务消息列出上一轮（最近一个有结论的轮次）冻结的 findings，Agent 对每项判断 `fixed` / `still-open`，在对应文件的 `review_update_analysis` 里传 `baselineVerdicts`，延续项带 `roundItem`。没有明确确认修复时写 `still-open`，不猜 `fixed`。
+- 复审对比：任务消息列出上一轮结论（blockers + suggestions）的条目与 #编号；Agent 写本轮结论时用 `previousVerdicts: [{ index, status }]` 逐项判定，并把仍未解决的项按相同 file/point 保留。面板按结论项计数：显式 fixed → 已修复；still-open 或仍出现 → 仍未解决；没有判定且未出现 → 未判定；结论未生成 → 待分析。逐文件 findings 只作为明细，不参与该计数。
 - 只读约束：不修改代码、不发布评论、不询问用户（无人值守）；无法读取的文件写进 summary，不猜测。
 - 覆盖率要求：`review_list_files` 的每个文件都必须出现在 `review_update_analysis`；未完成时明确列出。
 
@@ -189,9 +189,9 @@ await agent.whenIdle();
 
 | 工具 | 用途 |
 |---|---|
-| `review_update_analysis` | 单文件 verdict/summary/logic/walkthrough/changes/issues；可带 `baselineVerdicts` 与 `roundItem` 完成上一轮 findings 的复审判定 |
+| `review_update_analysis` | 单文件 verdict/summary/logic/walkthrough/changes/issues；逐文件明细的 `baselineVerdicts` / `roundItem` 仅保留给旧版 findings 对比，不参与结论层复审计数 |
 | `review_update_report` | 总体 verdict/summary/risks/order/focus |
-| `review_update_conclusion` | 最终结论（blockers/suggestions/nextSteps）；Agent 写入时同时冻结本轮 findings 作为下一轮基线 |
+| `review_update_conclusion` | 最终结论（blockers/suggestions/nextSteps）+ `previousVerdicts` 对上一轮结论项逐项判 fixed/still-open；Agent 写入时同时冻结本轮 findings 作为明细快照 |
 
 新增/调整：
 
@@ -205,7 +205,8 @@ await agent.whenIdle();
 - 明细页：直接渲染 `record.explanations`（工具写入）。
 - 总览页：渲染 `record.report`；**不**自动拼一份摘要。Agent 未写 report → 本轮 incomplete 并列出缺失项，由 Agent 在 coverage follow-up 中重写；插件不替 Agent 生成结论。
 - 结论页：渲染 Agent 写入的 conclusion；缺失时显示 incomplete，不自动生成。
-- 复审对比：`findingsDeltaOf` 使用上一轮冻结的 findings + 本轮 `review_update_analysis` 写入的 `baselineVerdicts` / `roundItem`，恢复「已修复 / 仍未解决 / 未判定 / 待分析」。开新轮时若旧轮缺 findings 快照（引入 Agent 路径前的轮次），从旧轮仍保留的逐文件分析回填。
+- 复审对比：`conclusionDeltaOf` 用 `previousRound.items`（上一轮结论的 blockers+suggestions）与当前结论按 id/文本相似度匹配，并读取当前结论版本的 `previousVerdicts`；显式 fixed → 已修复，still-open 或仍匹配 → 仍未解决，无判定且未匹配 → 未判定，结论未生成 → 待分析。逐文件 findings 的 `findingsDeltaOf` 只在没有 `previousRound` 的旧记录上作为回退。
+- 开新轮时若旧轮缺 findings 快照（引入 Agent 路径前的轮次），从旧轮仍保留的逐文件分析回填；该快照仅用于明细。
 - 所有写回仍走现有 `revision` 冲突保护，runner 不需要绕过。
 
 ## 6. 完成、覆盖率与失败
@@ -258,7 +259,7 @@ await agent.whenIdle();
   - follow-up 文本包含 PR、head、流程、`number` 与覆盖要求；
   - `whenIdle` 后缺口补齐；超过重试 → incomplete；
   - 同一轮重试沿用已有逐文件分析，不把旧分析判成缺失；
-  - 任务提示包含上一轮 findings，`review_update_analysis` 能持久化 `baselineVerdicts` / `roundItem`，delta 能显示已修复；
+  - 任务提示包含上一轮结论条目，Agent 写本轮结论时保留仍未解决的项；delta 以结论项计数（10 项就是 10 项），逐文件 findings 只作明细；
   - `analyze=false` 只要求 report/conclusion；
   - Agent 失败 → error；取消/新 head → dispose 旧句柄，且取消能打断 `whenIdle`；
   - 已全覆盖 → done，不额外 follow-up；

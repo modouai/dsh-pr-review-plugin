@@ -20,27 +20,26 @@ function allFiles(record) {
   return (Array.isArray(record.files) ? record.files : []).map((file) => file.path);
 }
 
-/** The newest earlier round with a conclusion: its frozen findings are this round's baseline. */
+/** The previous round's conclusion items: this round's re-review comparison baseline. */
 function baselineOf(record) {
-  const rounds = Array.isArray(record.roundHistory) ? record.roundHistory : [];
-  const current = rounds.length > 0 ? rounds[rounds.length - 1] : null;
-  for (let index = rounds.length - 1; index >= 0; index -= 1) {
-    const entry = rounds[index];
-    if (entry === current) continue;
-    if ((entry.conclusions?.length ?? 0) > 0) {
-      return { round: entry.round, findings: Array.isArray(entry.findings) ? entry.findings : [] };
-    }
-  }
-  return null;
+  const previous = record.previousRound;
+  const items = previous !== null && previous !== undefined && Array.isArray(previous.items) ? previous.items : [];
+  if (previous === null || previous === undefined || items.length === 0) return null;
+  return { round: previous.round, items };
 }
 
 function baselinePrompt(record) {
   const baseline = baselineOf(record);
-  if (baseline === null || baseline.findings.length === 0) return '';
+  if (baseline === null) return '';
   const lines = [
-    `上一轮（第 ${baseline.round} 轮）留下的 findings（共 ${baseline.findings.length} 项）：`,
-    ...baseline.findings.map((item) => `- #${item.index} [${item.severity}] ${item.file}${item.line > 0 ? `:${item.line}` : ''} ${item.point}`),
-    '对本轮每个曾出现的项判断 fixed 或 still-open；在对应文件的 `review_update_analysis` 里传 `baselineVerdicts: [{ index, status }]`。问题仍在时，把对应 issue 带 `roundItem: <index>`；只有明确确认已修复才写 fixed。',
+    `上一轮（第 ${baseline.round} 轮）结论中的 ${baseline.items.length} 项：`,
+    ...baseline.items.map((item) => {
+      const kind = item.kind === 'blocker' ? 'blocker' : 'suggestion';
+      const line = Number.isInteger(item.line) && item.line > 0 ? `:${item.line}` : '';
+      return `- #${item.index} [${kind}] ${item.file ?? ''}${line} ${item.point}`;
+    }),
+    '写本轮结论时，仍未解决的项要按相同 file/point 保留在这一轮的 blockers/suggestions 里（措辞可以改，但不能遗漏）；已修复的不要列出。',
+    '同时在本轮 `review_update_conclusion` 里传 `previousVerdicts: [{ index, status: "fixed" | "still-open" }]`；index 对应上面的 #编号。只有明确确认修复才写 fixed，未判定会被面板显示为未判定。',
   ];
   return lines.join('\n');
 }

@@ -33,6 +33,7 @@ import {
   buildFeedbackPrompt,
   calibrateVerdict,
   commentItems,
+  compareComments,
   conclusionCoverage,
   ensureConclusionIds,
   parseChatReply,
@@ -279,7 +280,7 @@ function serializeReview(record) {
     published: record.published ?? [],
     publishedItems: record.publishedItems ?? [],
     feedback: record.feedback ?? null,
-    delta: findingsDeltaOf(record),
+    delta: conclusionDeltaOf(record) ?? findingsDeltaOf(record),
     conclusionAt: record.conclusionAt ?? 0,
     conclusion: record.conclusion,
     comment: record.comment ?? null,
@@ -334,6 +335,59 @@ function baselineRoundOf(record) {
     }
   }
   return null;
+}
+
+/**
+ * Conclusion-level re-review comparison: the previous round's conclusion items
+ * (blockers + suggestions) versus this round's conclusion. This is the count users see in
+ * the panel; per-file findings stay as detail. An item still present (by id or similar text)
+ * is still open; an item omitted from the new conclusion is treated as resolved.
+ */
+function conclusionDeltaOf(record) {
+  const previous = record.previousRound;
+  const previousItems = previous !== null && previous !== undefined && Array.isArray(previous.items) ? previous.items : [];
+  if (previous === null || previous === undefined || previousItems.length === 0) return null;
+  const currentItems = commentItems(record.conclusion ?? null);
+  if (currentItems.length === 0) {
+    return {
+      baselineRound: previous.round,
+      resolved: [],
+      stillOpen: [],
+      undetermined: [],
+      pending: previousItems.map((item) => ({ file: item.file, point: item.point, kind: item.kind, line: item.line })),
+    };
+  }
+  const compared = compareComments(previousItems, currentItems);
+  const matched = new Set(compared.stillOpen.map((item) => item.index));
+  const version = latestConclusionVersionOf(record);
+  const verdicts = new Map(
+    (Array.isArray(version?.previousVerdicts) ? version.previousVerdicts : [])
+      .map((item) => [item.index, item.status]),
+  );
+  const currentById = new Map(currentItems.map((item) => [item.id, item]));
+  const resolved = [];
+  const stillOpen = [];
+  const undetermined = [];
+  for (const item of previousItems) {
+    const verdict = verdicts.get(item.index);
+    const previousItem = { file: item.file, point: item.point, kind: item.kind, line: item.line };
+    if (verdict === 'fixed') {
+      resolved.push(previousItem);
+      continue;
+    }
+    if (verdict === 'still-open' || matched.has(item.index)) {
+      const current = item.id !== undefined ? currentById.get(item.id) : undefined;
+      stillOpen.push({
+        previous: previousItem,
+        current: current === undefined
+          ? undefined
+          : { file: current.file, point: current.point, kind: item.kind, line: current.line },
+      });
+      continue;
+    }
+    undetermined.push(previousItem);
+  }
+  return { baselineRound: previous.round, resolved, stillOpen, undetermined, pending: [] };
 }
 
 /**
@@ -651,7 +705,7 @@ function syncTopLevelFromHistory(record) {
 }
 
 /** Append one conclusion version to the current round (model generation or human edit). */
-function pushConclusionVersion(record, source, conclusion, coverage) {
+function pushConclusionVersion(record, source, conclusion, coverage, previousVerdicts) {
   if (conclusion === null || conclusion === undefined) return null;
   const round = currentRoundEntry(record);
   const previous = round.conclusions.length === 0 ? null : round.conclusions[round.conclusions.length - 1];
@@ -661,6 +715,11 @@ function pushConclusionVersion(record, source, conclusion, coverage) {
     source: source === 'human' ? 'human' : 'model',
     conclusion: cloneJson(conclusion),
     coverage: coverage === undefined ? (previous?.coverage ?? null) : cloneJson(coverage),
+    // Human edits that do not touch the re-review verdicts inherit the last judgement.
+    previousVerdicts: (() => {
+      const inherited = previousVerdicts === undefined ? previous?.previousVerdicts : previousVerdicts;
+      return Array.isArray(inherited) && inherited.length > 0 ? cloneJson(inherited) : null;
+    })(),
   };
   round.conclusions.push(version);
   record.conclusion = version.conclusion;
@@ -681,6 +740,13 @@ function sanitizeRoundEntry(entry, index) {
       source: version.source === 'human' ? 'human' : 'model',
       conclusion: ensureConclusionIds(version.conclusion),
       coverage: version.coverage ?? null,
+      previousVerdicts: Array.isArray(version.previousVerdicts)
+        ? version.previousVerdicts
+          .filter((item) => item !== null && typeof item === 'object'
+            && Number.isInteger(item.index) && item.index >= 1
+            && (item.status === 'fixed' || item.status === 'still-open'))
+          .map((item) => ({ index: item.index, status: item.status }))
+        : null,
     }));
   return {
     round,
@@ -3898,6 +3964,11 @@ export function apply(ctx, config) {
               items: { type: 'string' },
               description: '下一步清单（传入即整体替换，[] 表示清空）。',
             },
+            previousVerdicts: {
+              type: 'array',
+              items: { type: 'object', additionalProperties: true },
+              description: '上一轮结论条目的逐项判定（传入即整体替换）：[{ index, status: "fixed"|"still-open" }]，index 对应任务提示里的 #编号。只有明确确认修复才写 fixed；未判定会被显示为未判定。',
+            },
             number: numberProperty,
           },
           required: ['revision'],
@@ -3931,7 +4002,11 @@ export function apply(ctx, config) {
             files: (record.files ?? []).map((file) => file.path),
           });
           const runnerAgent = isReviewRunnerAgent(record, exec.agent);
-          pushConclusionVersion(record, runnerAgent ? 'model' : 'human', normalized, record.coverage);
+          const previousItems = Array.isArray(record.previousRound?.items) ? record.previousRound.items : [];
+          const previousVerdicts = args.previousVerdicts === undefined
+            ? (latestConclusionVersionOf(record)?.previousVerdicts ?? null)
+            : normalizePreviousVerdicts(args.previousVerdicts, previousItems.length);
+          pushConclusionVersion(record, runnerAgent ? 'model' : 'human', normalized, record.coverage, previousVerdicts);
           if (runnerAgent) {
             // The Agent finishes per-file analyses before writing its conclusion, so this is
             // the point that freezes the round's findings for the next round's comparison.

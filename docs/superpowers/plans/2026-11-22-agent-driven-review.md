@@ -29,7 +29,7 @@
 > - Agent 会话绑定 PR number（`agentReviewBinding`），`review_*` 调用仍要求显式带 `number`。
 > - `paths` 参数已删除（死代码）；手动入口 `review_run_agent` 走 `startReview(number, true)` 开新一轮。
 > - `review_update_report` / `review_update_conclusion` 支持首次创建；runner 把报告/结论缺失纳入覆盖率，缺口一次 follow-up 后仍缺则 incomplete。
-> - Agent 任务消息带上上一轮 findings；`review_update_analysis` 接受 `baselineVerdicts` / `roundItem`，Agent 结论写入时冻结本轮 findings，开新轮时对缺失快照做回填，恢复「已修复」对比。
+> - Agent 任务消息带上上一轮**结论条目**；「已修复 / 仍未解决」按结论 blockers+suggestions 计数（逐文件 findings 只作明细），结论写入时冻结 findings 快照供旧版回退与明细使用。
 > - 只读 Agent 额外挂一条 scoped system prompt（`order: 70`），说明它没有 publish/conclude/write/bash/create_worktree。
 > - `review_update_conclusion` 的 Agent 来源记为 `source: 'model'`（Agent 也是模型调用），人工编辑为 `source: 'human'`。
 > - 阶段 3（删除旧直连 LLM 流水线、`unverified/refuted` 数据、旧配置）尚未执行；当前分支仍保留旧引擎供回退。
