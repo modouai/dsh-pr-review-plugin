@@ -2866,6 +2866,7 @@ test('derivePhase folds host state into one phase', () => {
   const { parts } = loadClient();
   const base = makeReview({ round: 2 });
   assert.equal(parts.derivePhase({ ...base, status: 'error' }, null).phase, 'error');
+  assert.equal(parts.derivePhase({ ...base, status: 'incomplete' }, null).phase, 'error');
   assert.equal(parts.derivePhase({ ...base, status: 'reviewing' }, null).phase, 'reviewing');
   assert.equal(
     parts.derivePhase({ ...base, concluding: { stage: 'model', startedAt: 1 } }, null).phase,

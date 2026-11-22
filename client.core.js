@@ -244,7 +244,7 @@ window.__ModuleLoader__.load({
       const current = rounds.length > 0 ? rounds[rounds.length - 1] : null;
       const versions = versionsOf(data, current, true);
       const version = versions.length > 0 ? versions[versions.length - 1].version : 0;
-      if (data.status === 'error') return { phase: 'error', progress: null, nextAction: null, version };
+      if (data.status === 'error' || data.status === 'incomplete') return { phase: 'error', progress: null, nextAction: null, version };
       const analyzing = isAnalyzing(data.analyzing) ? data.analyzing : null;
       // Batch progress is restated in the global ledger (analyzed / all changed files), the
       // same numbers the completeness line shows — a header badge of "3/9" next to an

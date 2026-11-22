@@ -1961,6 +1961,59 @@ test('review_update_conclusion creates the first conclusion for a round without 
   }
 });
 
+test('review_update_report creates the first report for a round without one', async () => {
+  const plugin = await setup({
+    reviews: { 1: legacyReview({ report: null }) },
+  });
+  try {
+    const text = await plugin.runTool('review_update_report', { revision: 0, summary: '新报告', risks: [] });
+    assert.match(text, /已写入总体报告/);
+    const review = await plugin.review();
+    assert.equal(review.report.summary, '新报告');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a restored incomplete agent run stays visible through review_get', async () => {
+  const plugin = await setup({
+    reviews: {
+      1: legacyReview({
+        run: {
+          status: 'incomplete',
+          agentSessionId: 'agent-1',
+          startedAt: 1,
+          finishedAt: 2,
+          missingFiles: ['src/a.js'],
+          missingSections: ['最终结论（review_update_conclusion）'],
+          error: '审查未完成：1 个文件、1 个收口项缺失',
+        },
+      }),
+    },
+  });
+  try {
+    const review = await plugin.review();
+    assert.equal(review.run.status, 'incomplete');
+    assert.deepEqual(review.run.missingFiles, ['src/a.js']);
+    assert.deepEqual(review.run.missingSections, ['最终结论（review_update_conclusion）']);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a run left running by a restart is restored as an interruption', async () => {
+  const plugin = await setup({
+    reviews: { 1: legacyReview({ run: { status: 'running', agentSessionId: 'agent-1', startedAt: 1 } }) },
+  });
+  try {
+    const review = await plugin.review();
+    assert.equal(review.run.status, 'error');
+    assert.match(review.run.error, /应用重启/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 test('review_get_links returns the PR and latest comment links', async () => {
   const plugin = await setup();
   try {

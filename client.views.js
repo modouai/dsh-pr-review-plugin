@@ -1046,11 +1046,17 @@ window.__ModuleLoader__.load({
         if (reviewing) {
           return h('div', { className: 'prr-zero' }, t('reviewing'));
         }
-        if (review !== null && review.status === 'error') {
+        if (review !== null && (review.status === 'error' || review.status === 'incomplete')) {
+          const missing = Array.isArray(review.run?.missingFiles) ? review.run.missingFiles : [];
           return h(
             'div',
             { className: 'prr-zero' },
-            h('div', { className: 'prr-banner', style: { margin: '0 0 8px' } }, review.error ?? t('statusError')),
+            h(
+              'div',
+              { className: 'prr-banner', style: { margin: '0 0 8px' } },
+              review.error ?? (review.status === 'incomplete' ? t('statusIncomplete') : t('statusError')),
+            ),
+            missing.length > 0 ? h('div', { className: 'prr-subtle' }, missing.join('、')) : null,
             h(Btn, { label: t('retry'), onClick: () => void startReview(true) }),
           );
         }

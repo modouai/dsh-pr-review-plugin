@@ -11,6 +11,7 @@
 1. 调用 `review_get` 读取本轮审查数据与 revision。
 2. 调用 `review_list_files` 获取全部变更文件。
 3. {{fileAnalysisStep}}
+   - 每分析完一个文件立即调用 `review_update_analysis` 写回，不要攒到最后；上下文压缩可能丢失未写回的内容。
    - path 必须是变更文件清单中的路径，revision 用最近一次 `review_get` 返回的值。
    - issues 每条只写一个核心问题，写清影响与修法；severity 只有 block / suggest。
    - 没有发现问题时 issues 写空数组，并在 summary 里说明依据。
@@ -19,4 +20,4 @@
 
 覆盖率要求：上面范围内的每个文件都必须有 `review_update_analysis`。无法读取的文件写进 summary；不要猜测。
 
-只通过上述工具写回结果；最终自然语言回复不需要包含 JSON。
+只通过上述工具写回结果；最终自然语言回复不会进入审查数据，必须通过工具写回。不要调用 `review_run_agent`（审查 Agent 不能嵌套）。

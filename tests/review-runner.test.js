@@ -18,7 +18,7 @@ function fakeRecord(files) {
   };
 }
 
-function fakeCtx(onFollowup) {
+function fakeCtx(onFollowup, whenIdle = async () => {}) {
   const created = [];
   const disposed = [];
   const restrictions = [];
@@ -49,7 +49,9 @@ function fakeCtx(onFollowup) {
           followup(message) {
             onFollowup(message, agent, options);
           },
-          async whenIdle() {},
+          async whenIdle() {
+            await whenIdle();
+          },
         };
         await options.setup?.({
           systemPrompt: {
@@ -134,28 +136,23 @@ test('missing files trigger bounded follow-ups, then incomplete', async () => {
   assert.match(prompts[1], /src\/a\.js/);
   assert.equal(record.run.status, 'incomplete');
   assert.deepEqual(record.run.missingFiles, ['src/a.js', 'src/b.js']);
+  assert.equal(record.run.missingSections.length, 2);
   assert.equal(ctx.disposed.length, 1);
 });
 
-test('a paths scope only requires the requested files', async () => {
-  const record = fakeRecord(['src/a.js', 'src/b.js']);
-  const ctx = fakeCtx(() => {
-    record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: Date.now() });
-    record.report = { verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} };
-    record.reportUpdatedAt = Date.now();
-    record.conclusion = { verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] };
-    record.conclusionAt = Date.now();
-  });
-  await createReviewRunner({
-    ctx,
-    settings: { reviewAgentPreset: 'pr-review-readonly', reviewCoverageRetries: 0 },
-    record,
-    selection: { provider: 'p', model: 'm' },
-    cwd: '/repo',
-    paths: ['src/a.js'],
-  }).start();
-  assert.equal(record.run.status, 'done');
-  assert.deepEqual(record.run.missingFiles, []);
+test('cancel writes a terminal run status instead of leaving running', async () => {
+  const record = fakeRecord(['src/a.js']);
+  let release;
+  const idle = new Promise((resolve) => { release = resolve; });
+  const ctx = fakeCtx(() => {}, () => idle);
+  const runner = runnerFor(record, ctx, { reviewCoverageRetries: 0 });
+  const task = runner.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  await runner.cancel();
+  assert.equal(record.run.status, 'cancelled');
+  assert.match(record.run.error, /取消/);
+  release();
+  await task;
 });
 
 test('a pre-existing analysis does not satisfy this run coverage', async () => {

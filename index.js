@@ -200,6 +200,27 @@ function parseBody(text) {
 }
 
 /** Serialize one review record for the browser half (no diff text, no Maps, no abort handles). */
+/**
+ * Browser/cache-safe view of one agent run. A run left `running` by a restart cannot still
+ * be alive, so it is restored as an error with an explicit interruption reason.
+ */
+function sanitizeRun(raw) {
+  if (raw === null || raw === undefined || typeof raw !== 'object') return null;
+  const statuses = new Set(['running', 'done', 'incomplete', 'error', 'cancelled']);
+  const status = statuses.has(raw.status) ? raw.status : 'error';
+  const strings = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item !== '') : []);
+  return {
+    agentSessionId: typeof raw.agentSessionId === 'string' && raw.agentSessionId !== '' ? raw.agentSessionId : null,
+    startedAt: Number.isFinite(raw.startedAt) ? raw.startedAt : 0,
+    finishedAt: Number.isFinite(raw.finishedAt) ? raw.finishedAt : 0,
+    status: status === 'running' ? 'error' : status,
+    missingFiles: strings(raw.missingFiles),
+    missingSections: strings(raw.missingSections),
+    headIsolated: raw.headIsolated === true,
+    error: status === 'running' ? '应用重启，上一轮 Agent 审查中断。' : (typeof raw.error === 'string' ? raw.error : null),
+  };
+}
+
 function serializeReview(record) {
   if (record === undefined) return null;
   return {
@@ -209,6 +230,7 @@ function serializeReview(record) {
     startedAt: record.startedAt,
     finishedAt: record.finishedAt,
     error: record.error,
+    run: sanitizeRun(record.run),
     pull: record.pull,
     files: record.files,
     filesTruncated: record.filesTruncated === true,
@@ -932,6 +954,7 @@ export function apply(ctx, config) {
         startedAt: record.startedAt,
         finishedAt: record.finishedAt,
         error: record.error,
+        run: sanitizeRun(record.run),
         pull: record.pull,
         files: record.files,
         filesTruncated: record.filesTruncated === true,
@@ -957,8 +980,7 @@ export function apply(ctx, config) {
         publishedItems: record.publishedItems ?? [],
         feedback: record.feedback ?? null,
         previousRound: record.previousRound ?? null,
-        conclusionAt: record.conclusionAt ?? 0,
-        conclusion: record.conclusion,
+        conclusionAt: record.conclusionAt ?? 0,        conclusion: record.conclusion,
         comment: record.comment ?? null,
         revision: record.revision ?? 0,
         audit: Array.isArray(record.audit) ? record.audit : [],
@@ -1103,6 +1125,7 @@ export function apply(ctx, config) {
       diffFiles: undefined,
       revision: Number.isInteger(saved.revision) && saved.revision >= 0 ? saved.revision : 0,
       audit: Array.isArray(saved.audit) ? saved.audit.filter((item) => item !== null && typeof item === 'object') : [],
+      run: sanitizeRun(saved.run),
     };
     if (Array.isArray(saved.roundHistory) && saved.roundHistory.length > 0) {
       record.roundHistory = saved.roundHistory.map((entry, index) => sanitizeRoundEntry(entry, index));
@@ -1584,6 +1607,7 @@ export function apply(ctx, config) {
       concludeError: null,
       lastAutoConcludeAt: 0,
       diffFiles: undefined,
+      run: null,
     };
     const round = roundHistoryOf(record)[0];
     round.startedAt = now;
@@ -1629,6 +1653,7 @@ export function apply(ctx, config) {
     record.coverage = null;
     record.concludeError = null;
     record.lastAutoConcludeAt = 0;
+    record.run = null;
   }
 
   /** Create the record shell and kick off the report; safe to call repeatedly. */
@@ -1737,24 +1762,25 @@ export function apply(ctx, config) {
     const headSha = record.headSha ?? record.pull?.headSha ?? '';
     const degraded = '本地工作区可能落后于 PR head；代码请以 review_get_file / review_get_diff 为准。';
     if (workspace === '' || headSha === '') {
-      return { cwd: workspace || process.cwd(), note: degraded, cleanup: async () => {} };
+      return { cwd: workspace || process.cwd(), note: degraded, isolated: false, cleanup: async () => {} };
     }
     let dir;
     try {
       dir = await mkdtemp(path.join(tmpdir(), 'dsh-pr-review-head-'));
     } catch (error) {
       console.warn('[pr-review] 创建 PR head 工作区失败', error);
-      return { cwd: workspace, note: degraded, cleanup: async () => {} };
+      return { cwd: workspace, note: degraded, isolated: false, cleanup: async () => {} };
     }
     const added = await runGitLong(workspace, ['worktree', 'add', '--detach', dir, headSha]);
     if (added === null) {
       await rm(dir, { recursive: true, force: true });
       console.warn(`[pr-review] 无法为 PR #${record.number} head ${headSha.slice(0, 8)} 创建 worktree`);
-      return { cwd: workspace, note: degraded, cleanup: async () => {} };
+      return { cwd: workspace, note: degraded, isolated: false, cleanup: async () => {} };
     }
     return {
       cwd: dir,
       note: '本地工作区已检出 PR head，可直接 read/grep。',
+      isolated: true,
       cleanup: async () => {
         await runGitLong(workspace, ['worktree', 'remove', '--force', dir]);
         await rm(dir, { recursive: true, force: true });
@@ -1798,6 +1824,11 @@ export function apply(ctx, config) {
 
   /** Agent-driven review: fetch context, then let the read-only agent write results. */
   async function runAgentReview(record) {
+    const previous = agentRuns.get(record.number);
+    if (previous !== undefined) {
+      await previous.cancel();
+      if (agentRuns.get(record.number) === previous) agentRuns.delete(record.number);
+    }
     await prepareReviewContext(record);
     if (!(await presetReady)) {
       record.status = 'error';
@@ -1809,6 +1840,7 @@ export function apply(ctx, config) {
     }
     const selection = resolveSelection(ctx, settings);
     const worktree = await prepareReviewWorktree(record);
+    const runToken = Symbol('pr-review-run');
     let runner;
     try {
       runner = createReviewRunner({
@@ -1818,6 +1850,8 @@ export function apply(ctx, config) {
         selection,
         cwd: worktree.cwd,
         cwdNote: worktree.note,
+        headIsolated: worktree.isolated === true,
+        runToken,
         analyze: settings.autoAnalyze !== false,
         onChange: () => scheduleSave(),
       });
@@ -1827,8 +1861,12 @@ export function apply(ctx, config) {
       if (runner !== undefined && agentRuns.get(record.number) === runner) agentRuns.delete(record.number);
       await worktree.cleanup();
     }
+    // A newer run replaced this one while it was finishing; its state owns the record.
+    if (record.run?.token !== runToken) return;
     const status = record.run?.status ?? 'error';
-    record.status = status === 'error' ? 'error' : 'done';
+    record.status = status === 'done' ? 'done'
+      : status === 'incomplete' || status === 'cancelled' ? 'incomplete'
+        : 'error';
     record.error = record.run?.error ?? null;
     record.finishedAt = Date.now();
     currentRoundEntry(record).finishedAt = record.finishedAt;
@@ -1905,6 +1943,10 @@ export function apply(ctx, config) {
   const explainInFlight = new Map();
   /** PR number → active agent review runner (one per PR). */
   const agentRuns = new Map();
+  ctx.effect(() => () => {
+    for (const runner of agentRuns.values()) void runner.cancel();
+    agentRuns.clear();
+  }, 'pr-review: agent runs');
 
   /** Explain one file: deep logic walkthrough + findings. `signal` cancels a batch call. */
   async function explainFile(number, filePath, force, signal) {
@@ -3329,7 +3371,7 @@ export function apply(ctx, config) {
             `revision：${record.revision ?? 0}（写入工具必须带回这个值）`,
             ...(record.run === null || record.run === undefined
               ? []
-              : [`Agent 审查：${record.run.status}${record.run.error ? `（${record.run.error}）` : ''}${Array.isArray(record.run.missingFiles) && record.run.missingFiles.length > 0 ? ` · 缺 ${record.run.missingFiles.length} 个文件` : ''}`]),
+              : [`Agent 审查：${record.run.status}${record.run.error ? `（${record.run.error}）` : ''}${Array.isArray(record.run.missingFiles) && record.run.missingFiles.length > 0 ? ` · 缺 ${record.run.missingFiles.length} 个文件` : ''}${Array.isArray(record.run.missingSections) && record.run.missingSections.length > 0 ? ` · 缺 ${record.run.missingSections.length} 个收口项` : ''}${record.run.headIsolated === false ? ' · 未隔离 PR head 工作区（可能读到旧代码）' : ''}`]),
           ]);
         },
       },
@@ -3635,8 +3677,8 @@ export function apply(ctx, config) {
           const record = requireToolReview(exec.agent, args.number);
           assertToolRevision(record, args.revision);
           const creating = record.report === null || record.report === undefined;
-          if (creating && args.summary === undefined && args.risks === undefined) {
-            throw toolError(TOOL_ERROR.invalidArgs, '首次写报告需要 summary 或 risks；不能只写一个空报告。');
+          if (creating && args.summary === undefined) {
+            throw toolError(TOOL_ERROR.invalidArgs, '首次写报告需要 summary。');
           }
           const before = record.report ?? { verdict: 'suggest', summary: '', risks: [], order: [], focus: {} };
           const next = { ...before };

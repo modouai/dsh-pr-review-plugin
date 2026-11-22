@@ -20,18 +20,9 @@ function allFiles(record) {
   return (Array.isArray(record.files) ? record.files : []).map((file) => file.path);
 }
 
-function scopedFiles(record, paths) {
+function taskPrompt(record, cwd, analyzeFiles, cwdNote) {
   const files = allFiles(record);
-  if (!Array.isArray(paths) || paths.length === 0) return files;
-  const wanted = new Set(paths);
-  return files.filter((path) => wanted.has(path));
-}
-
-function taskPrompt(record, cwd, paths, analyzeFiles, cwdNote) {
-  const files = scopedFiles(record, paths);
-  const scope = Array.isArray(paths) && paths.length > 0
-    ? `指定文件（${files.length} 个）：${files.slice(0, 50).join('、')}${files.length > 50 ? ' 等' : ''}`
-    : `全部变更文件（${files.length} 个）`;
+  const scope = `全部变更文件（${files.length} 个）`;
   return renderPrompt('review-task', {
     pullNumber: record.pull?.number ?? record.number,
     repo: record.pull?.repo ?? '',
@@ -72,8 +63,8 @@ function gapPrompt(files, sections) {
   return lines.join('\n');
 }
 
-function missingFilesOf(record, paths, before) {
-  return scopedFiles(record, paths).filter((path) => {
+function missingFilesOf(record, before) {
+  return allFiles(record).filter((path) => {
     const entry = record.explanations?.get(path);
     if (entry === undefined || entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) return true;
     // A file analyzed in an earlier round is not evidence for this run. Only a write that
@@ -118,7 +109,7 @@ export function restrictAgentTools(agentCtx) {
   if (deny.length > 0) agentCtx.tools.restrict({ deny });
 }
 
-export function createReviewRunner({ ctx, settings, record, selection, cwd, paths, analyze = true, cwdNote = '', onChange }) {
+export function createReviewRunner({ ctx, settings, record, selection, cwd, analyze = true, cwdNote = '', headIsolated = false, runToken = null, onChange }) {
   const agents = typeof ctx?.get === 'function' ? ctx.get('agents') : undefined;
   const service = agents ?? ctx?.agents;
   let handle = null;
@@ -134,26 +125,32 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, path
     if (current !== null) await current.dispose();
   };
 
+  let activeRun = null;
+
   const finish = (status, missing, sections, error) => {
-    record.run.status = status;
-    record.run.missingFiles = missing;
-    record.run.missingSections = sections;
-    record.run.error = error ?? null;
-    record.run.finishedAt = Date.now();
+    if (activeRun === null) return;
+    activeRun.status = status;
+    activeRun.missingFiles = missing;
+    activeRun.missingSections = sections;
+    activeRun.error = error ?? null;
+    activeRun.finishedAt = Date.now();
     changed();
   };
 
   const start = async () => {
     cancelled = false;
-    record.run = {
+    activeRun = {
+      token: runToken,
       agentSessionId: null,
       startedAt: Date.now(),
       finishedAt: 0,
       status: 'running',
       missingFiles: [],
       missingSections: [],
+      headIsolated: headIsolated === true,
       error: null,
     };
+    record.run = activeRun;
     changed();
     if (service === undefined || service === null || typeof service.create !== 'function') {
       finish('error', [], [], '宿主没有提供 ctx.agents.create；无法启动 Agent 审查。');
@@ -181,13 +178,13 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, path
         },
       });
       const { agent } = handle;
-      record.run.agentSessionId = agent.id;
+      activeRun.agentSessionId = agent.id;
       changed();
       // Snapshot before the first turn: only writes that land during this run count as coverage.
-      const before = new Map(scopedFiles(record, paths).map((path) => [path, record.explanations?.get(path)?.updatedAt ?? 0]));
+      const before = new Map(allFiles(record).map((path) => [path, record.explanations?.get(path)?.updatedAt ?? 0]));
       const beforeReportAt = record.reportUpdatedAt ?? 0;
       const beforeConclusionAt = record.conclusionAt ?? 0;
-      agent.followup(userMessage(taskPrompt(record, cwd, paths, analyze, cwdNote)));
+      agent.followup(userMessage(taskPrompt(record, cwd, analyze, cwdNote)));
       await agent.whenIdle();
       if (cancelled) return;
 
@@ -195,7 +192,7 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, path
       if (!analyze) {
         let sections = missingSectionsOf(record, beforeReportAt, beforeConclusionAt);
         for (let attempt = 0; attempt < retries && sections.length > 0; attempt += 1) {
-          record.run.missingSections = sections;
+          activeRun.missingSections = sections;
           changed();
           agent.followup(userMessage(gapPrompt([], sections)));
           await agent.whenIdle();
@@ -211,16 +208,16 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, path
         return;
       }
 
-      let files = missingFilesOf(record, paths, before);
+      let files = missingFilesOf(record, before);
       let sections = missingSectionsOf(record, beforeReportAt, beforeConclusionAt);
       for (let attempt = 0; attempt < retries && (files.length > 0 || sections.length > 0); attempt += 1) {
-        record.run.missingFiles = files;
-        record.run.missingSections = sections;
+        activeRun.missingFiles = files;
+        activeRun.missingSections = sections;
         changed();
         agent.followup(userMessage(gapPrompt(files, sections)));
         await agent.whenIdle();
         if (cancelled) return;
-        files = missingFilesOf(record, paths, before);
+        files = missingFilesOf(record, before);
         sections = missingSectionsOf(record, beforeReportAt, beforeConclusionAt);
       }
       const complete = files.length === 0 && sections.length === 0;
@@ -231,7 +228,7 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, path
         complete ? null : `审查未完成：${files.length} 个文件、${sections.length} 个收口项缺失`,
       );
     } catch (error) {
-      finish('error', record.run.missingFiles ?? [], record.run.missingSections ?? [], error instanceof Error ? error.message : String(error));
+      finish('error', activeRun?.missingFiles ?? [], activeRun?.missingSections ?? [], error instanceof Error ? error.message : String(error));
     } finally {
       await dispose();
     }
@@ -239,6 +236,12 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, path
 
   const cancel = async () => {
     cancelled = true;
+    if (activeRun !== null && activeRun !== undefined && activeRun.status === 'running') {
+      activeRun.status = 'cancelled';
+      activeRun.error = '审查已取消';
+      activeRun.finishedAt = Date.now();
+      changed();
+    }
     await dispose();
   };
 
