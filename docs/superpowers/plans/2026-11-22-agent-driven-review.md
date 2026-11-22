@@ -10,14 +10,18 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-22-agent-driven-review-design.md`
 
-> **实施备注（2026-11-22）**：阶段 0/1 已通过，阶段 2 进行中。实际实现与下面的草案有几处偏差，以代码与 spec 为准：
+> **实施备注（2026-11-22）**：阶段 0/1 已通过，阶段 2 已基本完成，阶段 3 未开始。实际实现与下面的草案有几处偏差，以代码与 spec 为准（下面的复选框保留原始计划形态，未逐项勾选，不代表未实现）：
 > - 预设改为 `ctx.get('agentPresets').register(...)` 程序化注册；bundle patch 里的预设行已删除（子插件从插件基座解析不到 Host 工具包）。
 > - Agent 创建时 `setup` 必须 `agentPresets.mount(agentCtx, presetId)`；`meta.agentPreset` 只是 session header 记录。
-> - `meta.cwd` 指向 PR head 的 detached worktree，不是用户工作区；worktree 失败时降级并在提示里注明。
+> - `meta.cwd` 指向 PR head 的 detached worktree，不是用户工作区；worktree 失败直接 error（不降级读旧代码）。
 > - `record.run` 持久化；`incomplete`/`cancelled` 映射为 `record.status: 'incomplete'`，不再折叠成 done；重启时 `running` 恢复为中断 error。
+> - 同一轮 error 重试沿用本轮已有逐文件分析（要求 round 与 headSha 都一致），只要求重写 report/conclusion；新 head 走 `rollNewRound`。
+> - Agent 会话绑定 PR number（`agentReviewBinding`），`review_*` 调用仍要求显式带 `number`。
 > - `paths` 参数已删除（死代码）；手动入口 `review_run_agent` 走 `startReview(number, true)` 开新一轮。
 > - `review_update_report` / `review_update_conclusion` 支持首次创建；runner 把报告/结论缺失纳入覆盖率，缺口一次 follow-up 后仍缺则 incomplete。
 > - 只读 Agent 额外挂一条 scoped system prompt（`order: 70`），说明它没有 publish/conclude/write/bash/create_worktree。
+> - `review_update_conclusion` 的 Agent 来源记为 `source: 'model'`（Agent 也是模型调用），人工编辑为 `source: 'human'`。
+> - 阶段 3（删除旧直连 LLM 流水线、`unverified/refuted` 数据、旧配置）尚未执行；当前分支仍保留旧引擎供回退。
 
 ---
 

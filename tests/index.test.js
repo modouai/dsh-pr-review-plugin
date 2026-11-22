@@ -10,11 +10,15 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import { loadPrompt } from '../prompts.js';
+
+const execFileAsync = promisify(execFile);
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -207,6 +211,60 @@ async function setup(options = {}) {
   const toolRegistry = new Map();
   const promptContexts = [];
   const promptSections = [];
+  const agentState = { mounts: [], restrictions: [], followups: [], disposed: [] };
+  // Tools are executed exactly as the Host would expose them to an agent, so an agent
+  // scenario can write through the real review_* handlers instead of faking a record.
+  async function executeTool(name, args, agent) {
+    const definition = toolRegistry.get(name);
+    if (definition === undefined) throw new Error(`tool ${name} is not registered`);
+    return definition.execute(args, { agent, signal: AbortSignal.timeout(5000) });
+  }
+  const agentPresets = options.agentPresets ?? {
+    async register() {
+      return () => {};
+    },
+    async mount(_agentCtx, id) {
+      agentState.mounts.push(id);
+    },
+  };
+  const agentsService = options.agents ?? {
+    async create(createOptions) {
+      let pending = Promise.resolve();
+      const agent = {
+        id: createOptions.sessionId,
+        followup(message) {
+          agentState.followups.push(message);
+          if (typeof options.onAgentFollowup === 'function') {
+            pending = pending.then(() => options.onAgentFollowup({ message, agent, executeTool, agentState }));
+          }
+        },
+        async whenIdle() {
+          await pending;
+        },
+      };
+      await createOptions.setup?.({
+        systemPrompt: {
+          section(definition) {
+            promptSections.push(definition);
+            return () => {};
+          },
+        },
+        tools: {
+          schemas: () => [{ name: 'bash' }, { name: 'review_publish' }, { name: 'review_get' }],
+          restrict(filter) {
+            agentState.restrictions.push(filter);
+            return () => {};
+          },
+        },
+      });
+      return {
+        agent,
+        async dispose() {
+          agentState.disposed.push(agent.id);
+        },
+      };
+    },
+  };
   const ctx = {
     tools: {
       register(definition) {
@@ -221,8 +279,12 @@ async function setup(options = {}) {
     get(name) {
       if (name === 'tools') return ctx.tools;
       if (name === 'systemPrompt') return ctx.systemPrompt;
+      if (name === 'agentPresets') return agentPresets;
+      if (name === 'agents') return agentsService;
       return undefined;
     },
+    agents: agentsService,
+    agentPresets,
     systemPrompt: {
       section(definition) {
         promptSections.push(definition);
@@ -323,6 +385,7 @@ async function setup(options = {}) {
     },
     llmState,
     fetchState,
+    agentState,
     async waitForConcluding(number = 1, timeout = 4000) {
       const deadline = Date.now() + timeout;
       let current = null;
@@ -4418,6 +4481,162 @@ test('the tool creating an entry for an unanalyzed file never resolves baselines
     const after = await plugin.review();
     assert.deepEqual(after.delta.resolved, []);
     assert.deepEqual(after.delta.undetermined.map((item) => item.index), [1]);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+// ---------- agent engine (plugin level) ----------
+
+/** A real git workspace whose HEAD is the PR head, so the runner can create a worktree. */
+async function makeGitWorkspace() {
+  const dir = await mkdtemp(path.join(tmpdir(), 'dsh-pr-review-ws-'));
+  await execFileAsync('git', ['init', '-q', dir]);
+  await execFileAsync('git', ['-C', dir, 'config', 'user.email', 'test@example.com']);
+  await execFileAsync('git', ['-C', dir, 'config', 'user.name', 'Test']);
+  await execFileAsync('git', ['-C', dir, 'remote', 'add', 'origin', 'https://git.example/acme/demo.git']);
+  await mkdir(path.join(dir, 'src'), { recursive: true });
+  await writeFile(path.join(dir, 'src', 'a.js'), 'const value = 1;\n', 'utf8');
+  await execFileAsync('git', ['-C', dir, 'add', '.']);
+  await execFileAsync('git', ['-C', dir, 'commit', '-qm', 'head']);
+  const { stdout } = await execFileAsync('git', ['-C', dir, 'rev-parse', 'HEAD']);
+  return { dir, headSha: stdout.trim() };
+}
+
+function agentFetch(headSha) {
+  return async (url) => {
+    const target = String(url);
+    if (target.includes('/pulls?state=open')) return jsonResponse(200, []);
+    if (target.endsWith('/pulls/1.diff')) return textResponse(200, BATCH_DIFF);
+    if (target.includes('/pulls/1/files')) {
+      return jsonResponse(200, [{ filename: 'src/a.js', status: 'modified', additions: 1, deletions: 0, changes: 1 }]);
+    }
+    if (target.includes('/contents/')) {
+      return jsonResponse(200, {
+        encoding: 'base64',
+        content: Buffer.from('const value = 1;\n', 'utf8').toString('base64'),
+        size: 17,
+      });
+    }
+    if (/\/pulls\/1(?:\?.*)?$/.test(target)) {
+      return jsonResponse(200, {
+        number: 1,
+        title: 'PR 标题',
+        body: '',
+        user: { login: 'dev' },
+        state: 'open',
+        merged: false,
+        additions: 1,
+        deletions: 0,
+        changed_files: 1,
+        head: { ref: 'feature', sha: headSha },
+        base: { ref: 'main', sha: 'def456' },
+        html_url: 'https://git.example/acme/demo/pulls/1',
+      });
+    }
+    throw new Error(`unexpected fetch in test: ${target}`);
+  };
+}
+
+function revisionOf(text) {
+  const match = /revision：(\d+)/.exec(String(text));
+  assert.ok(match !== null, `review_get returned a revision: ${String(text).slice(0, 200)}`);
+  return Number(match[1]);
+}
+
+test('agent engine runs through the plugin, binds writes to its PR, and refuses publish', async () => {
+  const workspace = await makeGitWorkspace();
+  const base = legacyReview();
+  const second = {
+    ...base,
+    number: 2,
+    headSha: 'sha2',
+    finishedAt: 9999,
+    pull: { ...base.pull, number: 2, title: 'PR 2', headSha: 'sha2', url: 'https://git.example/acme/demo/pulls/2' },
+  };
+  let publishError = null;
+  const plugin = await setup({
+    reviews: { 1: base, 2: second },
+    reviewEngine: 'agent',
+    fetch: agentFetch(workspace.headSha),
+    onAgentFollowup: async ({ agent, executeTool }) => {
+      // No `number`: the runner must resolve the bound PR, not the most recently finished one.
+      const first = await executeTool('review_get', {}, agent);
+      await executeTool('review_update_analysis', {
+        path: 'src/a.js',
+        revision: revisionOf(first),
+        verdict: 'pass',
+        summary: '没有发现问题',
+        issues: [],
+      }, agent);
+      const secondGet = await executeTool('review_get', {}, agent);
+      await executeTool('review_update_report', {
+        revision: revisionOf(secondGet),
+        verdict: 'pass',
+        summary: 'Agent 报告',
+        risks: [],
+        order: [],
+        focus: {},
+      }, agent);
+      const thirdGet = await executeTool('review_get', {}, agent);
+      await executeTool('review_update_conclusion', {
+        revision: revisionOf(thirdGet),
+        verdict: 'pass',
+        summary: 'Agent 结论',
+        blockers: [],
+        suggestions: [],
+        nextSteps: [],
+      }, agent);
+      try {
+        await executeTool('review_publish', {}, agent);
+      } catch (error) {
+        publishError = error;
+      }
+    },
+  });
+  try {
+    const context = await plugin.call(`/pr-review-api/context?cwd=${encodeURIComponent(workspace.dir)}`);
+    assert.equal(context.status, 200);
+    assert.equal(context.json.supported, true);
+    const started = await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    assert.equal(started.json.started, true);
+    const done = await plugin.waitFor(1, (review) => review.status !== 'reviewing', 8000);
+    assert.equal(done.status, 'done', JSON.stringify(done.run));
+    assert.equal(done.report.summary, 'Agent 报告');
+    assert.equal(done.conclusion.summary, 'Agent 结论');
+    assert.equal(done.run.status, 'done');
+    assert.equal(done.run.headIsolated, true);
+    assert.deepEqual(done.run.missingFiles, []);
+    // The later-finished PR 2 is untouched: the agent was bound to #1.
+    const other = await plugin.review(2);
+    assert.equal(other.report.summary, '初步报告');
+    assert.equal(other.revision, 0);
+    assert.ok(publishError !== null, 'publish from the runner session is rejected');
+    assert.match(String(publishError.message), /不能发布/);
+    assert.deepEqual(plugin.agentState.mounts, ['pr-review-readonly']);
+    assert.deepEqual(plugin.agentState.restrictions, [{ deny: ['bash', 'review_publish'] }]);
+    assert.equal(plugin.agentState.disposed.length, 1);
+  } finally {
+    await plugin.dispose();
+    await rm(workspace.dir, { recursive: true, force: true });
+  }
+});
+
+test('agent engine fails closed when the PR head worktree cannot be created', async () => {
+  const plugin = await setup({
+    reviewEngine: 'agent',
+    fetch: agentFetch('missing-sha'),
+    onAgentFollowup: async () => {
+      throw new Error('the agent must not start without an isolated head worktree');
+    },
+  });
+  try {
+    const started = await plugin.call('/pr-review-api/review', 'POST', { number: 1, force: true });
+    assert.equal(started.json.started, true);
+    const failed = await plugin.waitFor(1, (review) => review.status !== 'reviewing', 8000);
+    assert.equal(failed.status, 'error');
+    assert.match(failed.error, /无法为 PR head 创建工作区/);
+    assert.equal(plugin.agentState.followups.length, 0);
   } finally {
     await plugin.dispose();
   }

@@ -112,10 +112,10 @@ agent.followup({
 await agent.whenIdle();
 ```
 
-- `reviewCwd` 是本轮 PR head 的 detached worktree（`git worktree add --detach <tmp> <headSha>`），不是用户工作区；否则原生 `read/grep` 可能读到另一个分支的代码，产生跨版本误报。worktree 创建失败时降级到工作区，并在任务提示里明确“以 review_get_file/diff 为准”。
+- `reviewCwd` 是本轮 PR head 的 detached worktree（`git worktree add --detach <tmp> <headSha>`），不是用户工作区；否则原生 `read/grep` 可能读到另一个分支的代码，产生跨版本误报。**worktree 创建失败时不降级到用户工作区**：本轮直接 error 并提示先拉取 head，避免用旧代码得出新 head 的结论。
 - `meta.cwd` 指向上述 worktree；`meta.agentPreset` 仅是记录，必须配合 `mount`。
 - 模型选择沿用 `provider`/`model`/`reasoningEffort`；未配置时取宿主默认模型。
-- 取消：外部取消 → `handle.dispose()`；轮次被替换 → 先取消旧 runner 再创建新的；等待用 `whenIdle()`。
+- 取消：外部取消 → `handle.dispose()`；轮次被替换 → 先取消旧 runner 再创建新的；等待用 `whenIdle()`，但 `whenIdle()` 必须与取消信号竞速，取消后立即返回终态，不能把 run 挂在 `running`。
 
 ### 4.3 只读预设
 
@@ -194,14 +194,15 @@ await agent.whenIdle();
 
 新增/调整：
 
-- `review_update_conclusion` 允许 Agent 写入初始结论，标记 `source: 'agent'`；人工编辑仍走原路径。
+- 任务消息要求所有 `review_*` 调用显式带 `number`；同时插件在创建 Agent 时建立 `agentSessionId → PR number` 绑定，`resolveToolReview` 优先使用绑定，**不**回退到“最新记录”。即使 Agent 漏传 `number`，也不会写到另一个 PR。
+- `review_update_conclusion` 允许 Agent 写入初始结论，标记 `source: 'model'`（Agent 也是模型调用）；人工编辑仍为 `source: 'human'`。
 - `review_publish` 与 `review_conclude`（旧直连 LLM 入口）在 runner 的 Agent 会话中被拒绝：工具检查调用方 session id 是否为当前 review run 的 Agent，若是则返回明确错误。
-- 删除 `refuted` 审计字段与相关 normalizer；直连 LLM 链路的 `unverified`/`raised`/`discarded` 一并移除。
+- 删除 `refuted` 审计字段与相关 normalizer；直连 LLM 链路的 `unverified`/`raised`/`discarded` 一并移除（阶段 3 完成）。
 
 ### 5.3 面板组装
 
 - 明细页：直接渲染 `record.explanations`（工具写入）。
-- 总览页：渲染 `record.report`；若 Agent 未写 report，则由插件从逐文件结果确定性地组装一份摘要（verdict 取最严重项、risks 取各文件 block 项、summary 拼接文件摘要），并标记「自动汇总」。不再调用模型补写。
+- 总览页：渲染 `record.report`；**不**自动拼一份摘要。Agent 未写 report → 本轮 incomplete 并列出缺失项，由 Agent 在 coverage follow-up 中重写；插件不替 Agent 生成结论。
 - 结论页：渲染 Agent 写入的 conclusion；缺失时显示 incomplete，不自动生成。
 - 所有写回仍走现有 `revision` 冲突保护，runner 不需要绕过。
 
@@ -216,15 +217,15 @@ await agent.whenIdle();
 
 ### 6.2 失败
 
-- Agent 创建失败、运行失败、`whenIdle` 失败 → 本轮 `error`，保存可读错误；重试创建新 Agent。
+- Agent 创建失败、运行失败、`whenIdle` 失败 → 本轮 `error`，保存可读错误；重试创建新 Agent。同一轮内的重试（`startReview(number, false)`）在 `round` 与 `headSha` 都一致时沿用本轮已有的逐文件分析，只要求本轮重新写 report/conclusion；新 head 仍必须 `rollNewRound`。
 - 工具写入冲突（revision 过期）→ 当前文件写完失败；runner 在 follow-up 中要求重新 `review_get` 后继续；不静默丢结果。
-- 取消/新 head：`cancel`/`dispose` 旧 Agent，清空本轮状态，按新 head 创建新 run。
+- 取消/新 head：`cancel`/`dispose` 旧 Agent，清空本轮状态，按新 head 创建新 run；取消必须落成 `cancelled` 终态，不能依赖 Agent 的 `whenIdle` 返回。
 
 ### 6.3 自动触发
 
 - 轮询到新 head → `startReview(number, true)` 开新一轮；同一 PR 的旧 runner 先 `cancel` 并等待结束，再创建新的。
 - 手动入口（面板「开始新一轮」/`review_run_agent`）同样必须走 `startReview(number, true)`，不能直接对当前 record 启动 runner，否则会覆盖原轮数据。
-- `autoReview` 控制是否自动开始整轮；`autoAnalyze` 控制初始任务是否包含逐文件分析（关闭时只写 report，逐文件分析由用户点开文件触发 follow-up 或新的单文件 run）。
+- `autoReview` 控制是否自动开始整轮；`autoAnalyze` 控制初始任务是否包含逐文件分析。关闭时本轮只要求 report/conclusion 写回，runner 不再因缺逐文件分析判 incomplete；逐文件分析由用户后续触发。
 - 跨 PR 并发沿用现有上限；同一 PR 永不并行两个 run。
 
 ## 7. 安全与权限
@@ -239,7 +240,8 @@ await agent.whenIdle();
 
 - 保留：`record.files`、`record.explanations`、`record.report`、`record.conclusion`、轮次历史、发布记录。
 - 删除：`unverified`、`raised`、`discarded`、`refuted`（均为直连 LLM 链路的产物）。
-- 新增：`record.run = { token?, agentSessionId, startedAt, finishedAt, status: 'running'|'done'|'incomplete'|'error'|'cancelled', missingFiles: [], missingSections: [], headIsolated: boolean, error }`。
+- 新增：`record.run = { token?, round, headSha, agentSessionId, startedAt, finishedAt, status: 'running'|'done'|'incomplete'|'error'|'cancelled', missingFiles: [], missingSections: [], headIsolated: boolean, error }`。
+  - `round` 与本轮 `record.round` 一起持久化，用于区分“同一轮重试”（沿用已有逐文件分析）与“新一轮”（从头覆盖）；`headSha` 同时匹配才沿用，防止新 head 复用旧代码分析。
   - 持久化到缓存（不含模型输出；`token` 只在进程内区分新旧 run，不写缓存）。
   - `record.status` 映射：run `done` → `done`；`incomplete` / `cancelled` → `incomplete`；`error` → `error`。不允许把 incomplete 折叠成 done。
   - `reviewing` 记录本来就不写缓存；若恢复时遇到 `status: 'running'`，视为中断，恢复为 `error` +「应用重启，上一轮 Agent 审查中断」。
@@ -250,12 +252,15 @@ await agent.whenIdle();
 
 - **单元**：`ReviewRunner` 用 fake `ctx.agents`/`AgentHandle`：
   - 创建参数（cwd、preset、model）正确；
-  - follow-up 文本包含 PR、head、流程与覆盖要求；
+  - follow-up 文本包含 PR、head、流程、`number` 与覆盖要求；
   - `whenIdle` 后缺口补齐；超过重试 → incomplete；
-  - Agent 失败 → error；取消/新 head → dispose 旧句柄；
-  - 已全覆盖 → done，不额外 follow-up。
+  - 同一轮重试沿用已有逐文件分析，不把旧分析判成缺失；
+  - `analyze=false` 只要求 report/conclusion；
+  - Agent 失败 → error；取消/新 head → dispose 旧句柄，且取消能打断 `whenIdle`；
+  - 已全覆盖 → done，不额外 follow-up；
+  - 缺少全局工具 mask → error（只读边界不可用时不运行）。
 - **预设**：断言程序化注册的定义：`id`/`order`/`plugins`、`tool-fs` 的 write/edit/applyPatch 为 false、无 bash；不要解析插件 bundle patch。
-- **工具**：现有 `review_*` 工具测试保留；新增 runner 会话拒绝 `review_publish`/`review_conclude` 的测试。
+- **工具**：现有 `review_*` 工具测试保留；新增 runner 会话拒绝 `review_publish`/`review_conclude` 的测试；`resolveToolReview` 优先使用 Agent→PR 绑定。
 - **组装**：无 report 时确定性摘要；缺 conclusion → incomplete。
 - **无真实模型调用**：测试不经过 `ctx.llm.stream`。
 - 回归：现有 provider/工具/UI 测试；删除直连 LLM 链路的测试。
@@ -280,11 +285,12 @@ await agent.whenIdle();
 
 **仍需验证/风险**：
 
-- **写边界**：只读预设的 `tool-fs` 已关闭 write/edit/applyPatch，且不含 bash；仍需在阶段 1 用一次真实的 write/bash 尝试确认全局工具面没有绕过预设。
-- **`review_publish` 拒绝**：runner 会话调用发布工具必须被工具级授权挡住（阶段 2）。
+- **写边界**：只读预设的 `tool-fs` 已关闭 write/edit/applyPatch，且不含 bash；插件还在 Agent scoped context 上调用 `tools.restrict` 收紧全局工具面。若 `tools.schemas`/`tools.restrict` 不可用，runner 直接 error，不降级运行。
+- **`review_publish` 拒绝**：runner 会话调用发布工具必须被工具级授权挡住（阶段 2 已完成）。
 - **上下文成本**：33 个文件的会话可能触发压缩；预设已挂 compaction，任务提示要求逐文件处理并及时写回。
 - **模型遵循度**：Agent 可能提前 idle 或漏文件；覆盖率检查与有限 follow-up 是兜底，但不保证完美。宁可显式 incomplete，不静默通过。
 - **读边界/密钥**：只读预设仍能读取工作区文件；需要验证 `ctx.fs` 沙箱，必要时用 fs 观察策略或受限根。
+- **worktree**：创建失败直接 error（不读用户工作区）；同一轮重试沿用已有分析，新 head 必须开新一轮。
 - **宿主版本差异**：阶段 0 只在当前 DSH 实机验证；文档来自 master，升级宿主后需重新跑一次探针。
 
 ## 12. 验收标准

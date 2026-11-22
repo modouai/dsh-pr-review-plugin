@@ -33,6 +33,17 @@ function taskPrompt(record, cwd, analyzeFiles, cwdNote) {
     fileAnalysisStep: analyzeFiles
       ? '对每个文件：`review_get_file` / `review_get_diff` 获取 PR head 内容；按需读取调用方、定义、测试；分析后调用 `review_update_analysis` 写回。'
       : '本轮只写总体报告，不逐文件分析；用户点开文件时再分析。',
+    fileAnalysisRules: analyzeFiles
+      ? [
+          '   - 每分析完一个文件立即调用 `review_update_analysis` 写回，不要攒到最后；上下文压缩可能丢失未写回的内容。',
+          '   - path 必须是变更文件清单中的路径，revision 用最近一次 `review_get` 返回的值。',
+          '   - issues 每条只写一个核心问题，写清影响与修法；severity 只有 block / suggest。',
+          '   - 没有发现问题时 issues 写空数组，并在 summary 里说明依据。',
+        ].join('\n')
+      : '   - 本轮跳过逐文件分析，不需要调用 `review_update_analysis`。',
+    coverageRequirement: analyzeFiles
+      ? '上面范围内的每个文件都必须有 `review_update_analysis`。无法读取的文件写进 summary；不要猜测。'
+      : '本轮只要求 `review_update_report` 与 `review_update_conclusion` 写回；逐文件分析由用户后续触发。',
   });
 }
 
@@ -103,17 +114,25 @@ export function registerReadOnlyPrompt(agentCtx) {
 
 /** Restrict the agent's global tool mask; scoped preset tools stay visible. */
 export function restrictAgentTools(agentCtx) {
-  const schemas = agentCtx.tools.schemas(agentCtx);
+  const tools = agentCtx?.tools;
+  if (tools === undefined || tools === null || typeof tools.schemas !== 'function' || typeof tools.restrict !== 'function') {
+    // Without the global mask, a Host profile could expose bash/write/review_publish to the
+    // review agent. Fail the run instead of relying on the prompt for a security boundary.
+    throw new Error('审查 Agent 的工具面不可用（缺少 tools.schemas/tools.restrict），为避免只读边界失效已停止。');
+  }
+  const schemas = tools.schemas(agentCtx);
   const known = new Set((Array.isArray(schemas) ? schemas : []).map((schema) => schema.name));
   const deny = DANGEROUS_GLOBAL_TOOLS.filter((name) => known.has(name));
-  if (deny.length > 0) agentCtx.tools.restrict({ deny });
+  if (deny.length > 0) tools.restrict({ deny });
 }
 
-export function createReviewRunner({ ctx, settings, record, selection, cwd, analyze = true, cwdNote = '', headIsolated = false, runToken = null, onChange }) {
+export function createReviewRunner({ ctx, settings, record, selection, cwd, analyze = true, cwdNote = '', headIsolated = false, runToken = null, onAgent, onChange }) {
   const agents = typeof ctx?.get === 'function' ? ctx.get('agents') : undefined;
   const service = agents ?? ctx?.agents;
   let handle = null;
   let cancelled = false;
+  let cancelPromise = null;
+  let cancelResolve = null;
 
   const changed = () => {
     if (typeof onChange === 'function') onChange(record);
@@ -122,7 +141,14 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
   const dispose = async () => {
     const current = handle;
     handle = null;
-    if (current !== null) await current.dispose();
+    if (current !== null) {
+      try {
+        await current.dispose();
+      } catch (error) {
+        // A failed dispose must not turn a completed review into an error.
+        console.warn('[pr-review] 释放审查 Agent 失败', error);
+      }
+    }
   };
 
   let activeRun = null;
@@ -137,10 +163,34 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
     changed();
   };
 
+  /** Wait for idle, but never hang past a cancel: cancellation is a terminal outcome. */
+  const waitIdle = async (agent) => {
+    const idle = Promise.resolve(agent.whenIdle());
+    if (cancelPromise === null) {
+      await idle;
+      return;
+    }
+    await Promise.race([idle, cancelPromise]);
+  };
+
   const start = async () => {
     cancelled = false;
+    cancelPromise = new Promise((resolve) => {
+      cancelResolve = resolve;
+    });
+    // A prior run in the same round (e.g. a retry after error) already wrote analyses for
+    // this head; those writes belong to the round, not to this attempt. Counting them avoids
+    // re-reviewing every file while still requiring a fresh report/conclusion. Requiring the
+    // same head prevents an error retry after new commits from reusing old-code analyses.
+    const priorRun = record.run;
+    const headSha = record.headSha ?? record.pull?.headSha ?? '';
+    const sameRoundRetry = priorRun !== null && priorRun !== undefined
+      && priorRun.round === record.round
+      && priorRun.headSha === headSha;
     activeRun = {
       token: runToken,
+      round: record.round ?? 0,
+      headSha,
       agentSessionId: null,
       startedAt: Date.now(),
       finishedAt: 0,
@@ -178,14 +228,19 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
         },
       });
       const { agent } = handle;
-      activeRun.agentSessionId = agent.id;
+      const sessionId = typeof agent?.session?.id === 'string' && agent.session.id !== '' ? agent.session.id : agent.id;
+      activeRun.agentSessionId = sessionId;
       changed();
-      // Snapshot before the first turn: only writes that land during this run count as coverage.
-      const before = new Map(allFiles(record).map((path) => [path, record.explanations?.get(path)?.updatedAt ?? 0]));
+      if (typeof onAgent === 'function') onAgent(agent, sessionId);
+      // Snapshot before the first turn: unless this is a same-round retry, only writes that
+      // land during this run count as coverage.
+      const before = sameRoundRetry
+        ? new Map()
+        : new Map(allFiles(record).map((path) => [path, record.explanations?.get(path)?.updatedAt ?? 0]));
       const beforeReportAt = record.reportUpdatedAt ?? 0;
       const beforeConclusionAt = record.conclusionAt ?? 0;
       agent.followup(userMessage(taskPrompt(record, cwd, analyze, cwdNote)));
-      await agent.whenIdle();
+      await waitIdle(agent);
       if (cancelled) return;
 
       const retries = Number.isInteger(settings.reviewCoverageRetries) ? settings.reviewCoverageRetries : 2;
@@ -195,7 +250,7 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
           activeRun.missingSections = sections;
           changed();
           agent.followup(userMessage(gapPrompt([], sections)));
-          await agent.whenIdle();
+          await waitIdle(agent);
           if (cancelled) return;
           sections = missingSectionsOf(record, beforeReportAt, beforeConclusionAt);
         }
@@ -215,7 +270,7 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
         activeRun.missingSections = sections;
         changed();
         agent.followup(userMessage(gapPrompt(files, sections)));
-        await agent.whenIdle();
+        await waitIdle(agent);
         if (cancelled) return;
         files = missingFilesOf(record, before);
         sections = missingSectionsOf(record, beforeReportAt, beforeConclusionAt);
@@ -236,6 +291,11 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
 
   const cancel = async () => {
     cancelled = true;
+    if (cancelResolve !== null) {
+      const resolve = cancelResolve;
+      cancelResolve = null;
+      resolve();
+    }
     if (activeRun !== null && activeRun !== undefined && activeRun.status === 'running') {
       activeRun.status = 'cancelled';
       activeRun.error = '审查已取消';

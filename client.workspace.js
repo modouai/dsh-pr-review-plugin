@@ -510,11 +510,13 @@ window.__ModuleLoader__.load({
           const summary = list?.reviews?.[pull.number] ?? null;
           const verdict = summary?.status === 'error'
             ? t('statusError')
-            : summary?.status === 'reviewing'
-              ? t('statusReviewing')
-              : summary === null || summary?.verdict === null || summary?.verdict === undefined
-                ? t('statusIdle')
-                : severityLabel(summary.verdict, t);
+            : summary?.status === 'incomplete'
+              ? t('statusIncomplete')
+              : summary?.status === 'reviewing'
+                ? t('statusReviewing')
+                : summary === null || summary?.verdict === null || summary?.verdict === undefined
+                  ? t('statusIdle')
+                  : severityLabel(summary.verdict, t);
           return h(
             'option',
             { key: pull.number, value: pull.number },
@@ -550,6 +552,9 @@ window.__ModuleLoader__.load({
             roundTone = 'reviewing';
           } else if (review.status === 'error') {
             roundKey = 'roundError';
+            roundTone = 'error';
+          } else if (review.status === 'incomplete') {
+            roundKey = 'roundIncomplete';
             roundTone = 'error';
           } else if (review.status === 'stale') {
             roundKey = 'roundInterrupted';

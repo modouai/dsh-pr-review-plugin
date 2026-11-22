@@ -210,6 +210,8 @@ function sanitizeRun(raw) {
   const status = statuses.has(raw.status) ? raw.status : 'error';
   const strings = (value) => (Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item !== '') : []);
   return {
+    round: Number.isInteger(raw.round) ? raw.round : 0,
+    headSha: typeof raw.headSha === 'string' ? raw.headSha : '',
     agentSessionId: typeof raw.agentSessionId === 'string' && raw.agentSessionId !== '' ? raw.agentSessionId : null,
     startedAt: Number.isFinite(raw.startedAt) ? raw.startedAt : 0,
     finishedAt: Number.isFinite(raw.finishedAt) ? raw.finishedAt : 0,
@@ -980,7 +982,8 @@ export function apply(ctx, config) {
         publishedItems: record.publishedItems ?? [],
         feedback: record.feedback ?? null,
         previousRound: record.previousRound ?? null,
-        conclusionAt: record.conclusionAt ?? 0,        conclusion: record.conclusion,
+        conclusionAt: record.conclusionAt ?? 0,
+        conclusion: record.conclusion,
         comment: record.comment ?? null,
         revision: record.revision ?? 0,
         audit: Array.isArray(record.audit) ? record.audit : [],
@@ -1782,8 +1785,14 @@ export function apply(ctx, config) {
       note: '本地工作区已检出 PR head，可直接 read/grep。',
       isolated: true,
       cleanup: async () => {
-        await runGitLong(workspace, ['worktree', 'remove', '--force', dir]);
-        await rm(dir, { recursive: true, force: true });
+        try {
+          await runGitLong(workspace, ['worktree', 'remove', '--force', dir]);
+        } catch (error) {
+          console.warn(`[pr-review] 移除 PR #${record.number} 的 head worktree 失败`, error);
+        }
+        await rm(dir, { recursive: true, force: true }).catch((error) => {
+          console.warn(`[pr-review] 清理 PR #${record.number} 的 head worktree 目录失败`, error);
+        });
       },
     };
   }
@@ -1840,8 +1849,17 @@ export function apply(ctx, config) {
     }
     const selection = resolveSelection(ctx, settings);
     const worktree = await prepareReviewWorktree(record);
+    if (worktree.isolated !== true) {
+      record.status = 'error';
+      record.error = '无法为 PR head 创建工作区，已停止审查（避免读到旧代码）。请确认本地已拉取该 head 后重试。';
+      record.finishedAt = Date.now();
+      currentRoundEntry(record).finishedAt = record.finishedAt;
+      scheduleSave();
+      return;
+    }
     const runToken = Symbol('pr-review-run');
     let runner;
+    let boundAgentId = null;
     try {
       runner = createReviewRunner({
         ctx,
@@ -1850,14 +1868,21 @@ export function apply(ctx, config) {
         selection,
         cwd: worktree.cwd,
         cwdNote: worktree.note,
-        headIsolated: worktree.isolated === true,
+        headIsolated: true,
         runToken,
+        onAgent: (agent, sessionId) => {
+          const bound = typeof sessionId === 'string' && sessionId !== '' ? sessionId : agentSessionId(agent);
+          if (bound === '') return;
+          boundAgentId = bound;
+          agentReviewBinding.set(bound, record.number);
+        },
         analyze: settings.autoAnalyze !== false,
         onChange: () => scheduleSave(),
       });
       agentRuns.set(record.number, runner);
       await runner.start();
     } finally {
+      if (boundAgentId !== null) agentReviewBinding.delete(boundAgentId);
       if (runner !== undefined && agentRuns.get(record.number) === runner) agentRuns.delete(record.number);
       await worktree.cleanup();
     }
@@ -1943,9 +1968,12 @@ export function apply(ctx, config) {
   const explainInFlight = new Map();
   /** PR number → active agent review runner (one per PR). */
   const agentRuns = new Map();
+  /** Agent session id → PR number, so review_* calls from a runner cannot resolve another PR. */
+  const agentReviewBinding = new Map();
   ctx.effect(() => () => {
     for (const runner of agentRuns.values()) void runner.cancel();
     agentRuns.clear();
+    agentReviewBinding.clear();
   }, 'pr-review: agent runs');
 
   /** Explain one file: deep logic walkthrough + findings. `signal` cancels a batch call. */
@@ -2979,7 +3007,8 @@ export function apply(ctx, config) {
   /** The session id a tool call runs for, when the runtime exposes one. */
   function agentSessionId(agent) {
     const session = agent && typeof agent === 'object' ? agent.session : undefined;
-    const id = session?.id ?? session?.sessionId ?? agent?.sessionId ?? '';
+    // Agent.id is the SessionId on the Host; tool wrappers may expose only .session.
+    const id = session?.id ?? session?.sessionId ?? agent?.sessionId ?? agent?.id ?? '';
     return typeof id === 'string' ? id : '';
   }
 
@@ -2990,6 +3019,12 @@ export function apply(ctx, config) {
     }
     const sessionId = agentSessionId(agent);
     if (sessionId !== '') {
+      // A review runner is bound to exactly one PR; never fall through to "latest".
+      const boundNumber = agentReviewBinding.get(sessionId);
+      if (Number.isInteger(boundNumber)) {
+        const boundRecord = state.reviews.get(boundNumber);
+        if (boundRecord !== undefined) return boundRecord;
+      }
       const bound = activeReviewBySession.get(sessionId);
       if (Number.isInteger(bound)) {
         const boundRecord = state.reviews.get(bound);
@@ -3021,7 +3056,7 @@ export function apply(ctx, config) {
   /** Whether the caller is the read-only review runner, which may write results but not publish. */
   function isReviewRunnerAgent(record, agent) {
     const sessionId = record?.run?.agentSessionId;
-    return typeof sessionId === 'string' && sessionId !== '' && agent?.id === sessionId;
+    return typeof sessionId === 'string' && sessionId !== '' && agentSessionId(agent) === sessionId;
   }
 
   /** Coverage of the current round; recomputed when the persisted record has none. */

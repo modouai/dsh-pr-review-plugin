@@ -80,7 +80,7 @@ function fakeCtx(onFollowup, whenIdle = async () => {}) {
   return ctx;
 }
 
-function runnerFor(record, ctx, overrides = {}) {
+function runnerFor(record, ctx, overrides = {}, extra = {}) {
   return createReviewRunner({
     ctx,
     settings: {
@@ -92,6 +92,7 @@ function runnerFor(record, ctx, overrides = {}) {
     record,
     selection: { provider: 'p', model: 'm' },
     cwd: '/repo',
+    ...extra,
   });
 }
 
@@ -122,9 +123,91 @@ test('the runner creates a read-only review agent and sends the task prompt', as
   assert.match(ctx.promptSections[0].text, /没有 review_publish/);
   assert.match(prompts[0], /review_list_files/);
   assert.match(prompts[0], /review_update_analysis/);
+  assert.match(prompts[0], /number: 1/);
   assert.equal(record.run.status, 'done');
   assert.deepEqual(record.run.missingFiles, []);
   assert.equal(ctx.disposed.length, 1);
+});
+
+test('the runner exposes the created agent for PR binding', async () => {
+  const record = fakeRecord(['src/a.js']);
+  const seen = [];
+  const ctx = fakeCtx((message) => {
+    record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: Date.now() });
+    record.report = { verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} };
+    record.reportUpdatedAt = Date.now();
+    record.conclusion = { verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] };
+    record.conclusionAt = Date.now();
+  });
+  await runnerFor(record, ctx, {}, { onAgent: (agent) => seen.push(agent.id) }).start();
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0], record.run.agentSessionId);
+});
+
+test('a same-round retry counts analyses written by the failed attempt', async () => {
+  const record = fakeRecord(['src/a.js', 'src/b.js']);
+  record.round = 3;
+  record.run = { round: 3, headSha: 'abc', status: 'error', token: null };
+  record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: 100 });
+  const ctx = fakeCtx(() => {});
+  await runnerFor(record, ctx, { reviewCoverageRetries: 0 }).start();
+  assert.equal(record.run.status, 'incomplete');
+  assert.deepEqual(record.run.missingFiles, ['src/b.js'], 'only the file missing from the prior attempt');
+  assert.equal(record.run.missingSections.length, 2, 'report/conclusion must still be written by this run');
+});
+
+test('a same-round retry with a different head re-analyzes every file', async () => {
+  const record = fakeRecord(['src/a.js']);
+  record.round = 3;
+  record.run = { round: 3, headSha: 'old-head', status: 'error', token: null };
+  record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: 100 });
+  const ctx = fakeCtx(() => {});
+  await runnerFor(record, ctx, { reviewCoverageRetries: 0 }).start();
+  assert.deepEqual(record.run.missingFiles, ['src/a.js']);
+});
+
+test('analyze=false asks only for report and conclusion', async () => {
+  const record = fakeRecord(['src/a.js']);
+  const prompts = [];
+  const ctx = fakeCtx((message) => {
+    prompts.push(message.content[0].text);
+    record.report = { verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} };
+    record.reportUpdatedAt = Date.now();
+    record.conclusion = { verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] };
+    record.conclusionAt = Date.now();
+  });
+  await runnerFor(record, ctx, {}, { analyze: false }).start();
+  assert.match(prompts[0], /只写总体报告/);
+  assert.match(prompts[0], /本轮只要求 `review_update_report` 与 `review_update_conclusion`/);
+  assert.equal(record.run.status, 'done');
+  assert.deepEqual(record.run.missingFiles, []);
+});
+
+test('cancel resolves a pending whenIdle instead of hanging the run', async () => {
+  const record = fakeRecord(['src/a.js']);
+  const never = new Promise(() => {});
+  const ctx = fakeCtx(() => {}, () => never);
+  const runner = runnerFor(record, ctx, { reviewCoverageRetries: 0 });
+  const task = runner.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  await runner.cancel();
+  await Promise.race([
+    task,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('start did not return after cancel')), 1000)),
+  ]);
+  assert.equal(record.run.status, 'cancelled');
+});
+
+test('a missing global tool mask fails closed instead of running unguarded', async () => {
+  const record = fakeRecord(['src/a.js']);
+  const ctx = fakeCtx(() => {});
+  ctx.agents.create = async (options) => {
+    await options.setup?.({ systemPrompt: { section: () => () => {} } });
+    return { agent: { id: 'a', followup() {}, async whenIdle() {} }, async dispose() {} };
+  };
+  await runnerFor(record, ctx).start();
+  assert.equal(record.run.status, 'error');
+  assert.match(record.run.error, /工具面不可用/);
 });
 
 test('missing files trigger bounded follow-ups, then incomplete', async () => {
