@@ -191,6 +191,7 @@ function sanitizeRun(raw) {
     status,
     missingFiles: strings(raw.missingFiles),
     missingSections: strings(raw.missingSections),
+    reusedFiles: strings(raw.reusedFiles),
     headIsolated: raw.headIsolated === true,
     error: typeof raw.error === 'string' ? raw.error : null,
   };
@@ -577,7 +578,7 @@ function sanitizeRoundEntry(entry, index) {
         ? version.previousVerdicts
           .filter((item) => item !== null && typeof item === 'object'
             && Number.isInteger(item.index) && item.index >= 1
-            && (item.status === 'fixed' || item.status === 'still-open'))
+            && (item.status === 'fixed' || item.status === 'still-open' || item.status === 'undetermined'))
           .map((item) => ({ index: item.index, status: item.status }))
         : null,
     }));
@@ -1427,6 +1428,7 @@ export function apply(ctx, config) {
       status: 'error',
       missingFiles: [],
       missingSections: [],
+      reusedFiles: [],
       headIsolated: headIsolated === true,
       error: message,
     };
@@ -1478,6 +1480,8 @@ export function apply(ctx, config) {
       failAgentRun(record, worktree.message ?? '无法为 PR head 创建工作区，已停止审查（避免读到旧代码）。', generation);
       return;
     }
+    // Read-only tools can read the incremental diff from this run's head worktree.
+    record.reviewCwd = worktree.cwd;
     let runner;
     try {
       await withAgentSlot(async () => {
@@ -1504,6 +1508,7 @@ export function apply(ctx, config) {
           await runner.start();
         } finally {
           if (runner !== undefined && agentRuns.get(record.number) === runner) agentRuns.delete(record.number);
+          record.reviewCwd = null;
           await worktree.cleanup();
         }
       });
@@ -2498,7 +2503,7 @@ export function apply(ctx, config) {
             `revision：${record.revision ?? 0}（写入工具必须带回这个值）`,
             ...(record.run === null || record.run === undefined
               ? []
-              : [`Agent 审查：${record.run.status}${record.run.error ? `（${record.run.error}）` : ''}${Array.isArray(record.run.missingFiles) && record.run.missingFiles.length > 0 ? ` · 缺 ${record.run.missingFiles.length} 个文件` : ''}${Array.isArray(record.run.missingSections) && record.run.missingSections.length > 0 ? ` · 缺 ${record.run.missingSections.length} 个收口项` : ''}${record.run.headIsolated === false ? ' · 未隔离 PR head 工作区（可能读到旧代码）' : ''}`]),
+              : [`Agent 审查：${record.run.status}${record.run.error ? `（${record.run.error}）` : ''}${Array.isArray(record.run.reusedFiles) && record.run.reusedFiles.length > 0 ? ` · 沿用 ${record.run.reusedFiles.length} 个文件` : ''}${Array.isArray(record.run.missingFiles) && record.run.missingFiles.length > 0 ? ` · 缺 ${record.run.missingFiles.length} 个文件` : ''}${Array.isArray(record.run.missingSections) && record.run.missingSections.length > 0 ? ` · 缺 ${record.run.missingSections.length} 个收口项` : ''}${record.run.headIsolated === false ? ' · 未隔离 PR head 工作区（可能读到旧代码）' : ''}`]),
           ]);
         },
       },
@@ -2576,6 +2581,44 @@ export function apply(ctx, config) {
           const record = requireToolReview(exec.agent, args.number);
           if (typeof args.path !== 'string' || args.path === '') throw toolError(TOOL_ERROR.invalidArgs, 'path 不能为空');
           return diffText(record, args.path);
+        },
+      },
+      {
+        name: 'review_get_incremental_diff',
+        description: '读取上一轮 head 到本轮 head 的增量 diff，用于逐项核对上一轮结论是否真的修复。上一轮没有 head 时返回提示。',
+        parameters: {
+          type: 'object',
+          additionalProperties: false,
+          properties: { number: numberProperty },
+        },
+        output: textOutput,
+        async execute(args, exec) {
+          const record = requireToolReview(exec.agent, args.number);
+          const previous = record.previousRound?.headSha;
+          const current = record.headSha ?? record.pull?.headSha;
+          if (typeof previous !== 'string' || previous === '') {
+            return toolText(['没有上一轮 head（这是首轮审查），没有增量 diff。']);
+          }
+          if (typeof current !== 'string' || current === '') {
+            return toolText(['没有本轮 head，无法生成增量 diff。']);
+          }
+          const cwd = record.reviewCwd || state.workspaceCwd;
+          if (typeof cwd !== 'string' || cwd === '') {
+            return toolText(['没有可用的本地工作区，无法生成增量 diff；请用 review_get_file 读当前 head。']);
+          }
+          const diff = await runGitLong(cwd, ['diff', '--unified=3', previous, current]);
+          if (diff === null) {
+            return toolText([
+              `无法读取 ${previous.slice(0, 8)}..${current.slice(0, 8)} 的增量 diff（本地可能缺少上一轮 commit）。`,
+              '请直接 review_get_file / review_list_files 核对当前 head。',
+            ]);
+          }
+          const limit = 200_000;
+          const body = diff.length > limit ? `${diff.slice(0, limit)}\n…（已截断，共 ${diff.length} 字符）` : diff;
+          return toolText([
+            `增量 diff：${previous.slice(0, 8)}..${current.slice(0, 8)}`,
+            body === '' ? '（两个 head 之间没有代码差异）' : body,
+          ]);
         },
       },
       {
@@ -2877,7 +2920,7 @@ export function apply(ctx, config) {
             previousVerdicts: {
               type: 'array',
               items: { type: 'object', additionalProperties: true },
-              description: '上一轮结论条目的逐项判定（传入即整体替换）：[{ index, status: "fixed"|"still-open" }]，index 对应任务提示里的 #编号。只有明确确认修复才写 fixed；未判定会被显示为未判定。',
+              description: '上一轮结论条目的逐项判定（传入即整体替换）：[{ index, status: "fixed"|"still-open"|"undetermined", evidence }]，index 对应任务提示里的 #编号。fixed 需要读过当前 head 的代码/测试；无法确认写 undetermined，不要默认 still-open。',
             },
             number: numberProperty,
           },

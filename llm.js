@@ -282,15 +282,21 @@ export function normalizePreviousVerdicts(raw, baselineCount) {
     if (item === null || typeof item !== 'object') continue;
     const index = Number.isInteger(item.index) && item.index >= 1 && item.index <= baselineCount ? item.index : 0;
     if (index === 0 || seen.has(index)) continue;
-    if (item.status !== 'fixed' && item.status !== 'still-open') continue;
+    if (item.status !== 'fixed' && item.status !== 'still-open' && item.status !== 'undetermined') continue;
     seen.add(index);
+    const evidence = typeof item.evidence === 'string' && item.evidence.trim() !== '' ? { evidence: item.evidence.trim().slice(0, 500) } : {};
     if (item.status === 'fixed') {
-      verdicts.push({ index, status: 'fixed' });
+      verdicts.push({ index, status: 'fixed', ...evidence });
+      continue;
+    }
+    if (item.status === 'undetermined') {
+      verdicts.push({ index, status: 'undetermined', ...evidence });
       continue;
     }
     verdicts.push({
       index,
       status: 'still-open',
+      ...evidence,
       ...(typeof item.point === 'string' && item.point.trim() !== '' ? { point: item.point.trim() } : {}),
       ...(Number.isInteger(item.line) && item.line > 0 ? { line: Math.floor(item.line) } : {}),
       ...(item.severity === 'block' || item.severity === 'suggest' ? { severity: item.severity } : {}),

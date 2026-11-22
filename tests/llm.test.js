@@ -381,17 +381,18 @@ test('platformLabel: known aliases, normalization and unknown values', () => {
 
 test('normalizePreviousVerdicts keeps one valid verdict per baseline index', () => {
   const verdicts = normalizePreviousVerdicts([
-    { index: 1, status: 'fixed' },
+    { index: 1, status: 'fixed', evidence: ' index.js:42 ' },
     { index: 1, status: 'still-open', point: '重复认领被丢弃' },
     { index: 0, status: 'fixed' },
     { index: 9, status: 'fixed' },
     { index: 2, status: 'nonsense' },
-    { index: 3 },
+    { index: 3, status: 'undetermined', evidence: '无法读取' },
     { index: 2, status: 'still-open', point: ' 补测试 ', line: 7, severity: 'block', suggestion: '补集成测试' },
     'junk',
   ], 3);
   assert.deepEqual(verdicts, [
-    { index: 1, status: 'fixed' },
+    { index: 1, status: 'fixed', evidence: 'index.js:42' },
+    { index: 3, status: 'undetermined', evidence: '无法读取' },
     { index: 2, status: 'still-open', point: '补测试', line: 7, severity: 'block', suggestion: '补集成测试' },
   ]);
   assert.deepEqual(normalizePreviousVerdicts(undefined, 3), []);

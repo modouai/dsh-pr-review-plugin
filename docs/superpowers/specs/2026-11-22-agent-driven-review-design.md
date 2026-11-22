@@ -177,7 +177,7 @@ await agent.whenIdle();
 - 审查流程：`review_get` → `review_list_files` → 对每个文件 `review_get_file`/`review_get_diff` + 读相关调用方/测试 → `review_update_analysis`。
 - 写回要求：每条 issue 只写一个核心问题、带 severity 与行号；没有问题就写空 issues 并说明。
 - 汇总：全部文件完成后 `review_update_report`；最后 `review_update_conclusion`。
-- 复审对比：任务消息列出上一轮结论（blockers + suggestions）的条目与 #编号；Agent 写本轮结论时用 `previousVerdicts: [{ index, status }]` 逐项判定，并把仍未解决的项按相同 file/point 保留。面板按结论项计数：显式 fixed → 已修复；still-open 或仍出现 → 仍未解决；没有判定且未出现 → 未判定；结论未生成 → 待分析。逐文件 findings 只作为明细，不参与该计数。
+- 复审对比：任务消息带上一轮 head 与结论条目，Agent 先调用 `review_get_incremental_diff` 查看上一轮 head 到本轮 head 的改动，再逐项核对；写本轮结论时把仍未解决的项按相同 file/point 保留，并传 `previousVerdicts: [{ index, status, evidence }]`。`status` 为 `fixed` / `still-open` / `undetermined`：只有读过当前 head 代码或测试才写 fixed，无法确认写 undetermined，不默认 still-open。
 - 只读约束：不修改代码、不发布评论、不询问用户（无人值守）；无法读取的文件写进 summary，不猜测。
 - 覆盖率要求：`review_list_files` 的每个文件都必须出现在 `review_update_analysis`；未完成时明确列出。
 
@@ -189,6 +189,7 @@ await agent.whenIdle();
 
 | 工具 | 用途 |
 |---|---|
+| `review_get_incremental_diff` | 上一轮 head 到本轮 head 的增量 diff（复审核对用） |
 | `review_update_analysis` | 单文件 verdict/summary/logic/walkthrough/changes/issues |
 | `review_update_report` | 总体 verdict/summary/risks/order/focus |
 | `review_update_conclusion` | 最终结论（blockers/suggestions/nextSteps）+ `previousVerdicts` 对上一轮结论项逐项判 fixed/still-open；Agent 写入时同时冻结本轮 findings 作为明细快照 |
@@ -205,7 +206,7 @@ await agent.whenIdle();
 - 明细页：直接渲染 `record.explanations`（工具写入）。
 - 总览页：渲染 `record.report`；**不**自动拼一份摘要。Agent 未写 report → 本轮 incomplete 并列出缺失项，由 Agent 在 coverage follow-up 中重写；插件不替 Agent 生成结论。
 - 结论页：渲染 Agent 写入的 conclusion；缺失时显示 incomplete，不自动生成。
-- 复审对比：`conclusionDeltaOf` 用 `previousRound.items`（上一轮结论的 blockers+suggestions）与当前结论按 id/文本相似度匹配，并读取当前结论版本的 `previousVerdicts`；显式 fixed → 已修复，still-open 或仍匹配 → 仍未解决，无判定且未匹配 → 未判定，结论未生成 → 待分析。逐文件 findings 只作明细。
+- 复审对比：`conclusionDeltaOf` 用 `previousRound.items`（上一轮结论的 blockers+suggestions）与当前结论按 id/文本相似度匹配，并读取当前结论版本的 `previousVerdicts`；显式 fixed → 已修复，still-open 或仍匹配 → 仍未解决，undetermined/无判定且未匹配 → 未判定，结论未生成 → 待分析。逐文件 findings 只作明细。
 - 开新轮时若旧轮缺 findings 快照（引入 Agent 路径前的轮次），从旧轮仍保留的逐文件分析回填；该快照仅用于明细。
 - 所有写回仍走现有 `revision` 冲突保护，runner 不需要绕过。
 
@@ -220,7 +221,7 @@ await agent.whenIdle();
 
 ### 6.2 失败
 
-- Agent 创建失败、运行失败、`whenIdle` 失败 → 本轮 `error`，保存可读错误；重试创建新 Agent。同一轮内的重试（`startReview(number, false)`）在 `round` 与 `headSha` 都一致时沿用本轮**已完成**的逐文件分析（不要求重写），`status=error` 或缺失的文件仍计入缺口；report/conclusion 必须本轮重新写回。新 head 仍必须 `rollNewRound`。
+- Agent 创建失败、运行失败、`whenIdle` 失败 → 本轮 `error`，保存可读错误；重试创建新 Agent。同一轮内的重试（`startReview(number, false)`）在 `round` 与 `headSha` 都一致时，把上一 attempt 的 `status=done` 文件作为 `run.reusedFiles` 沿用（不要求重写）；`status=error` 或缺失的文件仍计入 `missingFiles`，report/conclusion 必须本轮重新写回。新 head 仍必须 `rollNewRound`。
 - 工具写入冲突（revision 过期）→ 当前文件写完失败；runner 在 follow-up 中要求重新 `review_get` 后继续；不静默丢结果。
 - 取消/新 head：`cancel`/`dispose` 旧 Agent，清空本轮状态，按新 head 创建新 run；取消必须落成 `cancelled` 终态，不能依赖 Agent 的 `whenIdle` 返回。
 

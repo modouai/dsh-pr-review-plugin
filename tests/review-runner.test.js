@@ -295,7 +295,7 @@ test('a same-round retry restates files missing from the failed attempt', async 
   assert.deepEqual(record.run.missingFiles, ['src/b.js']);
   assert.match(prompts[0], /上次未完成：src\/b\.js/);
   assert.match(prompts[1], /src\/b\.js/);
-  assert.match(prompts[0], /已有 1 个文件的分析会沿用/);
+  assert.match(prompts[0], /以下 1 个文件的分析会沿用/);
 });
 
 test('a same-round retry still counts a write-failed file as missing', async () => {

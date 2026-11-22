@@ -39,7 +39,7 @@ function baselinePrompt(record) {
       return `- #${item.index} [${kind}] ${item.file ?? ''}${line} ${item.point}`;
     }),
     '写本轮结论时，仍未解决的项要按相同 file/point 保留在这一轮的 blockers/suggestions 里（措辞可以改，但不能遗漏）；已修复的不要列出。',
-    '同时在本轮 `review_update_conclusion` 里传 `previousVerdicts: [{ index, status: "fixed" | "still-open" }]`；index 对应上面的 #编号。只有明确确认修复才写 fixed，未判定会被面板显示为未判定。',
+    '同时在本轮 `review_update_conclusion` 里传 `previousVerdicts: [{ index, status, evidence }]`；index 对应上面的 #编号。status 只能是 fixed / still-open / undetermined：只有读过当前 head 的代码或测试、确认修复才写 fixed；确认仍存在写 still-open；无法确认写 undetermined（不要默认 still-open）。evidence 写 file:line 或测试名。',
   ];
   return lines.join('\n');
 }
@@ -51,6 +51,9 @@ function taskPrompt(record, cwd, analyzeFiles, cwdNote, retryNote = '') {
     pullNumber: record.pull?.number ?? record.number,
     repo: record.pull?.repo ?? '',
     headSha: record.headSha ?? record.pull?.headSha ?? '',
+    previousSection: record.previousRound === null || record.previousRound === undefined
+      ? '这是首轮审查，没有上一轮结论。'
+      : `上一轮：第 ${record.previousRound.round} 轮，head ${record.previousRound.headSha || '（未知）'}。复审时先调用 \`review_get_incremental_diff\` 查看上一轮 head 到本轮 head 的增量改动，再逐项核对上一轮结论。`,
     cwd,
     cwdNote: typeof cwdNote === 'string' && cwdNote !== '' ? cwdNote : '本轮工作区已检出 PR head。',
     scope,
@@ -115,9 +118,19 @@ function gapPrompt(files, sections, failed = []) {
   return lines.join('\n');
 }
 
-function missingFilesOf(record, before) {
+/** Files with a completed analysis from the previous attempt in this same round. */
+function reusedFilesOf(record) {
   return allFiles(record).filter((path) => {
     const entry = record.explanations?.get(path);
+    return entry?.status === 'done' && entry.explanation !== null && entry.explanation !== undefined;
+  });
+}
+
+function missingFilesOf(record, before, reused = new Set()) {
+  return allFiles(record).filter((path) => {
+    if (reused.has(path)) return false;
+    const entry = record.explanations?.get(path);
+    // Missing and write-failed entries are both gaps; reuse only applies to status 'done'.
     if (entry === undefined || entry.status !== 'done' || entry.explanation === null || entry.explanation === undefined) return true;
     // A file analyzed in an earlier round is not evidence for this run. Only a write that
     // lands after the run starts (updatedAt increased) satisfies coverage.
@@ -239,6 +252,7 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
       status: 'running',
       missingFiles: [],
       missingSections: [],
+      reusedFiles: [],
       headIsolated: headIsolated === true,
       error: null,
     };
@@ -281,7 +295,11 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
         return;
       }
       // Snapshot before the first turn: unless this is a same-round retry, only writes that
-      // land during this run count as coverage.
+      // land during this run count as coverage. On a retry, completed entries are passed as
+      // an explicit reuse set; error/missing entries stay gaps.
+      const reusedFiles = sameRoundRetry ? reusedFilesOf(record) : [];
+      const reusedSet = new Set(reusedFiles);
+      activeRun.reusedFiles = reusedFiles;
       const before = sameRoundRetry
         ? new Map()
         : new Map(allFiles(record).map((path) => [path, record.explanations?.get(path)?.updatedAt ?? 0]));
@@ -289,14 +307,10 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
       const beforeConclusionAt = record.conclusionAt ?? 0;
       let retryNote = '';
       if (sameRoundRetry) {
-        const reused = allFiles(record).filter((path) => {
-          const entry = record.explanations?.get(path);
-          return entry?.status === 'done' && entry.explanation !== null && entry.explanation !== undefined;
-        }).length;
         const previousMissing = Array.isArray(previousRun.missingFiles) ? previousRun.missingFiles : [];
         retryNote = [
-          `本轮是同一轮重试：已有 ${reused} 个文件的分析会沿用，不要重复分析；上次未完成：${previousMissing.length > 0 ? previousMissing.join('、') : '无'}。`,
-          '只补缺口，并重新写 report/conclusion（本轮必须重新写，不能沿用上次时间戳）。',
+          `本轮是同一轮重试：以下 ${reusedFiles.length} 个文件的分析会沿用，不要重复分析：${reusedFiles.length > 0 ? reusedFiles.join('、') : '无'}。`,
+          `上次未完成：${previousMissing.length > 0 ? previousMissing.join('、') : '无'}。只补缺口，并重新写 report/conclusion（本轮必须重新写，不能沿用上次时间戳）。`,
         ].join('\n');
       }
       agent.followup(userMessage(taskPrompt(record, cwd, analyze, cwdNote, retryNote)));
@@ -323,7 +337,7 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
         return;
       }
 
-      let files = missingFilesOf(record, before);
+      let files = missingFilesOf(record, before, reusedSet);
       let sections = missingSectionsOf(record, beforeReportAt, beforeConclusionAt);
       for (let attempt = 0; attempt < retries && (files.length > 0 || sections.length > 0); attempt += 1) {
         activeRun.missingFiles = files;
@@ -332,7 +346,7 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
         agent.followup(userMessage(gapPrompt(files, sections, failedFilesOf(record))));
         await waitIdle(agent);
         if (cancelled) return;
-        files = missingFilesOf(record, before);
+        files = missingFilesOf(record, before, reusedSet);
         sections = missingSectionsOf(record, beforeReportAt, beforeConclusionAt);
       }
       const complete = files.length === 0 && sections.length === 0;
