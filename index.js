@@ -3504,22 +3504,11 @@ export function apply(ctx, config) {
     return [
       {
         name: 'review_run_agent',
-        description: '启动一个只读审查 Agent（独立会话）审查指定 PR；可用 paths 限制文件。结果通过 review_* 工具写回，面板实时更新。',
+        description: '为当前 PR 开新一轮审查（按配置的 reviewEngine 执行；默认 Agent）。等价于面板的「开始新一轮审查」，不会在原轮上覆盖。',
         parameters: {
           type: 'object',
           additionalProperties: false,
-          properties: {
-            number: numberProperty,
-            paths: {
-              type: 'array',
-              items: { type: 'string' },
-              description: '可选：只审查这些变更文件；省略时审查全部文件。',
-            },
-            analyze: {
-              type: 'boolean',
-              description: '是否逐文件分析；false 时只写总体报告。默认 true。',
-            },
-          },
+          properties: { number: numberProperty },
         },
         output: textOutput,
         async execute(args, exec) {
@@ -3527,41 +3516,16 @@ export function apply(ctx, config) {
           if (isReviewRunnerAgent(record, exec.agent)) {
             throw toolError(TOOL_ERROR.conflict, '审查 Agent 不能嵌套启动另一个审查 Agent。');
           }
-          const agents = ctx.get('agents');
-          if (agents === undefined || agents === null || typeof agents.create !== 'function') {
-            return toolText(['宿主没有提供 ctx.agents.create；无法启动 Agent 审查。']);
+          if (record.status === 'reviewing') {
+            return toolText([`PR #${record.number} 正在审查中，请等当前轮结束后再开始新一轮。`]);
           }
-          if (!(await presetReady)) {
-            return toolText(['只读审查预设注册失败；请检查宿主日志（agentPresets.register）。']);
+          if (!startReview(record.number, true)) {
+            return toolText([`无法开始新一轮：PR #${record.number} 正在审查中。`]);
           }
-          const paths = Array.isArray(args.paths)
-            ? args.paths.filter((item) => typeof item === 'string' && item.trim() !== '').map((item) => item.trim())
-            : null;
-          const existing = agentRuns.get(record.number);
-          if (existing !== undefined) await existing.cancel();
-          const selection = resolveSelection(ctx, settings);
-          const runner = createReviewRunner({
-            ctx,
-            settings,
-            record,
-            selection,
-            cwd: state.workspaceCwd || process.cwd(),
-            paths,
-            analyze: args.analyze !== false,
-            onChange: () => scheduleSave(),
-          });
-          agentRuns.set(record.number, runner);
-          void runner.start()
-            .catch((error) => {
-              console.warn('[pr-review] Agent 审查失败', error);
-            })
-            .finally(() => {
-              if (agentRuns.get(record.number) === runner) agentRuns.delete(record.number);
-            });
           return toolText([
-            `已启动审查 Agent：PR #${record.number}`,
-            `范围：${paths === null ? `全部 ${(record.files ?? []).length} 个文件` : paths.join('、')}`,
-            '进度会显示在审查面板；完成后可在 review_get 查看覆盖率。',
+            `已开始新一轮审查：PR #${record.number}`,
+            `引擎：${settings.reviewEngine === 'legacy' ? 'legacy（直连 LLM）' : 'agent（独立只读 Agent）'}`,
+            '进度用 review_get 查看；不会覆盖原轮的分析。',
           ]);
         },
       },
