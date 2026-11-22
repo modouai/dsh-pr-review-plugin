@@ -8,6 +8,8 @@
 
 {{baselineSection}}
 
+{{retrySection}}
+
 本审查会话只绑定这一个 PR：所有 `review_*` 工具调用都必须显式带 `number: {{pullNumber}}`，不要依赖“当前 PR”的隐式推断。
 
 流程：
@@ -16,6 +18,7 @@
 2. 调用 `review_list_files`（`number: {{pullNumber}}`）获取全部变更文件。
 3. {{fileAnalysisStep}}
 {{fileAnalysisRules}}
+   - 每次写回前如果 revision 可能已变，先重新调用 `review_get` 取最新值；不要复用旧 revision。
 4. 终稿前先重新调用 `review_get`（`number: {{pullNumber}}`）取最新 revision（逐文件写回会改变 revision）。调用 `review_update_report`（`number: {{pullNumber}}`）写总体 verdict / summary / risks / order / focus。
 5. 最后调用 `review_update_conclusion`（`number: {{pullNumber}}`）写本轮结论（blockers / suggestions / nextSteps）；首次写结论必须带 summary。
 

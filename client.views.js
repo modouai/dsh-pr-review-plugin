@@ -1049,6 +1049,8 @@ window.__ModuleLoader__.load({
         if (review !== null && (review.status === 'error' || review.status === 'incomplete')) {
           const missing = Array.isArray(review.run?.missingFiles) ? review.run.missingFiles : [];
           const sections = Array.isArray(review.run?.missingSections) ? review.run.missingSections : [];
+          const retrySameRound = review.status === 'incomplete'
+            || (review.status === 'error' && (review.run?.status === 'incomplete' || review.run?.status === 'cancelled'));
           return h(
             'div',
             { className: 'prr-zero' },
@@ -1061,9 +1063,9 @@ window.__ModuleLoader__.load({
             sections.length > 0 ? h('div', { className: 'prr-subtle' }, sections.join('、')) : null,
             h(Btn, {
               label: t('retry'),
-              // An incomplete round retries the same round so existing analyses are kept;
-              // a hard error opens a new round.
-              onClick: () => void startReview(review.status !== 'incomplete'),
+              // An incomplete/cancelled round retries the same round so existing analyses
+              // are kept; a hard error opens a new round.
+              onClick: () => void startReview(!retrySameRound),
             }),
           );
         }

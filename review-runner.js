@@ -45,7 +45,7 @@ function baselinePrompt(record) {
   return lines.join('\n');
 }
 
-function taskPrompt(record, cwd, analyzeFiles, cwdNote) {
+function taskPrompt(record, cwd, analyzeFiles, cwdNote, retryNote = '') {
   const files = allFiles(record);
   const scope = `全部变更文件（${files.length} 个）`;
   return renderPrompt('review-task', {
@@ -53,9 +53,10 @@ function taskPrompt(record, cwd, analyzeFiles, cwdNote) {
     repo: record.pull?.repo ?? '',
     headSha: record.headSha ?? record.pull?.headSha ?? '',
     cwd,
-    cwdNote: typeof cwdNote === 'string' ? cwdNote : '',
+    cwdNote: typeof cwdNote === 'string' && cwdNote !== '' ? cwdNote : '本轮工作区已检出 PR head。',
     scope,
     baselineSection: analyzeFiles ? baselinePrompt(record) : '',
+    retrySection: typeof retryNote === 'string' ? retryNote : '',
     fileAnalysisStep: analyzeFiles
       ? '对每个文件：`review_get_file` / `review_get_diff` 获取 PR head 内容；按需读取调用方、定义、测试；分析后调用 `review_update_analysis` 写回。'
       : '本轮只写总体报告，不逐文件分析；用户点开文件时再分析。',
@@ -85,11 +86,26 @@ function missingSectionsOf(record, beforeReportAt, beforeConclusionAt) {
   return missing;
 }
 
-function gapPrompt(files, sections) {
+function failedFilesOf(record) {
+  const failed = [];
+  for (const path of allFiles(record)) {
+    const entry = record.explanations?.get(path);
+    if (entry?.status === 'error') {
+      failed.push({ path, error: typeof entry.error === 'string' && entry.error !== '' ? entry.error : '写回失败' });
+    }
+  }
+  return failed;
+}
+
+function gapPrompt(files, sections, failed = []) {
   const lines = [];
   if (files.length > 0) {
-    lines.push('以下文件还没有 `review_update_analysis`：');
+    lines.push('以下文件还没有完成 `review_update_analysis`：');
     for (const path of files) lines.push(`- ${path}`);
+  }
+  if (failed.length > 0) {
+    lines.push('以下文件上次写回失败，需要重新分析并写回：');
+    for (const item of failed) lines.push(`- ${item.path}：${item.error}`);
   }
   if (sections.length > 0) {
     lines.push('本轮终稿还缺少：');
@@ -259,6 +275,12 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
       activeRun.agentSessionId = sessionId;
       changed();
       if (typeof onAgent === 'function') onAgent(agent, sessionId);
+      if (cancelled) {
+        // The caller cancelled while agents.create was still pending; release the fresh
+        // handle immediately instead of making a turn and disposing later.
+        await dispose();
+        return;
+      }
       // Snapshot before the first turn: unless this is a same-round retry, only writes that
       // land during this run count as coverage.
       const before = sameRoundRetry
@@ -266,7 +288,19 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
         : new Map(allFiles(record).map((path) => [path, record.explanations?.get(path)?.updatedAt ?? 0]));
       const beforeReportAt = record.reportUpdatedAt ?? 0;
       const beforeConclusionAt = record.conclusionAt ?? 0;
-      agent.followup(userMessage(taskPrompt(record, cwd, analyze, cwdNote)));
+      let retryNote = '';
+      if (sameRoundRetry) {
+        const reused = allFiles(record).filter((path) => {
+          const entry = record.explanations?.get(path);
+          return entry?.status === 'done' && entry.explanation !== null && entry.explanation !== undefined;
+        }).length;
+        const previousMissing = Array.isArray(previousRun.missingFiles) ? previousRun.missingFiles : [];
+        retryNote = [
+          `本轮是同一轮重试：已有 ${reused} 个文件的分析会沿用，不要重复分析；上次未完成：${previousMissing.length > 0 ? previousMissing.join('、') : '无'}。`,
+          '只补缺口，并重新写 report/conclusion（本轮必须重新写，不能沿用上次时间戳）。',
+        ].join('\n');
+      }
+      agent.followup(userMessage(taskPrompt(record, cwd, analyze, cwdNote, retryNote)));
       await waitIdle(agent);
       if (cancelled) return;
 
@@ -296,7 +330,7 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
         activeRun.missingFiles = files;
         activeRun.missingSections = sections;
         changed();
-        agent.followup(userMessage(gapPrompt(files, sections)));
+        agent.followup(userMessage(gapPrompt(files, sections, failedFilesOf(record))));
         await waitIdle(agent);
         if (cancelled) return;
         files = missingFilesOf(record, before);

@@ -288,9 +288,13 @@ test('a same-round retry restates files missing from the failed attempt', async 
   record.round = 3;
   record.run = { round: 3, headSha: 'abc', status: 'error', missingFiles: ['src/b.js'] };
   record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: 100 });
-  const ctx = fakeCtx(() => {});
-  await runnerFor(record, ctx, { reviewCoverageRetries: 0 }).start();
+  const prompts = [];
+  const ctx = fakeCtx((message) => { prompts.push(message.content[0].text); });
+  await runnerFor(record, ctx, { reviewCoverageRetries: 1 }).start();
   assert.deepEqual(record.run.missingFiles, ['src/b.js']);
+  assert.match(prompts[0], /上次未完成：src\/b\.js/);
+  assert.match(prompts[1], /src\/b\.js/);
+  assert.match(prompts[0], /已有 1 个文件的分析会沿用/);
 });
 
 test('a cancelled prior run does not relax coverage', async () => {
@@ -301,6 +305,26 @@ test('a cancelled prior run does not relax coverage', async () => {
   const ctx = fakeCtx(() => {});
   await runnerFor(record, ctx, { reviewCoverageRetries: 0 }).start();
   assert.deepEqual(record.run.missingFiles, ['src/a.js']);
+});
+
+test('cancel during a pending create releases the fresh handle', async () => {
+  const record = fakeRecord(['src/a.js']);
+  const ctx = fakeCtx(() => {});
+  const baseCreate = ctx.agents.create;
+  ctx.agents.create = async (options) => {
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    return baseCreate(options);
+  };
+  const runner = runnerFor(record, ctx, { reviewCoverageRetries: 0 });
+  const task = runner.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  await runner.cancel();
+  await Promise.race([
+    task,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('start did not return after cancel')), 1000)),
+  ]);
+  assert.equal(record.run.status, 'cancelled');
+  assert.equal(ctx.disposed.length, 1);
 });
 
 test('agent errors mark the run error and still dispose', async () => {

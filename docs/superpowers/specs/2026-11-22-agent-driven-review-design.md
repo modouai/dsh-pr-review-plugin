@@ -30,7 +30,7 @@ interface Agent {
 }
 
 ctx.agents.create(options: CreateAgentOptions): Promise<AgentHandle>
-// CreateAgentOptions: meta（cwd、agentPreset、…）、agentOptions（provider/model/reasoningEffort/maxTokens）、signal、setup
+// CreateAgentOptions: meta（cwd、agentPreset、…）、agentOptions（provider/model/reasoningEffort/maxTokens）、signal（可选；create 阶段当前不传）、setup
 ```
 
 因此审查应当由一个**独立 Agent 会话**完成，而不是插件自己发一轮轮 JSON 请求。
@@ -115,7 +115,7 @@ await agent.whenIdle();
 - `reviewCwd` 是本轮 PR head 的 detached worktree（`git worktree add --detach <tmp> <headSha>`），不是用户工作区；否则原生 `read/grep` 可能读到另一个分支的代码，产生跨版本误报。**worktree 创建失败时不降级到用户工作区**：本轮直接 error 并提示先拉取 head，避免用旧代码得出新 head 的结论。
 - `meta.cwd` 指向上述 worktree；`meta.agentPreset` 仅是记录，必须配合 `mount`。
 - 模型选择沿用 `provider`/`model`/`reasoningEffort`；未配置时取宿主默认模型。
-- 取消：外部取消 → `handle.dispose()`；轮次被替换 → 先取消旧 runner 再创建新的；等待用 `whenIdle()`，但 `whenIdle()` 必须与取消信号竞速，取消后立即返回终态，不能把 run 挂在 `running`。
+- 取消：外部取消 → `handle.dispose()`；轮次被替换 → 先取消旧 runner 再创建新的；等待用 `whenIdle()`，但 `whenIdle()` 必须与取消信号竞速，取消后立即返回终态，不能把 run 挂在 `running`。若 `create` 尚未返回就取消，拿到 handle 后立即 dispose，不再发起 turn。
 
 ### 4.3 只读预设
 
@@ -246,6 +246,7 @@ await agent.whenIdle();
   - `round` 与本轮 `record.round` 一起持久化，用于区分“同一轮重试”（沿用已有逐文件分析）与“新一轮”（从头覆盖）；`headSha` 同时匹配才沿用，防止新 head 复用旧代码分析。
   - 持久化到缓存（不含模型输出）。`reviewing` 记录也持久化：重启时 `record.status` 与 `run.status` 都恢复为 `error`（文案「应用重启，上一轮审查中断」），轮询可自动重试；不能整条丢弃，否则审查中重启会丢掉该 PR 的轮次历史与结论。
   - 运行归属用 runner 持有的 run 对象身份判断（`record.run === run`）；开跑前先把 `record.run` 置空，旧 run 的迟到收尾不能再写本记录。
+  - 进程内 `record.reviewGeneration` 由 `startReview` 每次递增；`startReview` 的 catch、`runAgentReview` 的每个 await 之后以及等槽回调都校验 generation，过期任务不能写 `record.status`。
   - `record.status` 映射：run `done` → `done`；`incomplete` / `cancelled` → `incomplete`；`error` → `error`。不允许把 incomplete 折叠成 done。
   - `newReviewRecord` 初始化 `run: null`，`rollNewRound` 清空 `run`，`restoreReviewRecord` 用 `restoreRun` 恢复。
 - 旧缓存：恢复时归一化；未知旧字段忽略，不报错。

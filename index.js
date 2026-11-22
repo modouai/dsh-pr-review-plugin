@@ -1703,8 +1703,13 @@ export function apply(ctx, config) {
       record.fileContents = undefined;
     }
     state.reviews.set(number, record);
-    const task = settings.reviewEngine === 'agent' ? runAgentReview(record) : runReview(record);
+    // Process-local generation: every startReview is a new owner. Async paths (old run
+    // finishing, queued slot, catch handlers) must not write a record owned by a later one.
+    const generation = (record.reviewGeneration ?? 0) + 1;
+    record.reviewGeneration = generation;
+    const task = settings.reviewEngine === 'agent' ? runAgentReview(record, generation) : runReview(record);
     void task.catch((error) => {
+      if (record.reviewGeneration !== generation) return;
       record.status = 'error';
       record.error = error instanceof Error ? error.message : String(error);
       record.finishedAt = Date.now();
@@ -1858,7 +1863,8 @@ export function apply(ctx, config) {
   }
 
   /** Record an early agent failure as a terminal run so the panel can show a complete state. */
-  function failAgentRun(record, message, headIsolated = false) {
+  function failAgentRun(record, message, generation, headIsolated = false) {
+    if (record.reviewGeneration !== generation) return;
     const now = Date.now();
     record.run = {
       round: record.round ?? 0,
@@ -1880,7 +1886,8 @@ export function apply(ctx, config) {
   }
 
   /** Agent-driven review: fetch context, then let the read-only agent write results. */
-  async function runAgentReview(record) {
+  async function runAgentReview(record, generation) {
+    if (record.reviewGeneration !== generation) return;
     // Fence any previous run before awaiting its cancel: its late completion must not write
     // this record's status after a new run owns it. The prior run is still passed to the
     // runner so a same-round retry can reuse its analyses.
@@ -1891,25 +1898,32 @@ export function apply(ctx, config) {
       try {
         await previous.cancel();
       } catch (error) {
-        failAgentRun(record, error instanceof Error ? error.message : String(error));
+        failAgentRun(record, error instanceof Error ? error.message : String(error), generation);
         return;
       }
       if (agentRuns.get(record.number) === previous) agentRuns.delete(record.number);
     }
+    if (record.reviewGeneration !== generation) return;
     try {
       await prepareReviewContext(record);
     } catch (error) {
-      failAgentRun(record, error instanceof Error ? error.message : String(error));
+      failAgentRun(record, error instanceof Error ? error.message : String(error), generation);
       return;
     }
+    if (record.reviewGeneration !== generation) return;
     if (!(await presetReady)) {
-      failAgentRun(record, '只读审查预设注册失败；请检查宿主日志（agentPresets.register）。');
+      failAgentRun(record, '只读审查预设注册失败；请检查宿主日志（agentPresets.register）。', generation);
       return;
     }
+    if (record.reviewGeneration !== generation) return;
     const selection = resolveSelection(ctx, settings);
     const worktree = await prepareReviewWorktree(record);
+    if (record.reviewGeneration !== generation) {
+      await worktree.cleanup();
+      return;
+    }
     if (worktree.isolated !== true) {
-      failAgentRun(record, worktree.message ?? '无法为 PR head 创建工作区，已停止审查（避免读到旧代码）。');
+      failAgentRun(record, worktree.message ?? '无法为 PR head 创建工作区，已停止审查（避免读到旧代码）。', generation);
       return;
     }
     let runner;
@@ -1917,6 +1931,7 @@ export function apply(ctx, config) {
     try {
       await withAgentSlot(async () => {
         try {
+          if (record.reviewGeneration !== generation) return;
           runner = createReviewRunner({
             ctx,
             settings,
@@ -1944,9 +1959,10 @@ export function apply(ctx, config) {
         }
       });
     } catch (error) {
-      failAgentRun(record, error instanceof Error ? error.message : String(error));
+      failAgentRun(record, error instanceof Error ? error.message : String(error), generation);
       return;
     }
+    if (record.reviewGeneration !== generation || runner === undefined) return;
     // A newer run replaced this one while it was finishing; its state owns the record.
     // Compare the run object itself: a restored/rebuilt record can lose a process-local token.
     const run = runner.currentRun();
