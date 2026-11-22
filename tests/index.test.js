@@ -269,6 +269,8 @@ async function setup(options = {}) {
     // the assertions of the review/conclusion tests. The schema default is `true`;
     // `useDefaultAutoAnalyze` omits the key to exercise that default end to end.
     ...(options.useDefaultAutoAnalyze === true ? {} : { autoAnalyze: options.autoAnalyze === true }),
+    // Keep the existing tests on the legacy engine while the agent path has its own tests.
+    reviewEngine: options.reviewEngine ?? 'legacy',
   });
 
   async function call(pathname, method = 'GET', body) {

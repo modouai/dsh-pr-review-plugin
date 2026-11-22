@@ -102,6 +102,9 @@ const DEFAULTS = {
   reviewAgentPreset: 'pr-review-readonly',
   reviewCoverageRetries: 2,
   reviewAgentMaxTokens: 8000,
+  // 'agent' runs the whole review through a dedicated read-only agent session.
+  // 'legacy' keeps the direct-LLM pipeline during the migration.
+  reviewEngine: 'agent',
 };
 
 /** GUI launches can have a minimal PATH; try the common absolute locations too. */
@@ -141,6 +144,7 @@ export const Config = Schema.object({
   reviewAgentPreset: Schema.string().default(DEFAULTS.reviewAgentPreset),
   reviewCoverageRetries: Schema.number().min(0).max(5).default(DEFAULTS.reviewCoverageRetries),
   reviewAgentMaxTokens: Schema.number().min(1000).default(DEFAULTS.reviewAgentMaxTokens),
+  reviewEngine: Schema.union(['agent', 'legacy']).default(DEFAULTS.reviewEngine),
 });
 
 /** Stable tool failure codes: the tool registry keeps `error.code` for HarnessError only. */
@@ -1648,7 +1652,8 @@ export function apply(ctx, config) {
       record.fileContents = undefined;
     }
     state.reviews.set(number, record);
-    void runReview(record).catch((error) => {
+    const task = settings.reviewEngine === 'agent' ? runAgentReview(record) : runReview(record);
+    void task.catch((error) => {
       record.status = 'error';
       record.error = error instanceof Error ? error.message : String(error);
       record.finishedAt = Date.now();
@@ -1702,8 +1707,8 @@ export function apply(ctx, config) {
     return summary !== '' || concerns.length > 0;
   }
 
-  /** Fetch one pull request and produce the overall report plus reading order. */
-  async function runReview(record) {
+  /** Fetch the PR head, changed files and parsed diff; shared by both review engines. */
+  async function prepareReviewContext(record) {
     const client = await ensureClient();
     const pull = await client.pullDetail(record.number);
     record.pull = pull;
@@ -1733,6 +1738,47 @@ export function apply(ctx, config) {
       }
       record.files = [...fileMap.values()];
     }
+    return { pull, files };
+  }
+
+  /** Agent-driven review: fetch context, then let the read-only agent write results. */
+  async function runAgentReview(record) {
+    await prepareReviewContext(record);
+    if (!(await presetReady)) {
+      record.status = 'error';
+      record.error = '只读审查预设注册失败；请检查宿主日志（agentPresets.register）。';
+      record.finishedAt = Date.now();
+      currentRoundEntry(record).finishedAt = record.finishedAt;
+      scheduleSave();
+      return;
+    }
+    const selection = resolveSelection(ctx, settings);
+    const runner = createReviewRunner({
+      ctx,
+      settings,
+      record,
+      selection,
+      cwd: state.workspaceCwd || process.cwd(),
+      analyze: settings.autoAnalyze !== false,
+      onChange: () => scheduleSave(),
+    });
+    agentRuns.set(record.number, runner);
+    try {
+      await runner.start();
+    } finally {
+      if (agentRuns.get(record.number) === runner) agentRuns.delete(record.number);
+    }
+    const status = record.run?.status ?? 'error';
+    record.status = status === 'error' ? 'error' : 'done';
+    record.error = record.run?.error ?? null;
+    record.finishedAt = Date.now();
+    currentRoundEntry(record).finishedAt = record.finishedAt;
+    scheduleSave();
+  }
+
+  /** Fetch one pull request and produce the overall report plus reading order. */
+  async function runReview(record) {
+    const { pull, files } = await prepareReviewContext(record);
     const prompt = buildReportPrompt(pull, record.files, record.diffFiles, settings);
     let answer;
     try {
