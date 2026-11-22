@@ -14,8 +14,8 @@
    - path 必须是变更文件清单中的路径，revision 用最近一次 `review_get` 返回的值。
    - issues 每条只写一个核心问题，写清影响与修法；severity 只有 block / suggest。
    - 没有发现问题时 issues 写空数组，并在 summary 里说明依据。
-4. 全部文件完成后，调用 `review_update_report` 写总体 verdict / summary / risks / order / focus。
-5. 最后调用 `review_update_conclusion` 写本轮结论（blockers / suggestions / nextSteps）。
+4. 终稿前先重新调用 `review_get` 取最新 revision（逐文件写回会改变 revision）。调用 `review_update_report` 写总体 verdict / summary / risks / order / focus。
+5. 最后调用 `review_update_conclusion` 写本轮结论（blockers / suggestions / nextSteps）；首次写结论必须带 summary。
 
 覆盖率要求：上面范围内的每个文件都必须有 `review_update_analysis`。无法读取的文件写进 summary；不要猜测。
 

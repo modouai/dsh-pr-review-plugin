@@ -11,6 +11,9 @@ function fakeRecord(files) {
     files: files.map((path) => ({ path })),
     explanations: new Map(),
     report: null,
+    reportUpdatedAt: 0,
+    conclusion: null,
+    conclusionAt: 0,
     run: null,
   };
 }
@@ -96,6 +99,10 @@ test('the runner creates a read-only review agent and sends the task prompt', as
   const ctx = fakeCtx((message) => {
     prompts.push(message.content[0].text);
     record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: Date.now() });
+    record.report = { verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} };
+    record.reportUpdatedAt = Date.now();
+    record.conclusion = { verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] };
+    record.conclusionAt = Date.now();
   });
   await runnerFor(record, ctx).start();
   assert.equal(ctx.created.length, 1);
@@ -134,6 +141,10 @@ test('a paths scope only requires the requested files', async () => {
   const record = fakeRecord(['src/a.js', 'src/b.js']);
   const ctx = fakeCtx(() => {
     record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: Date.now() });
+    record.report = { verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} };
+    record.reportUpdatedAt = Date.now();
+    record.conclusion = { verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] };
+    record.conclusionAt = Date.now();
   });
   await createReviewRunner({
     ctx,

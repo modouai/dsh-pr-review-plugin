@@ -3633,11 +3633,12 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
-          if (record.report === null || record.report === undefined) {
-            throw toolError(TOOL_ERROR.notFound, '还没有总体报告：请先完成审查（review_list_prs 可看状态）。');
-          }
           assertToolRevision(record, args.revision);
-          const before = record.report;
+          const creating = record.report === null || record.report === undefined;
+          if (creating && args.summary === undefined && args.risks === undefined) {
+            throw toolError(TOOL_ERROR.invalidArgs, '首次写报告需要 summary 或 risks；不能只写一个空报告。');
+          }
+          const before = record.report ?? { verdict: 'suggest', summary: '', risks: [], order: [], focus: {} };
           const next = { ...before };
           if (args.verdict !== undefined) next.verdict = normalizeVerdict(args.verdict, before.verdict ?? 'suggest');
           if (args.summary !== undefined) next.summary = String(args.summary);
@@ -3671,7 +3672,7 @@ export function apply(ctx, config) {
           recordToolAudit(record, exec, 'review_update_report', `报告: ${writeSummary(before, next)}`);
           scheduleSave();
           return toolText([
-            `已更新总体报告（revision ${record.revision}）`,
+            `${creating ? '已写入' : '已更新'}总体报告（revision ${record.revision}）`,
             `总体评价：${next.verdict ?? ''} · ${String(next.summary ?? '').slice(0, 160)}`,
             `初筛风险 ${(next.risks ?? []).length} 条 / 审查顺序 ${(next.order ?? []).length} 个文件`,
             '报告更新会让结论变 stale，需要时可重新生成结论。',
@@ -3710,11 +3711,12 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
-          const before = record.conclusion ?? null;
-          if (before === null || before === undefined) {
-            throw toolError(TOOL_ERROR.notFound, '当前轮还没有最终结论：请先在审查面板生成结论，再调整。');
-          }
           assertToolRevision(record, args.revision);
+          const creating = record.conclusion === null || record.conclusion === undefined;
+          if (creating && args.summary === undefined) {
+            throw toolError(TOOL_ERROR.invalidArgs, '首次写结论需要 summary。');
+          }
+          const before = record.conclusion ?? { verdict: 'suggest', summary: '', blockers: [], suggestions: [], nextSteps: [] };
           const working = {
             verdict: args.verdict ?? before.verdict,
             summary: args.summary ?? before.summary,
@@ -3734,14 +3736,17 @@ export function apply(ctx, config) {
           const normalized = normalizeConclusion(working, {
             files: (record.files ?? []).map((file) => file.path),
           });
-          pushConclusionVersion(record, 'human', normalized, record.coverage);
-          record.conclusionEditedAt = Date.now();
-          const touched = [...normalized.blockers, ...normalized.suggestions].map((item) => item.id);
-          record.humanItemIds = [...new Set([...(record.humanItemIds ?? []), ...touched])];
+          const runnerAgent = isReviewRunnerAgent(record, exec.agent);
+          pushConclusionVersion(record, runnerAgent ? 'model' : 'human', normalized, record.coverage);
+          if (!runnerAgent) {
+            record.conclusionEditedAt = Date.now();
+            const touched = [...normalized.blockers, ...normalized.suggestions].map((item) => item.id);
+            record.humanItemIds = [...new Set([...(record.humanItemIds ?? []), ...touched])];
+          }
           recordToolAudit(record, exec, 'review_update_conclusion', `结论: ${writeSummary(before, normalized)}`);
           scheduleSave();
           return toolText([
-            `已更新当前轮结论（revision ${record.revision}）：${normalized.verdict} · ${normalized.summary.slice(0, 160)}`,
+            `${creating ? '已写入' : '已更新'}当前轮结论（revision ${record.revision}）：${normalized.verdict} · ${normalized.summary.slice(0, 160)}`,
             `阻塞项 ${normalized.blockers.length} 条 · 修改建议 ${normalized.suggestions.length} 条 · 下一步 ${normalized.nextSteps.length} 条`,
             '这就是下一份发布评论的正文；在审查面板点「发布」并按需勾选后即可发出。',
           ]);

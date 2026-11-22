@@ -45,10 +45,31 @@ function taskPrompt(record, cwd, paths, analyzeFiles, cwdNote) {
   });
 }
 
-function continuePrompt(missing) {
-  return renderPrompt('review-continue', {
-    missingFiles: missing.map((path) => `- ${path}`).join('\n'),
-  });
+/** The two terminal writes a round needs besides per-file analyses. */
+function missingSectionsOf(record, beforeReportAt, beforeConclusionAt) {
+  const missing = [];
+  if (record.report === null || record.report === undefined || (record.reportUpdatedAt ?? 0) <= beforeReportAt) {
+    missing.push('总体报告（review_update_report）');
+  }
+  if (record.conclusion === null || record.conclusion === undefined || (record.conclusionAt ?? 0) <= beforeConclusionAt) {
+    missing.push('最终结论（review_update_conclusion）');
+  }
+  return missing;
+}
+
+function gapPrompt(files, sections) {
+  const lines = [];
+  if (files.length > 0) {
+    lines.push('以下文件还没有 `review_update_analysis`：');
+    for (const path of files) lines.push(`- ${path}`);
+  }
+  if (sections.length > 0) {
+    lines.push('本轮终稿还缺少：');
+    for (const item of sections) lines.push(`- ${item}`);
+    lines.push('请先重新调用 `review_get` 取最新 revision，再写回终稿；首次写结论必须带 summary。');
+  }
+  lines.push('不要修改代码、不要发布评论。');
+  return lines.join('\n');
 }
 
 function missingFilesOf(record, paths, before) {
@@ -113,9 +134,10 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, path
     if (current !== null) await current.dispose();
   };
 
-  const finish = (status, missing, error) => {
+  const finish = (status, missing, sections, error) => {
     record.run.status = status;
     record.run.missingFiles = missing;
+    record.run.missingSections = sections;
     record.run.error = error ?? null;
     record.run.finishedAt = Date.now();
     changed();
@@ -129,11 +151,12 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, path
       finishedAt: 0,
       status: 'running',
       missingFiles: [],
+      missingSections: [],
       error: null,
     };
     changed();
     if (service === undefined || service === null || typeof service.create !== 'function') {
-      finish('error', [], '宿主没有提供 ctx.agents.create；无法启动 Agent 审查。');
+      finish('error', [], [], '宿主没有提供 ctx.agents.create；无法启动 Agent 审查。');
       return;
     }
     try {
@@ -162,33 +185,53 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, path
       changed();
       // Snapshot before the first turn: only writes that land during this run count as coverage.
       const before = new Map(scopedFiles(record, paths).map((path) => [path, record.explanations?.get(path)?.updatedAt ?? 0]));
+      const beforeReportAt = record.reportUpdatedAt ?? 0;
+      const beforeConclusionAt = record.conclusionAt ?? 0;
       agent.followup(userMessage(taskPrompt(record, cwd, paths, analyze, cwdNote)));
       await agent.whenIdle();
       if (cancelled) return;
 
+      const retries = Number.isInteger(settings.reviewCoverageRetries) ? settings.reviewCoverageRetries : 2;
       if (!analyze) {
-        const complete = record.report !== null && record.report !== undefined;
-        finish(complete ? 'done' : 'incomplete', complete ? [] : ['report'], complete ? null : '审查未完成：总体报告未生成');
+        let sections = missingSectionsOf(record, beforeReportAt, beforeConclusionAt);
+        for (let attempt = 0; attempt < retries && sections.length > 0; attempt += 1) {
+          record.run.missingSections = sections;
+          changed();
+          agent.followup(userMessage(gapPrompt([], sections)));
+          await agent.whenIdle();
+          if (cancelled) return;
+          sections = missingSectionsOf(record, beforeReportAt, beforeConclusionAt);
+        }
+        finish(
+          sections.length === 0 ? 'done' : 'incomplete',
+          [],
+          sections,
+          sections.length === 0 ? null : `审查未完成：${sections.join('、')}未写回`,
+        );
         return;
       }
 
-      let missing = missingFilesOf(record, paths, before);
-      const retries = Number.isInteger(settings.reviewCoverageRetries) ? settings.reviewCoverageRetries : 2;
-      for (let attempt = 0; attempt < retries && missing.length > 0; attempt += 1) {
-        record.run.missingFiles = missing;
+      let files = missingFilesOf(record, paths, before);
+      let sections = missingSectionsOf(record, beforeReportAt, beforeConclusionAt);
+      for (let attempt = 0; attempt < retries && (files.length > 0 || sections.length > 0); attempt += 1) {
+        record.run.missingFiles = files;
+        record.run.missingSections = sections;
         changed();
-        agent.followup(userMessage(continuePrompt(missing)));
+        agent.followup(userMessage(gapPrompt(files, sections)));
         await agent.whenIdle();
         if (cancelled) return;
-        missing = missingFilesOf(record, paths, before);
+        files = missingFilesOf(record, paths, before);
+        sections = missingSectionsOf(record, beforeReportAt, beforeConclusionAt);
       }
+      const complete = files.length === 0 && sections.length === 0;
       finish(
-        missing.length > 0 ? 'incomplete' : 'done',
-        missing,
-        missing.length > 0 ? `审查未完成：${missing.length} 个文件未分析` : null,
+        complete ? 'done' : 'incomplete',
+        files,
+        sections,
+        complete ? null : `审查未完成：${files.length} 个文件、${sections.length} 个收口项缺失`,
       );
     } catch (error) {
-      finish('error', record.run.missingFiles ?? [], error instanceof Error ? error.message : String(error));
+      finish('error', record.run.missingFiles ?? [], record.run.missingSections ?? [], error instanceof Error ? error.message : String(error));
     } finally {
       await dispose();
     }

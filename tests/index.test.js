@@ -1947,15 +1947,15 @@ test('review_update_conclusion rewrites the current conclusion (the next publish
   }
 });
 
-test('review_update_conclusion refuses when the round has no conclusion yet', async () => {
+test('review_update_conclusion creates the first conclusion for a round without one', async () => {
   const plugin = await setup({
     reviews: { 1: legacyReview({ conclusion: null, conclusionAt: 0 }) },
   });
   try {
-    await assert.rejects(
-      () => plugin.runTool('review_update_conclusion', { revision: 0, summary: 'x' }),
-      /还没有最终结论/,
-    );
+    const text = await plugin.runTool('review_update_conclusion', { revision: 0, summary: 'x' });
+    assert.match(text, /已写入当前轮结论/);
+    const review = await plugin.review();
+    assert.equal(review.conclusion.summary, 'x');
   } finally {
     await plugin.dispose();
   }
