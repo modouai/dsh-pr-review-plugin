@@ -78,9 +78,13 @@ export const READONLY_AGENT_PROMPT = [
   '不要建议或尝试发布评论、重新生成结论，也不要在最终答复里声称这些工具可用。',
 ].join('\n');
 
+/** Where the read-only clarification sits relative to other prompt sections: just after the
+ * plugin's global review-data section (`order: 60`), before the tool sections start at 1000. */
+export const READONLY_PROMPT_ORDER = 70;
+
 export function registerReadOnlyPrompt(agentCtx) {
   if (agentCtx?.systemPrompt !== undefined && agentCtx?.systemPrompt !== null && typeof agentCtx.systemPrompt.section === 'function') {
-    agentCtx.systemPrompt.section({ name: 'pr-review: readonly-agent', text: READONLY_AGENT_PROMPT });
+    agentCtx.systemPrompt.section({ name: 'pr-review: readonly-agent', order: READONLY_PROMPT_ORDER, text: READONLY_AGENT_PROMPT });
   }
 }
 

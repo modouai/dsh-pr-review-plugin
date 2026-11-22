@@ -51,6 +51,11 @@ function fakeCtx(onFollowup) {
         await options.setup?.({
           systemPrompt: {
             section: (definition) => {
+              // Mirror the host: systemPrompt.section() rejects a missing/non-finite order,
+              // so a fake that accepts anything would hide a broken registration.
+              if (!Number.isFinite(definition.order)) {
+                throw new TypeError(`prompt section "${definition.name}" order must be a finite number`);
+              }
               promptSections.push(definition);
               return () => {};
             },
@@ -103,6 +108,7 @@ test('the runner creates a read-only review agent and sends the task prompt', as
   assert.deepEqual(ctx.restrictions, [{ deny: ['create_worktree', 'review_publish'] }]);
   assert.equal(ctx.promptSections.length, 1);
   assert.equal(ctx.promptSections[0].name, 'pr-review: readonly-agent');
+  assert.equal(ctx.promptSections[0].order, 70);
   assert.match(ctx.promptSections[0].text, /review_update_conclusion/);
   assert.match(ctx.promptSections[0].text, /没有 review_publish/);
   assert.match(prompts[0], /review_list_files/);
