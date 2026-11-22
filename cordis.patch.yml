@@ -16,18 +16,11 @@
         projectId: ''
         pollSeconds: 60
         autoReview: true
-        # 每轮审查完成后自动逐个分析全部变更文件；关闭后只在点开文件或点「全部分析」时分析。
-        # 单 PR 内逐个分析，跨 PR 最多 2 个并发；应用重启后打开面板会续跑。
-        # 每个文件一次模型调用，注意配额与限流。
+        # 每轮审查是否包含逐文件分析；关闭时 Agent 只写总体报告与结论。
+        # 跨 PR 最多 2 个 Agent 会话。
         autoAnalyze: true
         provider: ''
         model: ''
         reasoningEffort: 'off'
         maxDiffCharsPerFile: 14000
         commentLanguage: 'zh'
-        autoReconclude: false
-        # 两轮审查：先产出候选问题与所需证据，宿主取证后再按置信度判定。
-        # 有候选问题时每个文件多一次复审调用；关闭后退回单轮。
-        evidenceVerify: true
-        evidenceMaxFiles: 6
-        evidenceMaxChars: 6000

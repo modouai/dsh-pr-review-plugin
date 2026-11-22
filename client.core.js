@@ -174,6 +174,7 @@ window.__ModuleLoader__.load({
       if (review === null || review === undefined) return true;
       if (review.status === 'reviewing') return false;
       if (review.status === 'error' || review.status === 'stale') return true;
+      if (review.status === 'incomplete') return true;
       if (selectedPull === null || selectedPull === undefined) return true;
       const headSha = selectedPull.headSha ?? '';
       return headSha === '' || headSha !== review.headSha;
@@ -244,64 +245,27 @@ window.__ModuleLoader__.load({
       const current = rounds.length > 0 ? rounds[rounds.length - 1] : null;
       const versions = versionsOf(data, current, true);
       const version = versions.length > 0 ? versions[versions.length - 1].version : 0;
+      if (data.status === 'incomplete') return { phase: 'incomplete', progress: null, nextAction: null, version };
       if (data.status === 'error') return { phase: 'error', progress: null, nextAction: null, version };
-      const analyzing = isAnalyzing(data.analyzing) ? data.analyzing : null;
-      // Batch progress is restated in the global ledger (analyzed / all changed files), the
-      // same numbers the completeness line shows — a header badge of "3/9" next to an
-      // overview "6/12" used to read as two disagreeing facts. The batch object only
-      // answers "is a run active" and how many hard failures it hit.
-      const files = Array.isArray(data.files) ? data.files : [];
-      const explanations = Array.isArray(data.explanations) ? data.explanations : [];
-      const analyzedCount = explanations.filter((entry) => (
-        entry !== null && typeof entry === 'object' && entry.status === 'done' && entry.explanation !== null && entry.explanation !== undefined
-      )).length;
-      const progress = analyzing === null
-        ? null
-        : {
-            done: analyzedCount,
-            // Files is the honest total; a record without them falls back to the batch
-            // total (isAnalyzing guarantees it is positive).
-            total: files.length > 0 ? files.length : analyzing.total,
-            failed: Math.min(Math.max(analyzing.failed ?? 0, 0), analyzing.total ?? 0),
-          };
       const hasConclusion = versions.length > 0;
       const stale = staleInfo !== null && staleInfo !== undefined;
       if (data.status === 'reviewing') return { phase: 'reviewing', progress: null, nextAction: null, version };
-      if (data.concluding !== null && data.concluding !== undefined) {
-        return { phase: 'concluding', progress: null, nextAction: null, version };
-      }
-      if (analyzing !== null) {
-        return {
-          phase: 'analyzing',
-          progress,
-          nextAction: options.manual === true ? 'analyzeAll' : null,
-          version,
-        };
-      }
-      if (!hasConclusion) return { phase: 'ready', progress: null, nextAction: 'conclude', version };
+      if (!hasConclusion) return { phase: 'ready', progress: null, nextAction: null, version };
       const published = isRoundVersionPublished(data.published, current === null ? 1 : current.round, version);
-      if (published && stale) return { phase: 'published-stale', progress: null, nextAction: 'regenerate', version };
+      if (published && stale) return { phase: 'published-stale', progress: null, nextAction: 'append', version };
       if (published) return { phase: 'published', progress: null, nextAction: 'append', version };
-      if (stale) return { phase: 'concluded-stale', progress: null, nextAction: 'regenerate', version };
+      if (stale) return { phase: 'concluded-stale', progress: null, nextAction: 'publish', version };
       return { phase: 'concluded', progress: null, nextAction: 'publish', version };
     }
 
-    /**
-     * The auto-switch decision: land on the conclusion page when the conclude job just
-     * finished (concluding → a terminal phase), but only from the overview of the current
-     * round — a reviewer reading a file is not interrupted; the badges carry the state.
-     */
-    function shouldAutoSwitchPhase(previousPhase, phase, mode, selectedIsCurrent) {
-      if (previousPhase !== 'concluding') return false;
-      if (phase !== 'concluded' && phase !== 'concluded-stale'
-        && phase !== 'published' && phase !== 'published-stale') return false;
-      return mode === 'overview' && selectedIsCurrent === true;
+    /** The agent writes the conclusion; there is no separate conclude job to follow. */
+    function shouldAutoSwitchPhase() {
+      return false;
     }
 
-    /** The overview footer mounts only while reviewing is actionable: ready or concluding. */
-    function overviewFooterVisible(phase) {
-      return phase !== null && phase !== undefined
-        && (phase.phase === 'ready' || phase.phase === 'concluding');
+    /** The overview footer no longer hosts a conclusion action. */
+    function overviewFooterVisible() {
+      return false;
     }
 
     /** Shared「分析 d/t (+ failed)」text for both status lines. */
@@ -320,7 +284,7 @@ window.__ModuleLoader__.load({
     function phaseStateText(phase, t) {
       if (phase === null || phase === undefined) return '';
       if (phase.phase === 'reviewing') return t('badgeReviewing');
-      if (phase.phase === 'concluding') return t('badgeConcluding');
+      if (phase.phase === 'incomplete') return t('statusIncomplete');
       if (phase.phase === 'error') return t('badgeError');
       if (phase.phase === 'analyzing') return analyzingText(phase, t);
       return t('badgeDone');
@@ -330,6 +294,7 @@ window.__ModuleLoader__.load({
     function overviewStateText(phase, t) {
       if (phase === null || phase === undefined) return '';
       if (phase.phase === 'error') return t('badgeError');
+      if (phase.phase === 'incomplete') return t('statusIncomplete');
       if (phase.phase === 'reviewing') return t('badgeReviewing');
       if (phase.phase === 'analyzing') return analyzingText(phase, t);
       return t('badgeDone');
@@ -339,7 +304,6 @@ window.__ModuleLoader__.load({
     function conclusionBadgeText(phase, t) {
       if (phase === null || phase === undefined) return t('badgeConclusionNone');
       const version = phase.version ?? 0;
-      if (phase.phase === 'concluding') return t('badgeConcluding');
       if (phase.phase === 'concluded') return fill(t('badgeConclusionDraft'), { version });
       if (phase.phase === 'concluded-stale') return fill(t('badgeConclusionStale'), { version });
       if (phase.phase === 'published') return fill(t('badgePublished'), { version });
@@ -350,10 +314,11 @@ window.__ModuleLoader__.load({
     /** Badge tone for the rail's conclusion entry: ok/warn/info/danger/none. */
     function conclusionBadgeTone(phase) {
       if (phase === null || phase === undefined) return 'none';
-      if (phase.phase === 'concluding' || phase.phase === 'concluded') return 'info';
+      if (phase.phase === 'concluded') return 'info';
       if (phase.phase === 'concluded-stale' || phase.phase === 'published-stale') return 'warn';
       if (phase.phase === 'published') return 'ok';
       if (phase.phase === 'error') return 'danger';
+      if (phase.phase === 'incomplete') return 'warn';
       return 'none';
     }
 
@@ -361,7 +326,8 @@ window.__ModuleLoader__.load({
     function processBadgeTone(phase) {
       if (phase === null || phase === undefined) return 'none';
       if (phase.phase === 'error') return 'danger';
-      if (phase.phase === 'concluding' || phase.phase === 'concluded') return 'ok';
+      if (phase.phase === 'incomplete') return 'warn';
+      if (phase.phase === 'concluded') return 'ok';
       if (phase.phase === 'reviewing' || phase.phase === 'analyzing') return 'info';
       return 'ok';
     }
@@ -985,7 +951,6 @@ window.__ModuleLoader__.load({
 .prr-notice{margin:0 0 10px;padding:6px 9px;border-radius:8px;background:color-mix(in srgb,var(--dsw-alias-state-success-primary) 12%,transparent);color:var(--dsw-alias-state-success-primary);font-size:12px}
 .prr-walk-title{font-weight:600;font-size:12px}
 .prr-subtle{font-size:11.5px;color:var(--dsw-alias-label-secondary)}
-.prr-unverified{opacity:.78;border-style:dashed}
 .prr-spacer{flex:1}
 .prr-row[data-walk="true"]{cursor:pointer}
 .prr-row[data-kind="hunk"][data-walk="true"]:hover{background:color-mix(in srgb,var(--dsw-alias-brand-primary) 12%,var(--dsw-alias-bg-layer-2))}

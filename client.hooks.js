@@ -518,51 +518,6 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Background conclusion generation: start, cancel, and the short wait window for writes.
-       */
-      function useConcludeAction({ withRepo, stateRef, loadReview, setReviewError }) {
-        const [concludeBusy, setConcludeBusy] = React.useState(false);
-        const [concludeWait, setConcludeWait] = React.useState(false);
-        const [concludeCancelBusy, setConcludeCancelBusy] = React.useState(false);
-      const runConclude = React.useCallback(async () => {
-        const number = stateRef.current.prNumber;
-        if (typeof number !== 'number') return;
-        setConcludeBusy(true);
-        setConcludeWait(true);
-        try {
-          const result = await postJson(withRepo('/pr-review-api/conclude'), { number });
-          // Old hosts conclude synchronously; async hosts answer { started: true } and report
-          // progress through `review.concluding`, picked up by the poll below.
-          if (result?.started !== true) setConcludeWait(false);
-          await loadReview(number);
-        } catch (error) {
-          setConcludeWait(false);
-          setReviewError(error instanceof Error ? error.message : String(error));
-        } finally {
-          setConcludeBusy(false);
-        }
-      }, [loadReview, setReviewError]);
-      const cancelConclude = React.useCallback(async () => {
-        const number = stateRef.current.prNumber;
-        if (typeof number !== 'number') return;
-        setConcludeCancelBusy(true);
-        try {
-          await postJson(withRepo('/pr-review-api/conclude/cancel'), { number });
-          await loadReview(number);
-        } catch (error) {
-          setReviewError(error instanceof Error ? error.message : String(error));
-        } finally {
-          setConcludeCancelBusy(false);
-        }
-      }, [loadReview, setReviewError]);
-
-        return {
-          concludeBusy, setConcludeBusy, concludeWait, setConcludeWait, concludeCancelBusy,
-          runConclude, cancelConclude,
-        };
-      }
-
-      /**
        * Legacy overlay conversation and the in-review chat call; both drive the same host /chat route.
        */
       function useReviewChat({ withRepo, stateRef, mode, filePath, historicalView, loadReview, t }) {
@@ -661,13 +616,13 @@ window.__ModuleLoader__.load({
        * list slowly, the whole record while the sidebar is visible (tools rewrite it), and the
        * conclusion stage every two seconds.
        */
-      function useReviewPolling({ sidebar, stateRef, concludingActive, concludeWait, setConcludeWait, loadReview, loadList }) {
+      function useReviewPolling({ sidebar, stateRef, loadReview, loadList }) {
         React.useEffect(() => {
           const reviewTimer = setInterval(() => {
             const current = stateRef.current;
             if (current.prNumber === null) return;
-            const analyzing = current.review?.analyzing ?? null;
-            if (current.review !== null && current.review.status !== 'reviewing' && !isAnalyzing(analyzing)) return;
+            const running = current.review?.run?.status === 'running';
+            if (current.review !== null && current.review.status !== 'reviewing' && running !== true) return;
             void loadReview(current.prNumber);
           }, 4000);
           const listTimer = setInterval(() => {
@@ -691,23 +646,6 @@ window.__ModuleLoader__.load({
           }, 5000);
           return () => clearInterval(timer);
         }, [sidebar, loadReview]);
-
-        React.useEffect(() => {
-          if (concludingActive === false && concludeWait === false) return undefined;
-          const timer = setInterval(() => {
-            const current = stateRef.current;
-            if (current.prNumber === null) return;
-            void loadReview(current.prNumber);
-          }, 2000);
-          return () => clearInterval(timer);
-        }, [concludingActive, concludeWait, loadReview]);
-
-        // The host may need a moment to flip `concluding` on; stop waiting if it never shows up.
-        React.useEffect(() => {
-          if (concludeWait === false || concludingActive === true) return undefined;
-          const timer = setTimeout(() => setConcludeWait(false), 25000);
-          return () => clearTimeout(timer);
-        }, [concludeWait, concludingActive]);
       }
 
       /** Pure derivations for the workspace: the ordered file list, findings, and the open file. */
@@ -793,7 +731,7 @@ window.__ModuleLoader__.load({
       }
 
       return {
-        useRepoContext, useFileDetail, usePreviewPublish, useRoundSelection, useFeedbackCheck, useConcludeAction, useReviewChat, usePanelResize, usePanelFocusReport, useReviewPolling, useWorkspaceDerived,
+        useRepoContext, useFileDetail, usePreviewPublish, useRoundSelection, useFeedbackCheck, useReviewChat, usePanelResize, usePanelFocusReport, useReviewPolling, useWorkspaceDerived,
       };
     };
   },

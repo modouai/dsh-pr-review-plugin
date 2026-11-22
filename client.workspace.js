@@ -30,7 +30,7 @@ window.__ModuleLoader__.load({
       } = views;
       const {
         useRepoContext, useFileDetail, usePreviewPublish, useRoundSelection, useFeedbackCheck,
-        useConcludeAction, useReviewChat, usePanelResize, usePanelFocusReport, useReviewPolling,
+        useReviewChat, usePanelResize, usePanelFocusReport, useReviewPolling,
         useWorkspaceDerived,
       } = hooks;
 
@@ -86,8 +86,6 @@ window.__ModuleLoader__.load({
         const [filesWidth, setFilesWidth] = React.useState(panelSizing.files);
         const [detailWidth, setDetailWidth] = React.useState(panelSizing.detail);
         const rootRef = React.useRef(null);
-        const [explainBusyPath, setExplainBusyPath] = React.useState('');
-        const [analyzeAllBusy, setAnalyzeAllBusy] = React.useState(false);
         const [wrap, setWrap] = React.useState(false);
         const [mode, setMode] = React.useState('overview');
         const [scrollLine, setScrollLine] = React.useState(0);
@@ -97,7 +95,6 @@ window.__ModuleLoader__.load({
           reviewRounds, latestRoundNumber, selectedRoundNumber, selectedIsCurrent, historicalView,
           roundPick, setRoundPick, selectRound,
         } = useRoundSelection(review, mode, setMode);
-        const concluding = review?.concluding ?? null;
         // Staleness belongs to the live round only: a pinned historical round is a read-only
         // snapshot, so it never claims to be stale or to have updates.
         const staleInfo = React.useMemo(() => {
@@ -109,10 +106,9 @@ window.__ModuleLoader__.load({
           () => derivePhase(review, staleInfo, { manual: list?.autoAnalyze === false }),
           [review, staleInfo, list],
         );
-        const concludingActive = concluding !== null && concluding !== undefined;
 
-        // When concluding finishes, land on the conclusion page — but only from the overview;
-        // a reviewer reading a file is not interrupted, the badges carry the state instead.
+        // When the agent writes a conclusion, land on the conclusion page — but only from the
+        // overview; a reviewer reading a file is not interrupted, the badges carry the state.
         const previousPhaseRef = React.useRef(null);
         React.useEffect(() => {
           const previous = previousPhaseRef.current;
@@ -125,8 +121,6 @@ window.__ModuleLoader__.load({
         const initialRef = React.useRef({ number: props.initialNumber, file: props.initialFile });
         const rememberRef = React.useRef(props.onRemember);
         rememberRef.current = props.onRemember;
-        const explainInFlight = React.useRef(new Set());
-        const analyzeAllRef = React.useRef(false);
         const stateRef = React.useRef({ prNumber: null, review: null, list: null });
         const withRepoRef = React.useRef(withRepo);
         withRepoRef.current = withRepo;
@@ -186,10 +180,6 @@ window.__ModuleLoader__.load({
           withRepo, stateRef, review, selectedIsCurrent, loadReview,
         });
         const {
-          concludeBusy, setConcludeBusy, concludeWait, setConcludeWait, concludeCancelBusy,
-          runConclude, cancelConclude,
-        } = useConcludeAction({ withRepo, stateRef, loadReview, setReviewError });
-        const {
           overlayDraft, setOverlayDraft, overlayBusy, suggestionNotice, setSuggestionNotice,
           sendChatMessage, sendOverlayMessage,
         } = useReviewChat({ withRepo, stateRef, mode, filePath, historicalView, loadReview, t });
@@ -200,44 +190,6 @@ window.__ModuleLoader__.load({
           selectAllPreviewItems, selectNonePreviewItems, submitPublish,
           previewModalOpen, setPreviewModalOpen,
         } = usePreviewPublish({ withRepo, stateRef, loadReview });
-
-
-        const requestExplain = React.useCallback(async (number, path, force) => {
-          if (typeof number !== 'number' || path === '') return;
-          if (explainInFlight.current.has(path)) return;
-          explainInFlight.current.add(path);
-          // The busy flag carries the path: single-file analysis must not render the
-          // "analyzing" button on every other file the user switches to mid-flight.
-          setExplainBusyPath(path);
-          try {
-            await postJson(withRepo('/pr-review-api/explain'), { number, path, force: force === true });
-            await loadReview(number);
-          } catch (error) {
-            setReviewError(error instanceof Error ? error.message : String(error));
-          } finally {
-            explainInFlight.current.delete(path);
-            setExplainBusyPath('');
-          }
-        }, [loadReview]);
-
-        /** Manual mode: ask the host to analyze every file that still has no analysis. */
-        const requestAnalyzeAll = React.useCallback(async () => {
-          // The disabled button is not enough: two clicks in one tick see the same state.
-          if (analyzeAllRef.current) return;
-          const number = stateRef.current.prNumber;
-          if (typeof number !== 'number') return;
-          analyzeAllRef.current = true;
-          setAnalyzeAllBusy(true);
-          try {
-            await postJson(withRepo('/pr-review-api/analyze'), { number });
-            await loadReview(number);
-          } catch (error) {
-            setReviewError(error instanceof Error ? error.message : String(error));
-          } finally {
-            analyzeAllRef.current = false;
-            setAnalyzeAllBusy(false);
-          }
-        }, [loadReview]);
 
         /** Put a review-scoped question starter into the main composer (the only chat surface). */
         const askInChat = React.useCallback(() => {
@@ -268,11 +220,7 @@ window.__ModuleLoader__.load({
           setMode('file');
           setSidebarPane('diff');
           void loadFileDiff(number, path);
-          const cached = (review.explanations ?? []).find((entry) => entry.file === path);
-          if (cached === undefined || (cached.status !== 'done' && cached.status !== 'error')) {
-            void requestExplain(number, path, false);
-          }
-        }, [review, loadFileDiff, requestExplain]);
+        }, [review, loadFileDiff]);
 
         const startReview = React.useCallback(async (force) => {
           const number = stateRef.current.prNumber;
@@ -314,7 +262,6 @@ window.__ModuleLoader__.load({
           setSuggestionNotice('');
           setMode('overview');
           setRoundPick(null);
-          setConcludeWait(false);
           setScrollLine(0);
           setPreview(null);
           setPreviewModalOpen(false);
@@ -346,7 +293,6 @@ window.__ModuleLoader__.load({
           setSuggestionNotice('');
           setMode('overview');
           setRoundPick(null);
-          setConcludeWait(false);
           setScrollLine(0);
           setPreview(null);
           setPreviewModalOpen(false);
@@ -361,12 +307,10 @@ window.__ModuleLoader__.load({
               setFilePath(remembered);
               setMode('file');
               void loadFileDiff(record.number, remembered);
-              const cached = (record.explanations ?? []).find((entry) => entry.file === remembered);
-              if (cached === undefined) void requestExplain(record.number, remembered, false);
             }
           });
           return undefined;
-        }, [prNumber, loadReview, loadFileDiff, requestExplain]);
+        }, [prNumber, loadReview, loadFileDiff]);
 
         React.useEffect(() => {
           if (!sidebar) return;
@@ -390,9 +334,6 @@ window.__ModuleLoader__.load({
         useReviewPolling({
           sidebar,
           stateRef,
-          concludingActive,
-          concludeWait,
-          setConcludeWait,
           loadReview,
           loadList,
         });
@@ -450,7 +391,6 @@ window.__ModuleLoader__.load({
           fileDiff, fileDiffError, fileContent, fileContentError, fileContentBusy,
           showFullFile, toggleFullFile, expandedHunks, walkFloat, activeHunk, setActiveHunk,
           expandHunkContext, collapseHunkContext, closeWalkFloat, openWalkFloat, diffScrollRef,
-          requestExplain, explainBusyPath,
           // Rounds and view mode.
           reviewRounds, latestRoundNumber, selectedRoundNumber, historicalView,
           selectRound, mode, setMode,
@@ -459,13 +399,11 @@ window.__ModuleLoader__.load({
           sidebarPane, setSidebarPane, sidebarWidth,
           filesWidth, setFilesWidth, detailWidth, setDetailWidth,
           // Actions and derived data.
-          startReview, refreshPulls, openFile, requestAnalyzeAll, analyzeAllBusy, wrap, setWrap,
+          startReview, refreshPulls, openFile, wrap, setWrap,
           orderedFiles, explainedCount, fileFindings,
           currentExplanation, currentLogic, currentWalkthrough,
           // Feedback.
           feedbackBusy, feedbackError, checkFeedback,
-          // Conclusion.
-          concludeBusy, concludeCancelBusy, runConclude, cancelConclude, concluding,
           // Chat and overlay composer.
           askInChat, overlayDraft, overlayBusy, setOverlayDraft, suggestionNotice, sendOverlayMessage,
           // Publish preview.
@@ -495,7 +433,7 @@ window.__ModuleLoader__.load({
           reviewRounds, latestRoundNumber, selectedRoundNumber, selectRound,
           mode, setMode, phase, sidebarPane, setSidebarPane, sidebarWidth,
           filesWidth, setFilesWidth, detailWidth, setDetailWidth,
-          startReview, refreshPulls, openFile, requestAnalyzeAll, analyzeAllBusy,
+          startReview, refreshPulls, openFile,
           orderedFiles, historicalView,
           publishError, feedbackError, fileDiffError, fileContentError,
           overlayDraft, overlayBusy, setOverlayDraft, sendOverlayMessage,
@@ -510,11 +448,13 @@ window.__ModuleLoader__.load({
           const summary = list?.reviews?.[pull.number] ?? null;
           const verdict = summary?.status === 'error'
             ? t('statusError')
-            : summary?.status === 'reviewing'
-              ? t('statusReviewing')
-              : summary === null || summary?.verdict === null || summary?.verdict === undefined
-                ? t('statusIdle')
-                : severityLabel(summary.verdict, t);
+            : summary?.status === 'incomplete'
+              ? t('statusIncomplete')
+              : summary?.status === 'reviewing'
+                ? t('statusReviewing')
+                : summary === null || summary?.verdict === null || summary?.verdict === undefined
+                  ? t('statusIdle')
+                  : severityLabel(summary.verdict, t);
           return h(
             'option',
             { key: pull.number, value: pull.number },
@@ -550,6 +490,9 @@ window.__ModuleLoader__.load({
             roundTone = 'reviewing';
           } else if (review.status === 'error') {
             roundKey = 'roundError';
+            roundTone = 'error';
+          } else if (review.status === 'incomplete') {
+            roundKey = 'roundIncomplete';
             roundTone = 'error';
           } else if (review.status === 'stale') {
             roundKey = 'roundInterrupted';
@@ -745,10 +688,6 @@ window.__ModuleLoader__.load({
           onOpenFile: (path) => void openFile(path),
           // A historical round has no batch of its own; the progress belongs to the current round.
           analyzing: historicalView ? null : (review?.analyzing ?? null),
-          // The on-demand batch only makes sense for a finished round in manual mode.
-          manual: historicalView !== true && list?.autoAnalyze === false && review?.status === 'done',
-          analyzeAllBusy,
-          onAnalyzeAll: () => void requestAnalyzeAll(),
           phase,
         });
 
@@ -895,7 +834,7 @@ window.__ModuleLoader__.load({
         const {
           t, list, review, prNumber, sidebar,
           selectedRoundNumber, selectRound,
-          concludeBusy, concluding, concludeCancelBusy, cancelConclude, reviewBusy, runConclude,
+          reviewBusy,
           openFile, explainedCount, fileFindings, phase,
           feedbackBusy, checkFeedback,
         } = model;
@@ -921,12 +860,6 @@ window.__ModuleLoader__.load({
                 fileFindings,
                 feedbackBusy,
                 onCheckFeedback: () => void checkFeedback(),
-                concludeBusy,
-                reviewBusy,
-                onConclude: () => void runConclude(),
-                concluding,
-                cancelBusy: concludeCancelBusy,
-                onCancelConclude: () => void cancelConclude(),
               }),
               sidebar ? null : h('div', { className: 'prr-overview-chat' }, chat),
             ),
@@ -938,7 +871,7 @@ window.__ModuleLoader__.load({
       function WorkspaceConclusionPane({ model, paneHeader, chat }) {
         const {
           t, review, prNumber, sidebar, list, selectedRoundNumber,
-          concludeBusy, concluding, concludeCancelBusy, cancelConclude, reviewBusy, runConclude,
+          reviewBusy,
           openFile, explainedCount, fileFindings, phase,
           publishBusy, previewBusy, previewRefreshBusy, feedbackBusy, checkFeedback,
           preview, togglePreviewItem, staleInfo, requestPreview,
@@ -958,12 +891,7 @@ window.__ModuleLoader__.load({
                 review: review ?? { report: null, number: prNumber ?? 0, pull: null, status: 'idle', conclusion: null },
                 t,
                 selectedRoundNumber,
-                concludeBusy,
-                concluding,
-                cancelBusy: concludeCancelBusy,
-                onCancelConclude: () => void cancelConclude(),
                 reviewBusy,
-                onConclude: () => void runConclude(),
                 onOpenFile: (path, line) => void openFile(path, line),
                 explainedCount,
                 totalFiles: (review?.files ?? []).length,
@@ -975,7 +903,6 @@ window.__ModuleLoader__.load({
                 preview,
                 onToggleInclude: (id) => togglePreviewItem(id),
                 onPublish: () => void requestPreview(),
-                autoReconclude: list?.autoReconclude === true,
                 staleInfo,
                 appendixSources: {
                   risks: review?.report?.risks ?? [],
@@ -991,17 +918,15 @@ window.__ModuleLoader__.load({
 
       /** Analysis column: the open file's review, or the empty state before one is picked. */
       function WorkspaceAnalysisPane({ model }) {
-        const { t, review, prNumber, filePath, currentExplanation, explainBusyPath, suggestionNotice, requestExplain } = model;
+        const { t, filePath, currentExplanation, suggestionNotice } = model;
         return h(
           'div',
           { className: 'prr-detail-body' },
           h(FileDetailPanel, {
             filePath,
             explanation: currentExplanation,
-            explainBusyPath,
             t,
             notice: suggestionNotice,
-            onExplain: (force) => void requestExplain(review?.number ?? prNumber, filePath, force),
           }),
         );
       }
