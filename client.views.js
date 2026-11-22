@@ -1048,6 +1048,7 @@ window.__ModuleLoader__.load({
         }
         if (review !== null && (review.status === 'error' || review.status === 'incomplete')) {
           const missing = Array.isArray(review.run?.missingFiles) ? review.run.missingFiles : [];
+          const sections = Array.isArray(review.run?.missingSections) ? review.run.missingSections : [];
           return h(
             'div',
             { className: 'prr-zero' },
@@ -1057,7 +1058,13 @@ window.__ModuleLoader__.load({
               review.error ?? (review.status === 'incomplete' ? t('statusIncomplete') : t('statusError')),
             ),
             missing.length > 0 ? h('div', { className: 'prr-subtle' }, missing.join('、')) : null,
-            h(Btn, { label: t('retry'), onClick: () => void startReview(true) }),
+            sections.length > 0 ? h('div', { className: 'prr-subtle' }, sections.join('、')) : null,
+            h(Btn, {
+              label: t('retry'),
+              // An incomplete round retries the same round so existing analyses are kept;
+              // a hard error opens a new round.
+              onClick: () => void startReview(review.status !== 'incomplete'),
+            }),
           );
         }
         if (filePath === '') {

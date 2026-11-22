@@ -566,6 +566,8 @@ git commit -m "test(review): verify the read-only agent boundary"
 
 ### Task 2.1：自动轮询接入
 
+> **实现偏差**：最终实现是 `runAgentReview`：先创建 PR head 的 detached worktree（失败 fail-closed，不读用户工作区），再通过 `withAgentSlot` 限制全局 2 个 Agent 会话；下面的 `evidenceWorkspace()` 旧写法仅作历史参考。
+
 **Files:** Modify `index.js`; Test `tests/index.test.js`（fake `ctx.agents`）
 
 - [ ] **Step 1: 维护每个 PR 的 runner**

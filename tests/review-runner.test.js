@@ -267,6 +267,42 @@ test('a pre-existing analysis does not satisfy this run coverage', async () => {
   assert.deepEqual(record.run.missingFiles, ['src/a.js']);
 });
 
+test('a same-round retry still requires fresh report and conclusion', async () => {
+  const record = fakeRecord(['src/a.js']);
+  record.round = 3;
+  record.run = { round: 3, headSha: 'abc', status: 'error' };
+  record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: 100 });
+  record.report = { verdict: 'pass', summary: '旧报告', risks: [], order: [], focus: {} };
+  record.reportUpdatedAt = 100;
+  record.conclusion = { verdict: 'pass', summary: '旧结论', blockers: [], suggestions: [], nextSteps: [] };
+  record.conclusionAt = 100;
+  const ctx = fakeCtx(() => {});
+  await runnerFor(record, ctx, { reviewCoverageRetries: 0 }).start();
+  assert.deepEqual(record.run.missingFiles, []);
+  assert.equal(record.run.missingSections.length, 2);
+  assert.equal(record.run.status, 'incomplete');
+});
+
+test('a same-round retry restates files missing from the failed attempt', async () => {
+  const record = fakeRecord(['src/a.js', 'src/b.js']);
+  record.round = 3;
+  record.run = { round: 3, headSha: 'abc', status: 'error', missingFiles: ['src/b.js'] };
+  record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: 100 });
+  const ctx = fakeCtx(() => {});
+  await runnerFor(record, ctx, { reviewCoverageRetries: 0 }).start();
+  assert.deepEqual(record.run.missingFiles, ['src/b.js']);
+});
+
+test('a cancelled prior run does not relax coverage', async () => {
+  const record = fakeRecord(['src/a.js']);
+  record.round = 3;
+  record.run = { round: 3, headSha: 'abc', status: 'cancelled' };
+  record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: 100 });
+  const ctx = fakeCtx(() => {});
+  await runnerFor(record, ctx, { reviewCoverageRetries: 0 }).start();
+  assert.deepEqual(record.run.missingFiles, ['src/a.js']);
+});
+
 test('agent errors mark the run error and still dispose', async () => {
   const record = fakeRecord(['src/a.js']);
   const ctx = fakeCtx(() => { throw new Error('agent failed'); });

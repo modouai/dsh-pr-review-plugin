@@ -174,6 +174,7 @@ window.__ModuleLoader__.load({
       if (review === null || review === undefined) return true;
       if (review.status === 'reviewing') return false;
       if (review.status === 'error' || review.status === 'stale') return true;
+      if (review.status === 'incomplete') return true;
       if (selectedPull === null || selectedPull === undefined) return true;
       const headSha = selectedPull.headSha ?? '';
       return headSha === '' || headSha !== review.headSha;
@@ -244,7 +245,8 @@ window.__ModuleLoader__.load({
       const current = rounds.length > 0 ? rounds[rounds.length - 1] : null;
       const versions = versionsOf(data, current, true);
       const version = versions.length > 0 ? versions[versions.length - 1].version : 0;
-      if (data.status === 'error' || data.status === 'incomplete') return { phase: 'error', progress: null, nextAction: null, version };
+      if (data.status === 'incomplete') return { phase: 'incomplete', progress: null, nextAction: null, version };
+      if (data.status === 'error') return { phase: 'error', progress: null, nextAction: null, version };
       const analyzing = isAnalyzing(data.analyzing) ? data.analyzing : null;
       // Batch progress is restated in the global ledger (analyzed / all changed files), the
       // same numbers the completeness line shows — a header badge of "3/9" next to an
@@ -321,6 +323,7 @@ window.__ModuleLoader__.load({
       if (phase === null || phase === undefined) return '';
       if (phase.phase === 'reviewing') return t('badgeReviewing');
       if (phase.phase === 'concluding') return t('badgeConcluding');
+      if (phase.phase === 'incomplete') return t('statusIncomplete');
       if (phase.phase === 'error') return t('badgeError');
       if (phase.phase === 'analyzing') return analyzingText(phase, t);
       return t('badgeDone');
@@ -330,6 +333,7 @@ window.__ModuleLoader__.load({
     function overviewStateText(phase, t) {
       if (phase === null || phase === undefined) return '';
       if (phase.phase === 'error') return t('badgeError');
+      if (phase.phase === 'incomplete') return t('statusIncomplete');
       if (phase.phase === 'reviewing') return t('badgeReviewing');
       if (phase.phase === 'analyzing') return analyzingText(phase, t);
       return t('badgeDone');
@@ -354,6 +358,7 @@ window.__ModuleLoader__.load({
       if (phase.phase === 'concluded-stale' || phase.phase === 'published-stale') return 'warn';
       if (phase.phase === 'published') return 'ok';
       if (phase.phase === 'error') return 'danger';
+      if (phase.phase === 'incomplete') return 'warn';
       return 'none';
     }
 
@@ -361,6 +366,7 @@ window.__ModuleLoader__.load({
     function processBadgeTone(phase) {
       if (phase === null || phase === undefined) return 'none';
       if (phase.phase === 'error') return 'danger';
+      if (phase.phase === 'incomplete') return 'warn';
       if (phase.phase === 'concluding' || phase.phase === 'concluded') return 'ok';
       if (phase.phase === 'reviewing' || phase.phase === 'analyzing') return 'info';
       return 'ok';

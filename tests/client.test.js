@@ -1228,6 +1228,8 @@ test('review button only shows when automatic rounds cannot cover the head', () 
     'failed round can be retried immediately');
   assert.equal(parts.shouldShowReviewButton(list(true), round('abc', 'stale'), pull('abc')), true,
     'interrupted round can be retried immediately');
+  assert.equal(parts.shouldShowReviewButton(list(true), round('abc', 'incomplete'), pull('abc')), true,
+    'an incomplete round can be retried or started over');
   assert.equal(parts.shouldShowReviewButton(list(true), round('abc'), pull('def')), true,
     'new commits are waiting for a round');
   assert.equal(parts.shouldShowReviewButton(list(true), round('abc'), null), true,
@@ -2866,7 +2868,7 @@ test('derivePhase folds host state into one phase', () => {
   const { parts } = loadClient();
   const base = makeReview({ round: 2 });
   assert.equal(parts.derivePhase({ ...base, status: 'error' }, null).phase, 'error');
-  assert.equal(parts.derivePhase({ ...base, status: 'incomplete' }, null).phase, 'error');
+  assert.equal(parts.derivePhase({ ...base, status: 'incomplete' }, null).phase, 'incomplete');
   assert.equal(parts.derivePhase({ ...base, status: 'reviewing' }, null).phase, 'reviewing');
   assert.equal(
     parts.derivePhase({ ...base, concluding: { stage: 'model', startedAt: 1 } }, null).phase,

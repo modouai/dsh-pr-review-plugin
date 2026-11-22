@@ -1098,14 +1098,17 @@ export function apply(ctx, config) {
     }
     const number = Number(saved.number ?? key);
     if (!Number.isFinite(number)) return null;
+    const interrupted = saved.status === 'reviewing';
     const record = {
       number,
-      status: saved.status === 'reviewing' ? 'stale' : (saved.status ?? 'done'),
+      // A review in flight at shutdown is an interrupted error, not a stale-success state:
+      // the poll's error retry can pick it up again without a manual new round.
+      status: interrupted ? 'error' : (saved.status ?? 'done'),
       // A failed review keeps no head marker, so the next poll retries it.
       headSha: saved.status === 'error' ? '' : (saved.headSha ?? ''),
       startedAt: saved.startedAt ?? 0,
       finishedAt: saved.finishedAt ?? 0,
-      error: saved.error ?? null,
+      error: interrupted ? '应用重启，上一轮审查中断。' : (saved.error ?? null),
       pull: saved.pull ?? null,
       files: Array.isArray(saved.files) ? saved.files : [],
       filesTruncated: saved.filesTruncated === true,
@@ -1783,22 +1786,25 @@ export function apply(ctx, config) {
   async function prepareReviewWorktree(record) {
     const workspace = state.workspaceCwd;
     const headSha = record.headSha ?? record.pull?.headSha ?? '';
-    const degraded = '本地工作区可能落后于 PR head；代码请以 review_get_file / review_get_diff 为准。';
-    if (workspace === '' || headSha === '') {
-      return { cwd: workspace || process.cwd(), note: degraded, isolated: false, cleanup: async () => {} };
+    const unavailable = (message) => ({ cwd: null, note: '', isolated: false, message, cleanup: async () => {} });
+    if (workspace === '') {
+      return unavailable('没有可用的本地工作区；请从已打开的工作区会话启动审查。');
+    }
+    if (headSha === '') {
+      return unavailable('没有拿到 PR head SHA，无法创建隔离工作区。');
     }
     let dir;
     try {
       dir = await mkdtemp(path.join(tmpdir(), 'dsh-pr-review-head-'));
     } catch (error) {
       console.warn('[pr-review] 创建 PR head 工作区失败', error);
-      return { cwd: workspace, note: degraded, isolated: false, cleanup: async () => {} };
+      return unavailable('无法创建临时工作区目录（tmpdir）。');
     }
     const added = await runGitLong(workspace, ['worktree', 'add', '--detach', dir, headSha]);
     if (added === null) {
       await rm(dir, { recursive: true, force: true });
       console.warn(`[pr-review] 无法为 PR #${record.number} head ${headSha.slice(0, 8)} 创建 worktree`);
-      return { cwd: workspace, note: degraded, isolated: false, cleanup: async () => {} };
+      return unavailable('git worktree add 失败；请确认本地已拉取该 head 且 git 可用。');
     }
     return {
       cwd: dir,
@@ -1875,9 +1881,19 @@ export function apply(ctx, config) {
 
   /** Agent-driven review: fetch context, then let the read-only agent write results. */
   async function runAgentReview(record) {
+    // Fence any previous run before awaiting its cancel: its late completion must not write
+    // this record's status after a new run owns it. The prior run is still passed to the
+    // runner so a same-round retry can reuse its analyses.
+    const priorRun = record.run;
+    record.run = null;
     const previous = agentRuns.get(record.number);
     if (previous !== undefined) {
-      await previous.cancel();
+      try {
+        await previous.cancel();
+      } catch (error) {
+        failAgentRun(record, error instanceof Error ? error.message : String(error));
+        return;
+      }
       if (agentRuns.get(record.number) === previous) agentRuns.delete(record.number);
     }
     try {
@@ -1893,35 +1909,43 @@ export function apply(ctx, config) {
     const selection = resolveSelection(ctx, settings);
     const worktree = await prepareReviewWorktree(record);
     if (worktree.isolated !== true) {
-      failAgentRun(record, '无法为 PR head 创建工作区，已停止审查（避免读到旧代码）。请确认本地已拉取该 head 后重试。');
+      failAgentRun(record, worktree.message ?? '无法为 PR head 创建工作区，已停止审查（避免读到旧代码）。');
       return;
     }
     let runner;
     let boundAgentId = null;
     try {
-      runner = createReviewRunner({
-        ctx,
-        settings,
-        record,
-        selection,
-        cwd: worktree.cwd,
-        cwdNote: worktree.note,
-        headIsolated: true,
-        onAgent: (agent, sessionId) => {
-          const bound = typeof sessionId === 'string' && sessionId !== '' ? sessionId : agentSessionId(agent);
-          if (bound === '') return;
-          boundAgentId = bound;
-          agentReviewBinding.set(bound, record.number);
-        },
-        analyze: settings.autoAnalyze !== false,
-        onChange: () => scheduleSave(),
+      await withAgentSlot(async () => {
+        try {
+          runner = createReviewRunner({
+            ctx,
+            settings,
+            record,
+            selection,
+            cwd: worktree.cwd,
+            cwdNote: worktree.note,
+            headIsolated: true,
+            priorRun,
+            onAgent: (agent, sessionId) => {
+              const bound = typeof sessionId === 'string' && sessionId !== '' ? sessionId : agentSessionId(agent);
+              if (bound === '') return;
+              boundAgentId = bound;
+              agentReviewBinding.set(bound, record.number);
+            },
+            analyze: settings.autoAnalyze !== false,
+            onChange: () => scheduleSave(),
+          });
+          agentRuns.set(record.number, runner);
+          await runner.start();
+        } finally {
+          if (boundAgentId !== null) agentReviewBinding.delete(boundAgentId);
+          if (runner !== undefined && agentRuns.get(record.number) === runner) agentRuns.delete(record.number);
+          await worktree.cleanup();
+        }
       });
-      agentRuns.set(record.number, runner);
-      await runner.start();
-    } finally {
-      if (boundAgentId !== null) agentReviewBinding.delete(boundAgentId);
-      if (runner !== undefined && agentRuns.get(record.number) === runner) agentRuns.delete(record.number);
-      await worktree.cleanup();
+    } catch (error) {
+      failAgentRun(record, error instanceof Error ? error.message : String(error));
+      return;
     }
     // A newer run replaced this one while it was finishing; its state owns the record.
     // Compare the run object itself: a restored/rebuilt record can lose a process-local token.
@@ -2014,10 +2038,29 @@ export function apply(ctx, config) {
   const agentRuns = new Map();
   /** Agent session id → PR number, so review_* calls from a runner cannot resolve another PR. */
   const agentReviewBinding = new Map();
+  // Cross-PR agent sessions are capped so a poll cannot start one per listed PR at once.
+  const AGENT_CONCURRENCY = 2;
+  let agentActive = 0;
+  const agentWaiters = [];
+  async function withAgentSlot(task) {
+    while (agentActive >= AGENT_CONCURRENCY) {
+      await new Promise((resolve) => agentWaiters.push(resolve));
+    }
+    agentActive += 1;
+    try {
+      return await task();
+    } finally {
+      agentActive -= 1;
+      const next = agentWaiters.shift();
+      if (next !== undefined) next();
+    }
+  }
   ctx.effect(() => () => {
     for (const runner of agentRuns.values()) void runner.cancel();
     agentRuns.clear();
     agentReviewBinding.clear();
+    // Wake queued runs so they observe disposal instead of waiting forever.
+    for (const resolve of agentWaiters.splice(0)) resolve();
   }, 'pr-review: agent runs');
 
   /** Explain one file: deep logic walkthrough + findings. `signal` cancels a batch call. */
@@ -3420,11 +3463,13 @@ export function apply(ctx, config) {
               ? '未审查'
               : record.status === 'reviewing'
                 ? '审查中'
-                : record.status === 'error'
-                  ? `审查失败：${record.error ?? ''}`
-                  : record.conclusion === null
-                    ? '已报告，未生成结论'
-                    : `结论 ${verdict ?? ''}`;
+                : record.status === 'incomplete'
+                  ? `审查未完成${Array.isArray(record.run?.missingFiles) && record.run.missingFiles.length > 0 ? `（缺 ${record.run.missingFiles.length} 个文件）` : ''}`
+                  : record.status === 'error'
+                    ? `审查失败：${record.error ?? ''}`
+                    : record.conclusion === null
+                      ? '已报告，未生成结论'
+                      : `结论 ${verdict ?? ''}`;
             lines.push(`- #${pr.number} ${pr.title ?? ''}（${progress}；第 ${record?.round ?? 1} 轮；head ${String(pr.headSha ?? '').slice(0, 8)}）`);
           }
           if (prs.length === 0) lines.push('- 暂无 open PR（列表可能还没轮询到，可稍后再试）。');
@@ -3442,7 +3487,7 @@ export function apply(ctx, config) {
           const coverage = toolCoverage(record);
           return toolText([
             `PR #${record.number} · ${record.pull?.title ?? ''}`,
-            `状态：${record.status ?? '?'}${record.error ? `（${record.error}）` : ''} · 第 ${record.round ?? 1} 轮 · head ${String(record.headSha ?? record.pull?.headSha ?? '').slice(0, 8)}`,
+            `状态：${record.status === 'incomplete' ? '审查未完成' : (record.status ?? '?')}${record.error ? `（${record.error}）` : ''} · 第 ${record.round ?? 1} 轮 · head ${String(record.headSha ?? record.pull?.headSha ?? '').slice(0, 8)}`,
             `结论：${record.conclusion === null || record.conclusion === undefined ? '尚未生成' : `${record.conclusion.verdict ?? ''}（v${latest?.version ?? '?'}，${latest?.published === true ? '已发布' : '未发布'}）`}`,
             `覆盖率：已分析 ${coverage.analyzed ?? 0}/${coverage.total ?? (record.files ?? []).length} 个文件`,
             `过期：${isStale(record) ? '结论之后有新的报告/分析改动，可重新生成结论' : '无'}`,

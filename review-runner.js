@@ -152,7 +152,7 @@ export function restrictAgentTools(agentCtx) {
   if (deny.length > 0) tools.restrict({ deny });
 }
 
-export function createReviewRunner({ ctx, settings, record, selection, cwd, analyze = true, cwdNote = '', headIsolated = false, onAgent, onChange }) {
+export function createReviewRunner({ ctx, settings, record, selection, cwd, analyze = true, cwdNote = '', headIsolated = false, priorRun, onAgent, onChange }) {
   const agents = typeof ctx?.get === 'function' ? ctx.get('agents') : undefined;
   const service = agents ?? ctx?.agents;
   let handle = null;
@@ -204,15 +204,17 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, anal
     cancelPromise = new Promise((resolve) => {
       cancelResolve = resolve;
     });
-    // A prior run in the same round (e.g. a retry after error) already wrote analyses for
-    // this head; those writes belong to the round, not to this attempt. Counting them avoids
-    // re-reviewing every file while still requiring a fresh report/conclusion. Requiring the
-    // same head prevents an error retry after new commits from reusing old-code analyses.
-    const priorRun = record.run;
+    // A prior run in the same round (e.g. a retry after error/incomplete) already wrote
+    // analyses for this head; those writes belong to the round, not to this attempt. Counting
+    // them avoids re-reviewing every file while still requiring a fresh report/conclusion.
+    // Requiring the same head prevents an error retry after new commits from reusing old-code
+    // analyses. An explicit `priorRun` is passed before the record's run is fenced.
+    const previousRun = priorRun === undefined ? record.run : priorRun;
     const headSha = record.headSha ?? record.pull?.headSha ?? '';
-    const sameRoundRetry = priorRun !== null && priorRun !== undefined
-      && priorRun.round === record.round
-      && priorRun.headSha === headSha;
+    const sameRoundRetry = previousRun !== null && previousRun !== undefined
+      && (previousRun.status === 'error' || previousRun.status === 'incomplete')
+      && previousRun.round === record.round
+      && previousRun.headSha === headSha;
     activeRun = {
       round: record.round ?? 0,
       headSha,

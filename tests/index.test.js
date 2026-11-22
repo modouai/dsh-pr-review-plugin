@@ -4644,7 +4644,7 @@ test('agent engine fails closed when the PR head worktree cannot be created', as
     assert.equal(started.json.started, true);
     const failed = await plugin.waitFor(1, (review) => review.status !== 'reviewing', 8000);
     assert.equal(failed.status, 'error');
-    assert.match(failed.error, /无法为 PR head 创建工作区/);
+    assert.match(failed.error, /工作区/);
     assert.equal(failed.run.status, 'error');
     assert.deepEqual(failed.run.missingFiles, []);
     assert.equal(plugin.agentState.followups.length, 0);
@@ -4782,6 +4782,21 @@ test('starting a new round backfills a missing findings baseline from the old ro
     const reviewed = await plugin.review();
     assert.equal(reviewed.roundHistory[0].findings.length, 1);
     assert.equal(reviewed.roundHistory[0].findings[0].point, '旧问题');
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('a reviewing record saved before restart is restored as a retryable error', async () => {
+  const plugin = await setup({
+    reviews: { 1: legacyReview({ status: 'reviewing', run: { status: 'running', round: 1, headSha: 'abc123', startedAt: 1 } }) },
+  });
+  try {
+    const review = await plugin.review();
+    assert.equal(review.status, 'error');
+    assert.match(review.error, /应用重启/);
+    assert.equal(review.run.status, 'error');
+    assert.match(review.run.error, /应用重启/);
   } finally {
     await plugin.dispose();
   }
