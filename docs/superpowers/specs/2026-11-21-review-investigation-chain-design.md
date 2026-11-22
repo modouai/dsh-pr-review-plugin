@@ -78,6 +78,8 @@ file scope:            │  loop:                              │
 
 每一步模型只输出以下 JSON 之一：
 
+标准终稿形状是 `{claims, final}`。宿主额外兼容模型常见的偏差：`final` 为 JSON 字符串、单元素数组、`report` 包装，或把终稿字段直接写在顶层；prompt 仍要求标准形状，兼容层只是为了不让形状偏差把整轮分析打成 error。
+
 ```json
 {
   "claims": [
