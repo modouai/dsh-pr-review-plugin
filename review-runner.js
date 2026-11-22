@@ -27,7 +27,7 @@ function scopedFiles(record, paths) {
   return files.filter((path) => wanted.has(path));
 }
 
-function taskPrompt(record, cwd, paths, analyzeFiles) {
+function taskPrompt(record, cwd, paths, analyzeFiles, cwdNote) {
   const files = scopedFiles(record, paths);
   const scope = Array.isArray(paths) && paths.length > 0
     ? `指定文件（${files.length} 个）：${files.slice(0, 50).join('、')}${files.length > 50 ? ' 等' : ''}`
@@ -37,6 +37,7 @@ function taskPrompt(record, cwd, paths, analyzeFiles) {
     repo: record.pull?.repo ?? '',
     headSha: record.headSha ?? record.pull?.headSha ?? '',
     cwd,
+    cwdNote: typeof cwdNote === 'string' ? cwdNote : '',
     scope,
     fileAnalysisStep: analyzeFiles
       ? '对每个文件：`review_get_file` / `review_get_diff` 获取 PR head 内容；按需读取调用方、定义、测试；分析后调用 `review_update_analysis` 写回。'
@@ -64,7 +65,7 @@ function missingFilesOf(record, paths, before) {
 /** Global tools the review agent must never inherit, even when a preset or profile adds them. */
 const DANGEROUS_GLOBAL_TOOLS = [
   'bash', 'write', 'edit', 'apply_patch',
-  'create_worktree', 'working_directory', 'load_workspace_dependencies',
+  'create_worktree', 'working_directory', 'load_workspace_dependencies', 'arch_map',
   'review_publish', 'review_conclude', 'review_run_agent',
 ];
 
@@ -96,7 +97,7 @@ export function restrictAgentTools(agentCtx) {
   if (deny.length > 0) agentCtx.tools.restrict({ deny });
 }
 
-export function createReviewRunner({ ctx, settings, record, selection, cwd, paths, analyze = true, onChange }) {
+export function createReviewRunner({ ctx, settings, record, selection, cwd, paths, analyze = true, cwdNote = '', onChange }) {
   const agents = typeof ctx?.get === 'function' ? ctx.get('agents') : undefined;
   const service = agents ?? ctx?.agents;
   let handle = null;
@@ -161,7 +162,7 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, path
       changed();
       // Snapshot before the first turn: only writes that land during this run count as coverage.
       const before = new Map(scopedFiles(record, paths).map((path) => [path, record.explanations?.get(path)?.updatedAt ?? 0]));
-      agent.followup(userMessage(taskPrompt(record, cwd, paths, analyze)));
+      agent.followup(userMessage(taskPrompt(record, cwd, paths, analyze, cwdNote)));
       await agent.whenIdle();
       if (cancelled) return;
 

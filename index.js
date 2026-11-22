@@ -17,8 +17,8 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { HarnessError } from '@deepseek-ai/dsh-llm';
@@ -1707,6 +1707,61 @@ export function apply(ctx, config) {
     return summary !== '' || concerns.length > 0;
   }
 
+  /** Long-running git call with the same PATH fallback as `runGit`; null on failure. */
+  function runGitLong(cwd, args) {
+    return new Promise((resolve) => {
+      const attempt = (at) => {
+        if (at >= GIT_CANDIDATES.length) {
+          resolve(null);
+          return;
+        }
+        execFile(GIT_CANDIDATES[at], ['-C', cwd, ...args], { timeout: 60000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+          if (error !== null && error !== undefined && error.code === 'ENOENT') {
+            attempt(at + 1);
+            return;
+          }
+          resolve(error === null ? String(stdout) : null);
+        });
+      };
+      attempt(0);
+    });
+  }
+
+  /**
+   * A detached worktree at the PR head, so the review agent's native read/grep see the same
+   * tree as review_get_file/review_get_diff. Without it the agent reads the local checkout,
+   * which may be on another branch and produces cross-version findings.
+   */
+  async function prepareReviewWorktree(record) {
+    const workspace = state.workspaceCwd;
+    const headSha = record.headSha ?? record.pull?.headSha ?? '';
+    const degraded = '本地工作区可能落后于 PR head；代码请以 review_get_file / review_get_diff 为准。';
+    if (workspace === '' || headSha === '') {
+      return { cwd: workspace || process.cwd(), note: degraded, cleanup: async () => {} };
+    }
+    let dir;
+    try {
+      dir = await mkdtemp(path.join(tmpdir(), 'dsh-pr-review-head-'));
+    } catch (error) {
+      console.warn('[pr-review] 创建 PR head 工作区失败', error);
+      return { cwd: workspace, note: degraded, cleanup: async () => {} };
+    }
+    const added = await runGitLong(workspace, ['worktree', 'add', '--detach', dir, headSha]);
+    if (added === null) {
+      await rm(dir, { recursive: true, force: true });
+      console.warn(`[pr-review] 无法为 PR #${record.number} head ${headSha.slice(0, 8)} 创建 worktree`);
+      return { cwd: workspace, note: degraded, cleanup: async () => {} };
+    }
+    return {
+      cwd: dir,
+      note: '本地工作区已检出 PR head，可直接 read/grep。',
+      cleanup: async () => {
+        await runGitLong(workspace, ['worktree', 'remove', '--force', dir]);
+        await rm(dir, { recursive: true, force: true });
+      },
+    };
+  }
+
   /** Fetch the PR head, changed files and parsed diff; shared by both review engines. */
   async function prepareReviewContext(record) {
     const client = await ensureClient();
@@ -1753,20 +1808,24 @@ export function apply(ctx, config) {
       return;
     }
     const selection = resolveSelection(ctx, settings);
-    const runner = createReviewRunner({
-      ctx,
-      settings,
-      record,
-      selection,
-      cwd: state.workspaceCwd || process.cwd(),
-      analyze: settings.autoAnalyze !== false,
-      onChange: () => scheduleSave(),
-    });
-    agentRuns.set(record.number, runner);
+    const worktree = await prepareReviewWorktree(record);
+    let runner;
     try {
+      runner = createReviewRunner({
+        ctx,
+        settings,
+        record,
+        selection,
+        cwd: worktree.cwd,
+        cwdNote: worktree.note,
+        analyze: settings.autoAnalyze !== false,
+        onChange: () => scheduleSave(),
+      });
+      agentRuns.set(record.number, runner);
       await runner.start();
     } finally {
-      if (agentRuns.get(record.number) === runner) agentRuns.delete(record.number);
+      if (runner !== undefined && agentRuns.get(record.number) === runner) agentRuns.delete(record.number);
+      await worktree.cleanup();
     }
     const status = record.run?.status ?? 'error';
     record.status = status === 'error' ? 'error' : 'done';
