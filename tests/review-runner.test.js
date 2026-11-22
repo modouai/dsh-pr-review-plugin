@@ -20,11 +20,13 @@ function fakeCtx(onFollowup) {
   const disposed = [];
   const restrictions = [];
   const mounts = [];
+  const promptSections = [];
   const ctx = {
     created,
     disposed,
     restrictions,
     mounts,
+    promptSections,
     get(name) {
       if (name === 'agentPresets') {
         return {
@@ -47,6 +49,12 @@ function fakeCtx(onFollowup) {
           async whenIdle() {},
         };
         await options.setup?.({
+          systemPrompt: {
+            section: (definition) => {
+              promptSections.push(definition);
+              return () => {};
+            },
+          },
           tools: {
             schemas: () => [{ name: 'create_worktree' }, { name: 'review_get' }, { name: 'review_publish' }],
             restrict: (filter) => {
@@ -93,6 +101,10 @@ test('the runner creates a read-only review agent and sends the task prompt', as
   assert.equal(ctx.mounts.length, 1);
   assert.equal(ctx.mounts[0].id, 'pr-review-readonly');
   assert.deepEqual(ctx.restrictions, [{ deny: ['create_worktree', 'review_publish'] }]);
+  assert.equal(ctx.promptSections.length, 1);
+  assert.equal(ctx.promptSections[0].name, 'pr-review: readonly-agent');
+  assert.match(ctx.promptSections[0].text, /review_update_conclusion/);
+  assert.match(ctx.promptSections[0].text, /没有 review_publish/);
   assert.match(prompts[0], /review_list_files/);
   assert.match(prompts[0], /review_update_analysis/);
   assert.equal(record.run.status, 'done');

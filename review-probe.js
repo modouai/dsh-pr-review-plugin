@@ -5,7 +5,7 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { restrictAgentTools } from './review-runner.js';
+import { registerReadOnlyPrompt, restrictAgentTools } from './review-runner.js';
 
 export function userMessage(text) {
   return {
@@ -32,6 +32,7 @@ export async function probeAgent({ ctx, agents, cwd, preset, provider, model, pr
         await presets.mount(agentCtx, preset);
       }
       restrictAgentTools(agentCtx);
+      registerReadOnlyPrompt(agentCtx);
     },
   });
   try {

@@ -68,6 +68,22 @@ const DANGEROUS_GLOBAL_TOOLS = [
   'review_publish', 'review_conclude', 'review_run_agent', 'review_probe_agent',
 ];
 
+/** Prompt clarification for the read-only agent: the global review-data section names
+ * publish/conclude, but this agent has neither. Keep its self-description aligned with the
+ * actual tool set. */
+export const READONLY_AGENT_PROMPT = [
+  '你是通过 pr-review-readonly 预设运行的只读审查 Agent。',
+  '可用的写回工具只有 review_update_analysis、review_update_report、review_update_conclusion、review_update_overview。',
+  '你的工具集里没有 review_publish、review_conclude、write、bash、create_worktree。',
+  '不要建议或尝试发布评论、重新生成结论，也不要在最终答复里声称这些工具可用。',
+].join('\n');
+
+export function registerReadOnlyPrompt(agentCtx) {
+  if (agentCtx?.systemPrompt !== undefined && agentCtx?.systemPrompt !== null && typeof agentCtx.systemPrompt.section === 'function') {
+    agentCtx.systemPrompt.section({ name: 'pr-review: readonly-agent', text: READONLY_AGENT_PROMPT });
+  }
+}
+
 /** Restrict the agent's global tool mask; scoped preset tools stay visible. */
 export function restrictAgentTools(agentCtx) {
   const schemas = agentCtx.tools.schemas(agentCtx);
@@ -133,6 +149,7 @@ export function createReviewRunner({ ctx, settings, record, selection, cwd, path
             await presets.mount(agentCtx, settings.reviewAgentPreset ?? 'pr-review-readonly');
           }
           restrictAgentTools(agentCtx);
+          registerReadOnlyPrompt(agentCtx);
         },
       });
       const { agent } = handle;
