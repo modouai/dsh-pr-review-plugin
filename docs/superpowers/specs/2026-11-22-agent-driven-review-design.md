@@ -72,7 +72,7 @@ ctx.agents.create(options: CreateAgentOptions): Promise<AgentHandle>
   - 不调用 `ctx.llm.stream`；只调用 `ctx.agents` 和 Agent 方法。
   - 每个 PR 同一时间最多一个 run；跨 PR 沿用现有并发上限（默认 2）。
 - **Agent 预设** `pr-review-readonly`
-  - 由插件的 `cordis.patch.yml` 插入一条 `@deepseek-ai/dsh-agent-preset` 声明；用户可在预设编辑器中覆盖/复制。
+  - 由插件在 `apply` 时通过 `ctx.get('agentPresets').register(...)` 程序化注册；**不要**放在插件自己的 bundle patch 里——子插件会从插件安装基座解析，而 Host 的 `dsh-tool-fs` 等包不在那里，预设会变成空组合。
   - 只暴露读文件与搜索，不允许写入、编辑、patch、bash、终端。
 - **任务提示**（`prompts/review-task.md` 或代码内模板）
   - 一次性用户消息，描述审查流程与写回工具；不要求 JSON 输出。
@@ -85,12 +85,20 @@ ctx.agents.create(options: CreateAgentOptions): Promise<AgentHandle>
 
 ```js
 const handle = await ctx.agents.create({
-  meta: { cwd: workspaceCwd, agentPreset: settings.reviewAgentPreset },
+  sessionId: randomUUID(),
+  meta: { cwd: reviewCwd, agentPreset: settings.reviewAgentPreset },
   agentOptions: {
     provider: selection.provider,
     model: selection.model,
     reasoningEffort: settings.reasoningEffort,
     maxTokens: settings.reviewAgentMaxTokens,
+  },
+  // meta.agentPreset 只是 session header 的记录；组合必须显式 mount 到这个 Agent 的
+  // scoped context，否则只拿到根级全局工具（没有 read/grep，也没有只读边界）。
+  setup: async (agentCtx) => {
+    await ctx.get('agentPresets').mount(agentCtx, settings.reviewAgentPreset);
+    restrictAgentTools(agentCtx);
+    registerReadOnlyPrompt(agentCtx);
   },
   ...(signal === undefined ? {} : { signal }),
 });
@@ -104,12 +112,14 @@ agent.followup({
 await agent.whenIdle();
 ```
 
-- `meta.cwd` 必须是工作区根目录，文件读/搜索才指向被审查仓库。
-- `agentPreset` 由配置 `reviewAgentPreset` 指定，默认 `pr-review-readonly`；预设缺失时明确报错并给出安装指引，不静默退回默认预设。
+- `reviewCwd` 是本轮 PR head 的 detached worktree（`git worktree add --detach <tmp> <headSha>`），不是用户工作区；否则原生 `read/grep` 可能读到另一个分支的代码，产生跨版本误报。worktree 创建失败时降级到工作区，并在任务提示里明确“以 review_get_file/diff 为准”。
+- `meta.cwd` 指向上述 worktree；`meta.agentPreset` 仅是记录，必须配合 `mount`。
 - 模型选择沿用 `provider`/`model`/`reasoningEffort`；未配置时取宿主默认模型。
-- 取消：外部取消 → `agent.cancel`；轮次被替换 → `handle.dispose()`；等待用 `whenIdle()`。
+- 取消：外部取消 → `handle.dispose()`；轮次被替换 → 先取消旧 runner 再创建新的；等待用 `whenIdle()`。
 
 ### 4.3 只读预设
+
+下面是等价的声明形状（`config` 内容即 `agentPresets.register()` 的参数）。实际实现必须程序化注册，不能写进插件的 bundle patch——子插件会从插件安装基座解析，Host 工具包不在那里。
 
 ```yaml
 - insert:
@@ -202,7 +212,7 @@ await agent.whenIdle();
 - `review_list_files` 的变更文件集合为全集。
 - `review_update_analysis` 成功写入的文件为已分析集合。
 - `whenIdle` 后计算缺口；缺口非空时发送一次 compact follow-up（列出文件与“继续分析”），最多 `reviewCoverageRetries` 次（默认 2）。
-- 仍缺 → 本轮 `status: 'incomplete'`，记录 `missingFiles`，面板显示明确清单；不发布、不生成结论。用户可重试（新 Agent）或手动补分析。
+- 仍缺 → 本轮 `record.status: 'incomplete'`，`record.run.missingFiles / missingSections` 记录缺口，面板显示「审查未完成」+ 文件清单与重试；不发布、不生成结论。用户可重试（新 Agent）或手动补分析。
 
 ### 6.2 失败
 
@@ -212,7 +222,8 @@ await agent.whenIdle();
 
 ### 6.3 自动触发
 
-- 轮询到新 head → 自动 `start`；已有 run → 取消并替换。
+- 轮询到新 head → `startReview(number, true)` 开新一轮；同一 PR 的旧 runner 先 `cancel` 并等待结束，再创建新的。
+- 手动入口（面板「开始新一轮」/`review_run_agent`）同样必须走 `startReview(number, true)`，不能直接对当前 record 启动 runner，否则会覆盖原轮数据。
 - `autoReview` 控制是否自动开始整轮；`autoAnalyze` 控制初始任务是否包含逐文件分析（关闭时只写 report，逐文件分析由用户点开文件触发 follow-up 或新的单文件 run）。
 - 跨 PR 并发沿用现有上限；同一 PR 永不并行两个 run。
 
@@ -228,7 +239,11 @@ await agent.whenIdle();
 
 - 保留：`record.files`、`record.explanations`、`record.report`、`record.conclusion`、轮次历史、发布记录。
 - 删除：`unverified`、`raised`、`discarded`、`refuted`（均为直连 LLM 链路的产物）。
-- 新增：`record.run = { agentSessionId, startedAt, finishedAt, status: 'running'|'incomplete'|'error', missingFiles: [] }`，用于面板状态与恢复；不持久化模型输出。
+- 新增：`record.run = { token?, agentSessionId, startedAt, finishedAt, status: 'running'|'done'|'incomplete'|'error'|'cancelled', missingFiles: [], missingSections: [], headIsolated: boolean, error }`。
+  - 持久化到缓存（不含模型输出；`token` 只在进程内区分新旧 run，不写缓存）。
+  - `record.status` 映射：run `done` → `done`；`incomplete` / `cancelled` → `incomplete`；`error` → `error`。不允许把 incomplete 折叠成 done。
+  - `reviewing` 记录本来就不写缓存；若恢复时遇到 `status: 'running'`，视为中断，恢复为 `error` +「应用重启，上一轮 Agent 审查中断」。
+  - `newReviewRecord` 初始化 `run: null`，`rollNewRound` 清空 `run`，`restoreReviewRecord` 用 `sanitizeRun` 恢复。
 - 旧缓存：恢复时归一化；未知旧字段忽略，不报错。
 
 ## 9. 测试策略
@@ -239,7 +254,7 @@ await agent.whenIdle();
   - `whenIdle` 后缺口补齐；超过重试 → incomplete；
   - Agent 失败 → error；取消/新 head → dispose 旧句柄；
   - 已全覆盖 → done，不额外 follow-up。
-- **预设**：解析 `cordis.patch.yml`，断言 `pr-review-readonly` 存在、`tool-fs` 的 write/edit/applyPatch 为 false、无 bash。
+- **预设**：断言程序化注册的定义：`id`/`order`/`plugins`、`tool-fs` 的 write/edit/applyPatch 为 false、无 bash；不要解析插件 bundle patch。
 - **工具**：现有 `review_*` 工具测试保留；新增 runner 会话拒绝 `review_publish`/`review_conclude` 的测试。
 - **组装**：无 report 时确定性摘要；缺 conclusion → incomplete。
 - **无真实模型调用**：测试不经过 `ctx.llm.stream`。
