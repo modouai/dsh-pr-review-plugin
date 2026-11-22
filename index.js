@@ -1143,7 +1143,10 @@ export function apply(ctx, config) {
   function pruneReviews() {
     if (state.reviews.size <= MAX_REVIEWS) return;
     const candidates = [...state.reviews.entries()]
-      .filter(([, record]) => record.status !== 'reviewing' && (record.published ?? []).length === 0)
+      .filter(([number, record]) => record.status !== 'reviewing'
+        && record.run?.status !== 'running'
+        && !agentRuns.has(number)
+        && (record.published ?? []).length === 0)
       .sort((left, right) => (left[1].finishedAt ?? 0) - (right[1].finishedAt ?? 0));
     let pruned = 0;
     for (const [number, record] of candidates) {
@@ -1278,7 +1281,11 @@ export function apply(ctx, config) {
   /** Create the record shell and kick off the report; safe to call repeatedly. */
   function startReview(number, force) {
     const existing = state.reviews.get(number);
-    if (existing !== undefined && existing.status === 'reviewing') return false;
+    // A live runner owns the record even if a previous failure already wrote a terminal
+    // status; never roll a new round underneath it.
+    if (existing !== undefined && (existing.status === 'reviewing'
+      || existing.run?.status === 'running'
+      || agentRuns.has(number))) return false;
     const now = Date.now();
     let record;
     if (existing === undefined) {
@@ -1303,11 +1310,7 @@ export function apply(ctx, config) {
     const task = runAgentReview(record, generation);
     void task.catch((error) => {
       if (record.reviewGeneration !== generation) return;
-      record.status = 'error';
-      record.error = error instanceof Error ? error.message : String(error);
-      record.finishedAt = Date.now();
-      currentRoundEntry(record).finishedAt = record.finishedAt;
-      scheduleSave();
+      failAgentRun(record, error instanceof Error ? error.message : String(error), generation);
     });
     return true;
   }

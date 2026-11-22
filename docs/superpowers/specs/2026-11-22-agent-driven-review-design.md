@@ -220,7 +220,7 @@ await agent.whenIdle();
 
 ### 6.2 失败
 
-- Agent 创建失败、运行失败、`whenIdle` 失败 → 本轮 `error`，保存可读错误；重试创建新 Agent。同一轮内的重试（`startReview(number, false)`）在 `round` 与 `headSha` 都一致时沿用本轮已有的逐文件分析，只要求本轮重新写 report/conclusion；新 head 仍必须 `rollNewRound`。
+- Agent 创建失败、运行失败、`whenIdle` 失败 → 本轮 `error`，保存可读错误；重试创建新 Agent。同一轮内的重试（`startReview(number, false)`）在 `round` 与 `headSha` 都一致时沿用本轮**已完成**的逐文件分析（不要求重写），`status=error` 或缺失的文件仍计入缺口；report/conclusion 必须本轮重新写回。新 head 仍必须 `rollNewRound`。
 - 工具写入冲突（revision 过期）→ 当前文件写完失败；runner 在 follow-up 中要求重新 `review_get` 后继续；不静默丢结果。
 - 取消/新 head：`cancel`/`dispose` 旧 Agent，清空本轮状态，按新 head 创建新 run；取消必须落成 `cancelled` 终态，不能依赖 Agent 的 `whenIdle` 返回。
 

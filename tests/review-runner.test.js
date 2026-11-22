@@ -298,6 +298,20 @@ test('a same-round retry restates files missing from the failed attempt', async 
   assert.match(prompts[0], /已有 1 个文件的分析会沿用/);
 });
 
+test('a same-round retry still counts a write-failed file as missing', async () => {
+  const record = fakeRecord(['src/a.js', 'src/b.js']);
+  record.round = 3;
+  record.run = { round: 3, headSha: 'abc', status: 'error' };
+  record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: 100 });
+  record.explanations.set('src/b.js', { status: 'error', explanation: null, error: 'stale revision', updatedAt: 100 });
+  const prompts = [];
+  const ctx = fakeCtx((message) => { prompts.push(message.content[0].text); });
+  await runnerFor(record, ctx, { reviewCoverageRetries: 1 }).start();
+  assert.deepEqual(record.run.missingFiles, ['src/b.js']);
+  assert.match(prompts[1], /写回失败/);
+  assert.match(prompts[1], /stale revision/);
+});
+
 test('a cancelled prior run does not relax coverage', async () => {
   const record = fakeRecord(['src/a.js']);
   record.round = 3;
