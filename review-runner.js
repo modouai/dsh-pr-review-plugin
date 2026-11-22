@@ -65,7 +65,7 @@ function missingFilesOf(record, paths, before) {
 const DANGEROUS_GLOBAL_TOOLS = [
   'bash', 'write', 'edit', 'apply_patch',
   'create_worktree', 'working_directory', 'load_workspace_dependencies',
-  'review_publish', 'review_conclude', 'review_run_agent', 'review_probe_agent',
+  'review_publish', 'review_conclude', 'review_run_agent',
 ];
 
 /** Prompt clarification for the read-only agent: the global review-data section names

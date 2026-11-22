@@ -58,7 +58,6 @@ import {
   resolveSelection,
 } from './llm.js';
 import { loadPrompt } from './prompts.js';
-import { probeAgent } from './review-probe.js';
 import { createReviewRunner } from './review-runner.js';
 
 /** Cordis function-plugin name. */
@@ -3394,115 +3393,6 @@ export function apply(ctx, config) {
     ];
   }
 
-  /** Temporary preset diagnostics; removed once the read-only composition is verified. */
-  function presetInfoToolDefinitions(numberProperty, textOutput) {
-    return [
-      {
-        name: 'review_preset_info',
-        description: '开发诊断：读取 pr-review-readonly 的注册结果与声明。',
-        parameters: { type: 'object', additionalProperties: false, properties: {} },
-        output: textOutput,
-        async execute() {
-          const presets = ctx.get('agentPresets');
-          if (presets === undefined || presets === null) return toolText(['宿主没有 agentPresets 服务。']);
-          const ready = await presetReady;
-          let resolved;
-          try {
-            resolved = await presets.resolve(REVIEW_PRESET_ID);
-          } catch (error) {
-            resolved = { error: error instanceof Error ? error.message : String(error) };
-          }
-          let document = null;
-          if (typeof presets.readDocument === 'function') {
-            try {
-              document = await presets.readDocument(REVIEW_PRESET_ID);
-            } catch (error) {
-              document = { error: error instanceof Error ? error.message : String(error) };
-            }
-          }
-          return toolText([
-            `presetReady=${String(ready)}`,
-            '--- resolved ---',
-            JSON.stringify(resolved, null, 2),
-            '--- document ---',
-            JSON.stringify(document, null, 2),
-          ]);
-        },
-      },
-    ];
-  }
-
-  /** Temporary phase-0 probe definitions; removed after the write-boundary check. */
-  function probeToolDefinitions(numberProperty, textOutput) {    return [
-      {
-        name: 'review_probe_agent',
-        description: '开发探针：创建一个只读审查 Agent，让它读取指定文件并写回一条分析；验证后删除。',
-        parameters: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            number: numberProperty,
-            path: { type: 'string', description: '变更文件路径（必须在 review_list_files 清单中）。' },
-            preset: { type: 'string', description: '只读预设 id；默认 pr-review-readonly。' },
-            prompt: { type: 'string', description: '可选：覆盖默认探针提示，用于写边界验证。' },
-          },
-          required: ['path'],
-        },
-        output: textOutput,
-        async execute(args, exec) {
-          const record = requireToolReview(exec.agent, args.number);
-          const filePath = typeof args.path === 'string' ? args.path.trim() : '';
-          if (filePath === '') throw toolError(TOOL_ERROR.invalidArgs, 'path 不能为空');
-          const agents = ctx.get('agents');
-          if (agents === undefined || agents === null || typeof agents.create !== 'function') {
-            return toolText(['宿主没有提供 ctx.agents.create；阶段 0 无法继续。']);
-          }
-          const preset = typeof args.preset === 'string' && args.preset.trim() !== '' ? args.preset.trim() : 'pr-review-readonly';
-          if (preset === REVIEW_PRESET_ID && !(await presetReady)) {
-            return toolText(['只读审查预设注册失败；请检查宿主日志（agentPresets.register）。']);
-          }
-          const customPrompt = typeof args.prompt === 'string' && args.prompt.trim() !== '' ? args.prompt.trim() : null;
-          const selection = resolveSelection(ctx, settings);
-          const beforeUpdatedAt = record.explanations.get(filePath)?.updatedAt ?? 0;
-          const prompt = customPrompt ?? [
-            `你是审查探针，目标 PR #${record.number}，文件 ${filePath}。`,
-            '请严格按以下顺序调用工具，不要修改代码、不要发布评论、不要询问用户：',
-            `1. review_get，number=${record.number}，取得 revision。`,
-            `2. review_list_files，number=${record.number}，确认 ${filePath} 在清单中。`,
-            `3. review_get_file 或 review_get_diff 读取 ${filePath}（number=${record.number}）。`,
-            `4. review_update_analysis，number=${record.number}，path=${filePath}，revision=<第1步的值>，verdict="pass"，summary="阶段0探针：已读取该文件"，issues=[]。`,
-            '完成后用一句话说明是否写回成功。',
-          ].join('\n');
-          let result;
-          try {
-            result = await probeAgent({
-              ctx,
-              agents,
-              cwd: state.workspaceCwd || process.cwd(),
-              preset,
-              provider: selection.provider,
-              model: selection.model,
-              prompt,
-            });
-          } catch (error) {
-            return toolText([`探针失败：${error instanceof Error ? error.message : String(error)}`]);
-          }
-          const entry = record.explanations.get(filePath);
-          const wrote = entry !== undefined && entry.status === 'done'
-            && entry.explanation !== null && entry.explanation !== undefined
-            && (entry.updatedAt ?? 0) > beforeUpdatedAt;
-          const coverage = toolCoverage(record);
-          return toolText([
-            `Agent ${result.agentId} 结束（status=${result.status}）`,
-            `preset=${preset} · cwd=${state.workspaceCwd || process.cwd()}`,
-            `review_update_analysis 写回：${wrote ? '是' : '否'}`,
-            `覆盖：${coverage.analyzed ?? 0}/${coverage.total ?? (record.files ?? []).length}`,
-          ]);
-        },
-      },
-    ];
-  }
-
   /** Mutating review tools: they rewrite review data or drive conclude/publish. */
   /** Phase-1 manual entry: start an agent-driven review run in the background. */
   function agentReviewToolDefinitions(numberProperty, textOutput) {
@@ -4024,8 +3914,6 @@ export function apply(ctx, config) {
     };
     const definitions = [
       ...readOnlyToolDefinitions(numberProperty, textOutput),
-      ...presetInfoToolDefinitions(numberProperty, textOutput),
-      ...probeToolDefinitions(numberProperty, textOutput),
       ...agentReviewToolDefinitions(numberProperty, textOutput),
       ...writeToolDefinitions(numberProperty, textOutput),
       ...actionToolDefinitions(numberProperty, textOutput),
