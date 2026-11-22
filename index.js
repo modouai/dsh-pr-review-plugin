@@ -2820,6 +2820,12 @@ export function apply(ctx, config) {
     return record;
   }
 
+  /** Whether the caller is the read-only review runner, which may write results but not publish. */
+  function isReviewRunnerAgent(record, agent) {
+    const sessionId = record?.run?.agentSessionId;
+    return typeof sessionId === 'string' && sessionId !== '' && agent?.id === sessionId;
+  }
+
   /** Coverage of the current round; recomputed when the persisted record has none. */
   function toolCoverage(record) {
     if (record.coverage !== null && record.coverage !== undefined) return record.coverage;
@@ -3427,6 +3433,9 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
+          if (isReviewRunnerAgent(record, exec.agent)) {
+            throw toolError(TOOL_ERROR.conflict, '审查 Agent 不能嵌套启动另一个审查 Agent。');
+          }
           const agents = ctx.get('agents');
           if (agents === undefined || agents === null || typeof agents.create !== 'function') {
             return toolText(['宿主没有提供 ctx.agents.create；无法启动 Agent 审查。']);
@@ -3697,6 +3706,9 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
+          if (isReviewRunnerAgent(record, exec.agent)) {
+            throw toolError(TOOL_ERROR.conflict, '审查 Agent 不能触发结论生成；请通过 review_update_conclusion 写回结论。');
+          }
           if (record.status === 'reviewing') throw toolError(TOOL_ERROR.conflict, '该 PR 正在审查中，请等审查完成后再生成结论。');
           if (record.report === null || record.report === undefined) throw toolError(TOOL_ERROR.notFound, '还没有审查报告，请先完成审查再生成结论。');
           if (record.concluding !== null && record.concluding !== undefined) throw toolError(TOOL_ERROR.conflict, '结论正在生成中，请稍候。');
@@ -3727,6 +3739,9 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
+          if (isReviewRunnerAgent(record, exec.agent)) {
+            throw toolError(TOOL_ERROR.conflict, '审查 Agent 不能发布评论；发布只能由用户在主对话明确触发。');
+          }
           const includeIds = Array.isArray(args.includeIds) && args.includeIds.length > 0
             ? args.includeIds.filter((id) => typeof id === 'string' && id !== '')
             : null;

@@ -18,9 +18,11 @@ function fakeRecord(files) {
 function fakeCtx(onFollowup) {
   const created = [];
   const disposed = [];
+  const restrictions = [];
   return {
     created,
     disposed,
+    restrictions,
     agents: {
       async create(options) {
         created.push(options);
@@ -32,6 +34,15 @@ function fakeCtx(onFollowup) {
           },
           async whenIdle() {},
         };
+        options.setup?.({
+          tools: {
+            schemas: () => [{ name: 'create_worktree' }, { name: 'review_get' }, { name: 'review_publish' }],
+            restrict: (filter) => {
+              restrictions.push(filter);
+              return () => {};
+            },
+          },
+        }, agent);
         return { agent, async dispose() { disposed.push(options.sessionId); } };
       },
     },
@@ -58,7 +69,7 @@ test('the runner creates a read-only review agent and sends the task prompt', as
   const prompts = [];
   const ctx = fakeCtx((message) => {
     prompts.push(message.content[0].text);
-    record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] } });
+    record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: Date.now() });
   });
   await runnerFor(record, ctx).start();
   assert.equal(ctx.created.length, 1);
@@ -66,6 +77,7 @@ test('the runner creates a read-only review agent and sends the task prompt', as
   assert.equal(ctx.created[0].meta.cwd, '/repo');
   assert.equal(ctx.created[0].agentOptions.provider, 'p');
   assert.equal(ctx.created[0].agentOptions.model, 'm');
+  assert.deepEqual(ctx.restrictions, [{ deny: ['create_worktree', 'review_publish'] }]);
   assert.match(prompts[0], /review_list_files/);
   assert.match(prompts[0], /review_update_analysis/);
   assert.equal(record.run.status, 'done');
@@ -88,7 +100,7 @@ test('missing files trigger bounded follow-ups, then incomplete', async () => {
 test('a paths scope only requires the requested files', async () => {
   const record = fakeRecord(['src/a.js', 'src/b.js']);
   const ctx = fakeCtx(() => {
-    record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] } });
+    record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: Date.now() });
   });
   await createReviewRunner({
     ctx,
@@ -100,6 +112,15 @@ test('a paths scope only requires the requested files', async () => {
   }).start();
   assert.equal(record.run.status, 'done');
   assert.deepEqual(record.run.missingFiles, []);
+});
+
+test('a pre-existing analysis does not satisfy this run coverage', async () => {
+  const record = fakeRecord(['src/a.js']);
+  record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [{ point: '旧意见' }] }, updatedAt: 100 });
+  const ctx = fakeCtx(() => {});
+  await runnerFor(record, ctx, { reviewCoverageRetries: 0 }).start();
+  assert.equal(record.run.status, 'incomplete');
+  assert.deepEqual(record.run.missingFiles, ['src/a.js']);
 });
 
 test('agent errors mark the run error and still dispose', async () => {
