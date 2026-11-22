@@ -1476,7 +1476,6 @@ export function apply(ctx, config) {
       return;
     }
     let runner;
-    let boundAgentId = null;
     try {
       await withAgentSlot(async () => {
         try {
@@ -1493,7 +1492,6 @@ export function apply(ctx, config) {
             onAgent: (agent, sessionId) => {
               const bound = typeof sessionId === 'string' && sessionId !== '' ? sessionId : agentSessionId(agent);
               if (bound === '') return;
-              boundAgentId = bound;
               agentReviewBinding.set(bound, record.number);
             },
             analyze: settings.autoAnalyze !== false,
@@ -1502,7 +1500,6 @@ export function apply(ctx, config) {
           agentRuns.set(record.number, runner);
           await runner.start();
         } finally {
-          if (boundAgentId !== null) agentReviewBinding.delete(boundAgentId);
           if (runner !== undefined && agentRuns.get(record.number) === runner) agentRuns.delete(record.number);
           await worktree.cleanup();
         }
@@ -2256,6 +2253,15 @@ export function apply(ctx, config) {
     return text;
   }
 
+  /** Reject a write from a runner session that no longer owns the current run. */
+  function assertActiveRunnerWrite(record, agent) {
+    const sessionId = agentSessionId(agent);
+    if (sessionId === '') return;
+    if (!agentReviewBinding.has(sessionId)) return;
+    if (record.run?.agentSessionId === sessionId && record.run.status === 'running') return;
+    throw toolError(TOOL_ERROR.conflict, '该审查会话已被新一轮替换或已结束，不能再写入；请使用当前审查会话。');
+  }
+
   /** Reject a write whose revision is stale: the model re-reads and retries. */
   function assertToolRevision(record, revision) {
     const current = record.revision ?? 0;
@@ -2719,6 +2725,7 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
+          assertActiveRunnerWrite(record, exec.agent);
           if (typeof args.path !== 'string' || args.path === '') throw toolError(TOOL_ERROR.invalidArgs, 'path 不能为空');
           const file = (record.files ?? []).find((item) => item.path === args.path);
           if (file === undefined) throw toolError(TOOL_ERROR.notFound, `path 不在变更文件里：${args.path}`);
@@ -2792,6 +2799,7 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
+          assertActiveRunnerWrite(record, exec.agent);
           assertToolRevision(record, args.revision);
           const creating = record.report === null || record.report === undefined;
           if (creating && args.summary === undefined) {
@@ -2875,6 +2883,7 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
+          assertActiveRunnerWrite(record, exec.agent);
           assertToolRevision(record, args.revision);
           const creating = record.conclusion === null || record.conclusion === undefined;
           if (creating && args.summary === undefined) {
@@ -3028,6 +3037,7 @@ export function apply(ctx, config) {
         output: textOutput,
         async execute(args, exec) {
           const record = requireToolReview(exec.agent, args.number);
+          assertActiveRunnerWrite(record, exec.agent);
           if (record.report === null || record.report === undefined) {
             throw toolError(TOOL_ERROR.notFound, '还没有总体报告：请先完成审查（review_list_prs 可看状态）。');
           }

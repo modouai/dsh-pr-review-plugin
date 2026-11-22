@@ -572,28 +572,10 @@ git commit -m "test(review): verify the read-only agent boundary"
 
 - [ ] **Step 1: 维护每个 PR 的 runner**
 
-```js
-const runners = new Map(); // number → runner
-
-async function startAgentReview(record) {
-  const existing = runners.get(record.number);
-  if (existing !== undefined) await existing.cancel();
-  const selection = resolveSelection(ctx, settings);
-  const runner = createReviewRunner({
-    ctx,
-    settings,
-    record,
-    selection,
-    cwd: evidenceWorkspace() || state.workspaceCwd || process.cwd(),
-    onChange: () => scheduleSave(),
-  });
-  runners.set(record.number, runner);
-  try {
-    await runner.start();
-  } finally {
-    if (runners.get(record.number) === runner) runners.delete(record.number);
-  }
-}
+```text
+实现见 index.js 的 runAgentReview：先 prepareReviewContext → prepareReviewWorktree
+（PR head 的 detached worktree，失败 fail-closed）→ withAgentSlot（全局 2 个）→
+createReviewRunner。旧 evidenceWorkspace 示例已删除，不要按它实现。
 ```
 
 - [ ] **Step 2: 替换触发点**

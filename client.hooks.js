@@ -621,7 +621,8 @@ window.__ModuleLoader__.load({
           const reviewTimer = setInterval(() => {
             const current = stateRef.current;
             if (current.prNumber === null) return;
-            if (current.review !== null && current.review.status !== 'reviewing') return;
+            const running = current.review?.run?.status === 'running';
+            if (current.review !== null && current.review.status !== 'reviewing' && running !== true) return;
             void loadReview(current.prNumber);
           }, 4000);
           const listTimer = setInterval(() => {
