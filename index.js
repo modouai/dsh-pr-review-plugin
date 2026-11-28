@@ -2222,6 +2222,16 @@ export function apply(ctx, config) {
     if (typeof explanation.logic === 'string' && explanation.logic !== '') {
       lines.push(`代码逻辑：${explanation.logic}`);
     }
+    const walkthrough = Array.isArray(explanation.walkthrough) ? explanation.walkthrough : [];
+    if (walkthrough.length > 0) {
+      lines.push('逐段分析：');
+      for (const step of walkthrough) {
+        const hunk = Number.isInteger(step?.hunk) && step.hunk > 0 ? `（hunk ${step.hunk}）` : '';
+        const title = typeof step?.title === 'string' && step.title !== '' ? step.title : '段落';
+        const detail = typeof step?.detail === 'string' ? step.detail : '';
+        lines.push(`- ${title}${hunk}：${detail}`);
+      }
+    }
     const findings = findingsOf(explanation);
     if (findings.length > 0) {
       lines.push('审查意见：');
@@ -2547,7 +2557,7 @@ export function apply(ctx, config) {
       },
       {
         name: 'review_get_analysis',
-        description: '读取单个变更文件的逐文件分析：结论、代码逻辑与审查意见（含建议与行号）。',
+        description: '读取单个变更文件的逐文件分析：结论、代码逻辑、逐段分析与审查意见（含建议与行号）。',
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -2749,7 +2759,7 @@ export function apply(ctx, config) {
     return [
       {
         name: 'review_update_analysis',
-        description: '更新单个变更文件的逐文件分析（结论/摘要/代码逻辑/审查意见），改写审查数据，右栏面板随后可见。必须带 review_get 返回的 revision 做乐观锁。',
+        description: '更新单个变更文件的逐文件分析（结论/摘要/代码逻辑/逐段分析/审查意见），改写审查数据，右栏面板随后可见。必须带 review_get 返回的 revision 做乐观锁。',
         parameters: {
           type: 'object',
           additionalProperties: false,
@@ -2758,7 +2768,32 @@ export function apply(ctx, config) {
             revision: { type: 'integer', description: 'review_get 返回的 revision。' },
             verdict: { type: 'string', enum: ['pass', 'suggest', 'block'], description: '该文件的结论。' },
             summary: { type: 'string', description: '该文件的一句话结论。' },
-            logic: { type: 'string', description: '代码逻辑说明（整体，不复述 diff）。' },
+            logic: { type: 'string', description: '代码逻辑说明（整体，不复述 diff）：先用 1-2 句说明这个文件/函数原本做什么、这次整体变成怎样，再按执行顺序分行讲关键步骤与分支；每个标识符首次出现时说清它是什么，不要把多个函数名挤进一句。' },
+            walkthrough: {
+              type: 'array',
+              description: '逐段分析（传入即整体替换，不传保留原值）：每个 diff hunk 一条，按 @@ 出现顺序；面板上点 hunk 即可看到。',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  title: { type: 'string', description: '段落/函数名 + 一句话作用；不要写 hunk 编号。' },
+                  detail: { type: 'string', description: '这段做了什么、为什么需要、影响谁、有什么风险；2-5 句，不复述 logic 的整体链路，不写审查意见。' },
+                  hunk: { type: 'integer', description: '对应的 diff hunk 序号（从 1 开始，按 @@ 出现顺序）；不确定写 0。' },
+                  context: {
+                    type: ['object', 'null'],
+                    description: '该段改动所属函数/类的完整范围（用于在 diff 里展开上下文）：{ label, startLine, endLine }，行号基于 PR head 文件；不在任何函数/类内或不确定写 null。',
+                    additionalProperties: false,
+                    properties: {
+                      label: { type: 'string' },
+                      startLine: { type: 'integer' },
+                      endLine: { type: 'integer' },
+                    },
+                    required: ['label', 'startLine', 'endLine'],
+                  },
+                },
+                required: ['title', 'detail'],
+              },
+            },
             issues: {
               type: 'array',
               items: { type: 'object', additionalProperties: true },
@@ -2795,7 +2830,9 @@ export function apply(ctx, config) {
             verdict: args.verdict ?? before?.verdict,
             summary: args.summary ?? before?.summary,
             logic: args.logic ?? before?.logic,
-            walkthrough: before?.walkthrough,
+            // An explicit walkthrough replaces the list ([] clears it); omitting it keeps
+            // the existing segments, so a summary-only edit never drops them.
+            walkthrough: args.walkthrough === undefined ? before?.walkthrough : args.walkthrough,
             changes: before?.changes,
             issues: issues ?? before?.issues,
           });
@@ -2812,6 +2849,7 @@ export function apply(ctx, config) {
           return toolText([
             `已更新分析：${args.path}（revision ${record.revision}）`,
             `结论：${next.verdict} · ${next.summary}`,
+            `逐段分析 ${next.walkthrough.length} 段`,
             `意见 ${next.issues.length} 条`,
             '需要继续修改请重新 review_get 取 revision。',
           ]);

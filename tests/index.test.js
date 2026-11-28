@@ -1179,6 +1179,64 @@ test('review_update_analysis normalizes the written explanation and drops the le
   }
 });
 
+test('review_update_analysis writes the per-segment walkthrough and keeps it across partial edits', async () => {
+  const plugin = await setup();
+  try {
+    const walkthrough = [
+      { title: 'loadConfig：读取配置', detail: '读取环境变量并合并默认值。', hunk: 1, context: { label: 'loadConfig', startLine: 10, endLine: 24 } },
+      { title: 'applyPatch：应用覆盖', detail: '把覆盖项写回配置。', hunk: 2, context: null },
+    ];
+    const written = await plugin.runTool('review_update_analysis', {
+      path: 'src/a.js',
+      revision: 0,
+      verdict: 'suggest',
+      summary: '逐段分析写回',
+      walkthrough,
+    });
+    assert.match(written, /逐段分析 2 段/);
+
+    const stored = await plugin.review();
+    assert.deepEqual(stored.explanations[0].explanation.walkthrough, walkthrough);
+
+    // 只改 summary 的写回不能丢掉已有段落：walkthrough 未传即保留。
+    const partial = await plugin.runTool('review_update_analysis', {
+      path: 'src/a.js',
+      revision: stored.revision,
+      summary: '只改摘要',
+    });
+    assert.match(partial, /逐段分析 2 段/);
+    const kept = await plugin.review();
+    assert.deepEqual(kept.explanations[0].explanation.walkthrough, walkthrough);
+
+    // 显式传空数组才是清空。
+    await plugin.runTool('review_update_analysis', {
+      path: 'src/a.js',
+      revision: kept.revision,
+      walkthrough: [],
+    });
+    const cleared = await plugin.review();
+    assert.deepEqual(cleared.explanations[0].explanation.walkthrough, []);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
+test('review_get_analysis surfaces the walkthrough to the conversation', async () => {
+  const plugin = await setup();
+  try {
+    await plugin.runTool('review_update_analysis', {
+      path: 'src/a.js',
+      revision: 0,
+      walkthrough: [{ title: 'loadConfig：读取配置', detail: '读取环境变量并合并默认值。', hunk: 1 }],
+    });
+    const text = await plugin.runTool('review_get_analysis', { path: 'src/a.js' });
+    assert.match(text, /逐段分析：/);
+    assert.match(text, /loadConfig：读取配置（hunk 1）：读取环境变量并合并默认值。/);
+  } finally {
+    await plugin.dispose();
+  }
+});
+
 test('review_update_conclusion rewrites the current conclusion (the next publish body)', async () => {
   const plugin = await setup();
   try {
