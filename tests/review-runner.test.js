@@ -129,6 +129,25 @@ test('the runner creates a read-only review agent and sends the task prompt', as
   assert.equal(ctx.disposed.length, 1);
 });
 
+test('the task prompt asks for a per-hunk walkthrough on every file analysis', async () => {
+  const record = fakeRecord(['src/a.js']);
+  const prompts = [];
+  const ctx = fakeCtx((message) => {
+    prompts.push(message.content[0].text);
+    record.explanations.set('src/a.js', { status: 'done', explanation: { issues: [] }, updatedAt: Date.now() });
+    record.report = { verdict: 'pass', summary: '报告', risks: [], order: [], focus: {} };
+    record.reportUpdatedAt = Date.now();
+    record.conclusion = { verdict: 'pass', summary: '结论', blockers: [], suggestions: [], nextSteps: [] };
+    record.conclusionAt = Date.now();
+  });
+  await runnerFor(record, ctx).start();
+  assert.match(prompts[0], /walkthrough/);
+  assert.match(prompts[0], /每个 hunk 写一条/);
+  assert.match(prompts[0], /title/);
+  assert.match(prompts[0], /startLine/);
+  assert.match(prompts[0], /logic 只写整体/);
+});
+
 test('the runner exposes the created agent for PR binding', async () => {
   const record = fakeRecord(['src/a.js']);
   const seen = [];
