@@ -2768,7 +2768,7 @@ export function apply(ctx, config) {
             revision: { type: 'integer', description: 'review_get 返回的 revision。' },
             verdict: { type: 'string', enum: ['pass', 'suggest', 'block'], description: '该文件的结论。' },
             summary: { type: 'string', description: '该文件的一句话结论。' },
-            logic: { type: 'string', description: '代码逻辑说明（整体，不复述 diff）。' },
+            logic: { type: 'string', description: '代码逻辑说明（整体，不复述 diff）：先用 1-2 句说明这个文件/函数原本做什么、这次整体变成怎样，再按执行顺序分行讲关键步骤与分支；每个标识符首次出现时说清它是什么，不要把多个函数名挤进一句。' },
             walkthrough: {
               type: 'array',
               description: '逐段分析（传入即整体替换，不传保留原值）：每个 diff hunk 一条，按 @@ 出现顺序；面板上点 hunk 即可看到。',

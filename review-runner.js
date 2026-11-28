@@ -68,6 +68,8 @@ function taskPrompt(record, cwd, analyzeFiles, cwdNote, retryNote = '') {
           '   - path 必须是变更文件清单中的路径，revision 用最近一次 `review_get` 返回的值。',
           '   - 每个 hunk 写一条 walkthrough 段落：`walkthrough: [{ title, detail, hunk, context }]`；hunk 是该文件 diff 中 `@@` 的序号（从 1 开始，按出现顺序）。',
           '   - title 写「段落/函数名 + 一句话作用」，不要写 hunk 编号；detail 2-5 句，讲清这段做了什么、为什么需要、影响谁、有什么风险，面向第一次读这段代码的人；context 写该段所属完整函数/类的 { label, startLine, endLine }（行号基于 PR head 文件），不在任何函数/类内或不确定写 null。',
+          '   - `logic` 写给读代码的人看，不是压缩版调用图：先用 1-2 句说这个文件/函数原本做什么、这次整体变成怎样，再按执行顺序分行讲关键步骤与分支，每行只讲一件事。',
+          '   - `logic` 里每个标识符第一次出现时说清它是什么（例如「Xxx：读取配置并合并默认值」），不要把多个函数名塞进一句、用分号串成一段；「短路 / 透传 / 兜底 / 三支」这类代码腔换成直白说法。',
           '   - logic 只写整体链路，walkthrough 只写局部改动，两者不要互相复述；审查意见只写进 issues。',
           '   - issues 每条只写一个核心问题，写清影响与修法；severity 只有 block / suggest。',
           '   - 没有发现问题时 issues 写空数组，并在 summary 里说明依据。',
